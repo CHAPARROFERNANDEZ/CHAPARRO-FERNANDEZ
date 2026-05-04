@@ -286,27 +286,84 @@ def pagos_notas_hasta_hoy(df_cal: pd.DataFrame) -> pd.DataFrame:
     ].copy().sort_values(["fecha", "nota"])
 
 
-def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame) -> pd.DataFrame:
+def obtener_observacion_previa_nota(df_cal: pd.DataFrame, nota: int, fecha_pago):
+    """Devuelve la última observación de la nota en o antes del día de pago."""
+    if df_cal is None or df_cal.empty:
+        return None
+    fecha_pago = pd.Timestamp(fecha_pago).normalize()
+    obs = df_cal[
+        (df_cal["nota"] == nota)
+        & (df_cal["tipo_evento"] == "OBSERVACION")
+        & (df_cal["fecha"].notna())
+        & (df_cal["fecha"] <= fecha_pago)
+    ].copy().sort_values("fecha")
+    return None if obs.empty else obs.iloc[-1]["fecha"]
+
+
+def resumen_detalle_observacion(detalle_obs: pd.DataFrame) -> str:
+    if detalle_obs is None or detalle_obs.empty:
+        return ""
+    partes = []
+    for _, row in detalle_obs.iterrows():
+        ticker = row.get("ticker", "")
+        estado = row.get("estado", "")
+        cierre = row.get("cierre_usado", None)
+        barrera = row.get("precio_barrera", None)
+        if pd.notna(cierre) and pd.notna(barrera):
+            partes.append(f"{ticker}: {estado} cierre {float(cierre):.2f} / barrera {float(barrera):.2f}")
+        else:
+            partes.append(f"{ticker}: {estado}")
+    return " | ".join(partes)
+
+
+def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal: pd.DataFrame | None = None, df_control: pd.DataFrame | None = None) -> pd.DataFrame:
     filas = []
+    cache_observaciones = {}
+
     for _, evento in df_pagos.iterrows():
         nota = evento.get("nota")
         fecha_pago = evento.get("fecha")
         if pd.isna(nota) or pd.isna(fecha_pago):
             continue
-        activas = inversiones_activas_para_nota(df_inv, int(nota), fecha_pago)
+
+        nota_int = int(nota)
+        fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, fecha_pago) if df_cal is not None else None
+
+        resultado_obs = "NO_EVALUADA"
+        detalle_obs = pd.DataFrame()
+        ingreso_habilitado = True
+
+        if fecha_obs is not None and df_control is not None and not df_control.empty:
+            clave = (nota_int, pd.Timestamp(fecha_obs).normalize())
+            if clave not in cache_observaciones:
+                cache_observaciones[clave] = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency")
+            resultado_obs, detalle_obs = cache_observaciones[clave]
+
+            # Regla de negocio: si en la observación la nota queda por debajo de contingencia,
+            # la compañía no ingresa cupón, pero el pago al inversor se mantiene.
+            if resultado_obs == "NEGATIVA":
+                ingreso_habilitado = False
+
+        activas = inversiones_activas_para_nota(df_inv, nota_int, fecha_pago)
         for _, fila in activas.iterrows():
             capital = float(fila.get("capital_invertido", 0))
-            cobro_compania = capital * float(fila.get("interes_nota_anual", 0)) / 12
+            cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12
+            cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
             pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12
             filas.append({
                 "fecha_pago": fecha_pago,
-                "nota": int(nota),
+                "nota": nota_int,
+                "fecha_observacion_usada": fecha_obs,
+                "resultado_observacion": resultado_obs,
+                "detalle_observacion": resumen_detalle_observacion(detalle_obs),
+                "ingreso_habilitado": "SI" if ingreso_habilitado else "NO",
                 "id_inversion": fila.get("id_inversion", ""),
                 "inversor": fila.get("inversor", ""),
                 "cuenta_cobro": fila.get("cuenta_cobro", "SIN CLASIFICAR"),
                 "capital_invertido": capital,
                 "interes_nota_anual": fila.get("interes_nota_anual", 0),
                 "interes_inversor_anual": fila.get("interes_inversor_anual", 0),
+                "cobro_teorico_compania": cobro_teorico,
                 "cobro_compania": cobro_compania,
                 "pago_inversor": pago_inversor,
                 "beneficio_empresa": cobro_compania - pago_inversor,
@@ -314,9 +371,9 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame) -> pd.D
     return pd.DataFrame(filas)
 
 
-def resumen_notas_mes(df_inv: pd.DataFrame, df_cal: pd.DataFrame, anio: int, mes: int):
+def resumen_notas_mes(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
     pagos = pagos_notas_mes(df_cal, anio, mes)
-    detalle = preparar_detalle_notas(df_inv, pagos)
+    detalle = preparar_detalle_notas(df_inv, pagos, df_cal=df_cal, df_control=df_control)
     if detalle.empty:
         return 0.0, 0.0, 0.0, detalle, pagos
     return (
@@ -473,7 +530,7 @@ def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incl
 
 
 def seccion_notas():
-    df_inv, df_cal, _ = cargar_excel_completo()
+    df_inv, df_cal, df_control = cargar_excel_completo()
     st.header("🧾 Consultas Notas")
 
     consulta = st.selectbox(
@@ -524,7 +581,7 @@ def seccion_notas():
 
     if st.button("Calcular", key=f"calc_notas_{consulta}"):
         if consulta in consultas_mes:
-            total_cobrado, total_pagado, total_beneficio, detalle, pagos = resumen_notas_mes(df_inv, df_cal, anio, mes)
+            total_cobrado, total_pagado, total_beneficio, detalle, pagos = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
             if consulta == "¿Cuánto cobrará la compañía en un mes de notas?":
                 mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Cobra compañía", fmt(total_cobrado))])
                 resumen_cuentas = resumen_por_cuenta_cobro(detalle)
@@ -557,7 +614,7 @@ def seccion_notas():
                     st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]), use_container_width=True)
 
         elif consulta == "¿Cuánto ha cobrado la compañía desde el inicio?":
-            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal))
+            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
             total = detalle["cobro_compania"].sum() if not detalle.empty else 0
             mostrar_metricas("Resultado", [("Total cobrado compañía", fmt(total))])
             resumen = resumen_por_cuenta_cobro(detalle)
@@ -565,12 +622,12 @@ def seccion_notas():
                 st.dataframe(preparar_tabla_monetaria(resumen, ["cobro_compania"]), use_container_width=True)
 
         elif consulta == "¿Cuánto se ha pagado a inversores desde el inicio?":
-            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal))
+            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
             total = detalle["pago_inversor"].sum() if not detalle.empty else 0
             mostrar_metricas("Resultado", [("Total pagado inversores", fmt(total))])
 
         elif consulta == "¿Cuál es el beneficio total desde el inicio?":
-            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal))
+            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
             total = detalle["beneficio_empresa"].sum() if not detalle.empty else 0
             mostrar_metricas("Resultado", [("Beneficio total", fmt(total))])
 
@@ -1019,7 +1076,7 @@ def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame
 
 
 def seccion_sistema_fondo():
-    df_inv, df_cal, _ = cargar_excel_completo()
+    df_inv, df_cal, df_control = cargar_excel_completo()
     df_calls = leer_hoja_excel("CALENDARIO_CALLS")
     if not df_calls.empty:
         if "fecha_call" in df_calls.columns:
@@ -1036,7 +1093,7 @@ def seccion_sistema_fondo():
     if consulta == "Panel global":
         activas = inversiones_activas_global(df_inv)
         activas["activo"] = activas.apply(detectar_activo, axis=1) if not activas.empty else []
-        c_global, p_global, b_global, _detalle_dummy, _ = resumen_notas_mes(df_inv, df_cal, pd.Timestamp.today().year, pd.Timestamp.today().month)
+        c_global, p_global, b_global, _detalle_dummy, _ = resumen_notas_mes(df_inv, df_cal, df_control, pd.Timestamp.today().year, pd.Timestamp.today().month)
         c1, c2, c3 = st.columns(3)
         c1.metric("Capital activo total", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))
         c2.metric("Cobro notas mes actual", fmt(c_global))
@@ -1095,7 +1152,7 @@ def seccion_sistema_fondo():
         c1, c2 = st.columns(2)
         anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year))
         mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month))
-        c_notas, p_notas, b_notas, d_notas, _ = resumen_notas_mes(df_inv, df_cal, anio, mes)
+        c_notas, p_notas, b_notas, d_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
         detalles = []
         for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
