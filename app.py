@@ -601,6 +601,502 @@ def seccion_notas():
             st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
 
 
+
+# =========================
+# SECCIONES EXTRA: ALERTAS, CALENDARIO, SISTEMA GLOBAL Y EXTRACTOS
+# =========================
+from io import BytesIO
+import zipfile
+
+
+def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
+    try:
+        df = pd.read_excel(ARCHIVO, sheet_name=nombre_hoja)
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def normalizar_barrera(valor):
+    if pd.isna(valor):
+        return None
+    try:
+        valor = float(valor)
+        return valor / 100 if valor > 1 else valor
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def obtener_ultimo_precio(ticker: str):
+    if yf is None:
+        return None
+    try:
+        hist = yf.Ticker(str(ticker).strip().upper()).history(period="5d")
+        if hist.empty or "Close" not in hist.columns:
+            return None
+        return float(hist["Close"].dropna().iloc[-1])
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def obtener_cierre_ticker_fecha(ticker: str, fecha_objetivo):
+    if yf is None:
+        return None
+    try:
+        fecha_objetivo = pd.Timestamp(fecha_objetivo).normalize()
+        inicio = fecha_objetivo - pd.Timedelta(days=10)
+        fin = fecha_objetivo + pd.Timedelta(days=2)
+        data = yf.download(
+            str(ticker).strip().upper(),
+            start=inicio.strftime("%Y-%m-%d"),
+            end=fin.strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=False,
+        )
+        if data.empty:
+            return None
+        if isinstance(data.columns, pd.MultiIndex):
+            if "Close" in data.columns.get_level_values(0):
+                cierres = data["Close"].iloc[:, 0].dropna()
+            else:
+                return None
+        else:
+            if "Close" not in data.columns:
+                return None
+            cierres = data["Close"].dropna()
+        cierres.index = pd.to_datetime(cierres.index).normalize()
+        cierres = cierres[cierres.index <= fecha_objetivo]
+        if cierres.empty:
+            return None
+        return float(cierres.iloc[-1])
+    except Exception:
+        return None
+
+
+def columna_barrera_control(df_control: pd.DataFrame, preferida="contingency"):
+    for col in [preferida, "contingency", "barrera_cupon", "barrera_capital"]:
+        if col in df_control.columns:
+            return col
+    return None
+
+
+def evaluar_nota_en_fecha(df_control: pd.DataFrame, nota: int, fecha_obs, preferida="contingency") -> tuple[str, pd.DataFrame]:
+    if df_control.empty:
+        return "SIN_CONTROL", pd.DataFrame()
+    sub = df_control[df_control.get("nota") == nota].copy()
+    if sub.empty:
+        return "SIN_CONTROL", pd.DataFrame()
+    barrera_col = columna_barrera_control(sub, preferida=preferida)
+    if barrera_col is None or "precio_compra" not in sub.columns or "ticker" not in sub.columns:
+        return "SIN_COLUMNAS", pd.DataFrame()
+    filas = []
+    todo_ok = True
+    for _, row in sub.iterrows():
+        ticker = row.get("ticker", "")
+        compra = pd.to_numeric(row.get("precio_compra"), errors="coerce")
+        barrera_pct = normalizar_barrera(row.get(barrera_col))
+        if pd.isna(compra) or barrera_pct is None:
+            filas.append({"ticker": ticker, "estado": "FALTAN DATOS"})
+            todo_ok = False
+            continue
+        precio_barrera = float(compra) * float(barrera_pct)
+        cierre = obtener_cierre_ticker_fecha(ticker, fecha_obs)
+        if cierre is None:
+            filas.append({"ticker": ticker, "precio_compra": compra, "barrera": precio_barrera, "cierre": None, "estado": "SIN DATO"})
+            todo_ok = False
+            continue
+        estado = "OK" if cierre >= precio_barrera else "NO OK"
+        if estado != "OK":
+            todo_ok = False
+        filas.append({
+            "ticker": ticker,
+            "precio_compra": float(compra),
+            "barrera_%": barrera_pct,
+            "precio_barrera": precio_barrera,
+            "cierre_usado": cierre,
+            "estado": estado,
+        })
+    return ("POSITIVA" if todo_ok else "NEGATIVA"), pd.DataFrame(filas)
+
+
+def seccion_alertas_notas():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.header("🚨 Alertas Notas")
+    fecha = st.date_input("Fecha de consulta", value=pd.Timestamp.today().date())
+    fecha = pd.Timestamp(fecha).normalize()
+
+    if df_cal.empty:
+        st.warning("No existe la hoja CALENDARIO_NOTAS o está vacía.")
+        return
+
+    eventos = df_cal[df_cal["fecha"] == fecha].copy()
+    st.subheader(f"Eventos del {fecha.strftime('%d/%m/%Y')}")
+
+    if eventos.empty:
+        st.info("No hay observaciones ni pagos para esta fecha.")
+    else:
+        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+
+    observaciones = eventos[eventos["tipo_evento"] == "OBSERVACION"].copy() if not eventos.empty else pd.DataFrame()
+    pagos = eventos[eventos["tipo_evento"] == "PAGO"].copy() if not eventos.empty else pd.DataFrame()
+
+    if not observaciones.empty:
+        st.subheader("Evaluación de observaciones")
+        for _, row in observaciones.iterrows():
+            nota = int(row["nota"])
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, fecha, preferida="contingency")
+            if resultado == "POSITIVA":
+                st.success(f"NOTA {nota}: observación POSITIVA")
+            elif resultado == "NEGATIVA":
+                st.error(f"NOTA {nota}: observación NEGATIVA")
+            else:
+                st.warning(f"NOTA {nota}: {resultado}")
+            if not detalle.empty:
+                st.dataframe(preparar_tabla_monetaria(detalle, ["precio_compra", "precio_barrera", "cierre_usado"]), use_container_width=True)
+
+    if not pagos.empty:
+        st.subheader("Pagos del día")
+        for _, row in pagos.iterrows():
+            nota = int(row["nota"])
+            previas = df_cal[(df_cal["nota"] == nota) & (df_cal["tipo_evento"] == "OBSERVACION") & (df_cal["fecha"] < fecha)].sort_values("fecha")
+            if previas.empty:
+                st.warning(f"NOTA {nota}: pago hoy, pero no he encontrado observación previa.")
+                continue
+            fecha_obs = previas.iloc[-1]["fecha"]
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, fecha_obs, preferida="contingency")
+            if resultado == "POSITIVA":
+                st.success(f"NOTA {nota}: pago hoy. La observación previa del {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y')} fue positiva.")
+            elif resultado == "NEGATIVA":
+                st.error(f"NOTA {nota}: pago hoy. La observación previa del {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y')} fue negativa.")
+            else:
+                st.warning(f"NOTA {nota}: pago hoy. Resultado observación previa: {resultado}")
+            if not detalle.empty:
+                with st.expander(f"Detalle NOTA {nota}"):
+                    st.dataframe(preparar_tabla_monetaria(detalle, ["precio_compra", "precio_barrera", "cierre_usado"]), use_container_width=True)
+
+
+def seccion_alertas_semana():
+    _, df_cal, _ = cargar_excel_completo()
+    st.header("📆 Alertas Semana")
+    fecha_inicio = st.date_input("Fecha de inicio", value=pd.Timestamp.today().date())
+    fecha_inicio = pd.Timestamp(fecha_inicio).normalize()
+    fecha_fin = fecha_inicio + pd.Timedelta(days=6)
+    st.caption(f"Del {fecha_inicio.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}")
+
+    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= fecha_inicio) & (df_cal["fecha"] <= fecha_fin)].copy().sort_values(["fecha", "tipo_evento", "nota"])
+    if eventos.empty:
+        st.info("No hay observaciones ni pagos esta semana.")
+        return
+    observaciones = eventos[eventos["tipo_evento"] == "OBSERVACION"]
+    pagos = eventos[eventos["tipo_evento"] == "PAGO"]
+    c1, c2 = st.columns(2)
+    c1.metric("Observaciones", len(observaciones))
+    c2.metric("Pagos", len(pagos))
+    st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+
+
+def eventos_calendario_mes(df_cal: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
+    inicio = pd.Timestamp(anio, mes, 1)
+    fin = inicio + pd.offsets.MonthEnd(0)
+    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= inicio) & (df_cal["fecha"] <= fin)].copy()
+    if eventos.empty:
+        return eventos
+    eventos["semana_mes"] = ((eventos["fecha"].dt.day - 1) // 7) + 1
+    return eventos.sort_values(["fecha", "nota", "tipo_evento"])
+
+
+def seccion_calendario_notas():
+    _, df_cal, _ = cargar_excel_completo()
+    st.header("🗓️ Calendario Notas")
+    consulta = st.selectbox("Consulta", ["Esta semana", "Mes completo", "Semana concreta de un mes", "Exportar calendario de un mes"])
+
+    if consulta == "Esta semana":
+        hoy = pd.Timestamp.today().normalize()
+        inicio = hoy - pd.Timedelta(days=hoy.weekday())
+        fin = inicio + pd.Timedelta(days=6)
+        eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= inicio) & (df_cal["fecha"] <= fin)].copy().sort_values(["fecha", "nota", "tipo_evento"])
+        st.caption(f"Del {inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}")
+        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True) if not eventos.empty else st.info("No hay eventos esta semana.")
+
+    else:
+        c1, c2 = st.columns(2)
+        anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year, key=f"cal_{consulta}_anio"))
+        mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month, key=f"cal_{consulta}_mes"))
+        eventos = eventos_calendario_mes(df_cal, anio, mes)
+
+        if consulta == "Mes completo":
+            st.subheader(f"Calendario de {nombre_mes_es(mes)} {anio}")
+            st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True) if not eventos.empty else st.info("No hay eventos ese mes.")
+
+        elif consulta == "Semana concreta de un mes":
+            semana = int(st.number_input("Semana del mes", min_value=1, max_value=5, value=1))
+            filtrado = eventos[eventos["semana_mes"] == semana].copy() if not eventos.empty else pd.DataFrame()
+            st.dataframe(preparar_tabla_monetaria(filtrado, []), use_container_width=True) if not filtrado.empty else st.info("No hay eventos en esa semana.")
+
+        elif consulta == "Exportar calendario de un mes":
+            if eventos.empty:
+                st.info("No hay eventos para exportar en ese mes.")
+            else:
+                salida = BytesIO()
+                exportar = eventos.copy()
+                exportar["fecha"] = exportar["fecha"].dt.strftime("%d/%m/%Y")
+                with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+                    exportar.to_excel(writer, index=False, sheet_name="CALENDARIO")
+                st.download_button(
+                    "Descargar Excel",
+                    data=salida.getvalue(),
+                    file_name=f"calendario_notas_{mes}_{anio}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+
+def detectar_activo(row):
+    tipo = limpiar_texto(row.get("tipo_inversion", ""))
+    subtipo = limpiar_texto(row.get("subtipo_inversion", ""))
+    nombre = limpiar_texto(row.get("nombre_activo", ""))
+    if tipo == "nota" or nombre.startswith("nota"):
+        return "notas"
+    for activo in ["paraguay", "motoclick", "futbol", "fútbol"]:
+        if activo in subtipo or activo in nombre:
+            return "futbol" if activo == "fútbol" else activo
+    return "otros"
+
+
+def excluir_call(df: pd.DataFrame) -> pd.DataFrame:
+    if "motivo" not in df.columns:
+        return df.copy()
+    return df[df["motivo"].apply(limpiar_texto) != "call"].copy()
+
+
+def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame:
+    if fecha is None:
+        fecha = pd.Timestamp.today().normalize()
+    fecha = pd.Timestamp(fecha).normalize()
+    trabajo = excluir_call(df_inv)
+    return trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))].copy()
+
+
+def seccion_sistema_fondo():
+    df_inv, df_cal, _ = cargar_excel_completo()
+    df_calls = leer_hoja_excel("CALENDARIO_CALLS")
+    if not df_calls.empty:
+        if "fecha_call" in df_calls.columns:
+            df_calls["fecha_call"] = pd.to_datetime(df_calls["fecha_call"], errors="coerce", dayfirst=True).dt.normalize()
+        if "nota" in df_calls.columns:
+            df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce").astype("Int64")
+    st.header("🏦 Sistema Fondo")
+    consulta = st.selectbox("Consulta", [
+        "Panel global", "Capital activo total", "Capital activo por activo", "Capital activo por inversor",
+        "Capital activo de un inversor concreto", "Resumen mensual global", "Validaciones", "Calls de esta semana",
+        "Calls de este mes", "Próximos calls", "Calls vencidos", "Capital desglosado por inversor"
+    ])
+
+    if consulta == "Panel global":
+        activas = inversiones_activas_global(df_inv)
+        activas["activo"] = activas.apply(detectar_activo, axis=1) if not activas.empty else []
+        c_global, p_global, b_global, _detalle_dummy, _ = resumen_notas_mes(df_inv, df_cal, pd.Timestamp.today().year, pd.Timestamp.today().month)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Capital activo total", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))
+        c2.metric("Cobro notas mes actual", fmt(c_global))
+        c3.metric("Beneficio notas mes actual", fmt(b_global))
+        if not activas.empty:
+            resumen = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
+            st.subheader("Capital activo por activo")
+            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
+        proximos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= pd.Timestamp.today().normalize())].sort_values("fecha").head(10)
+        st.subheader("Próximos eventos")
+        st.dataframe(preparar_tabla_monetaria(proximos, []), use_container_width=True) if not proximos.empty else st.info("No hay próximos eventos.")
+
+    elif consulta == "Capital activo total":
+        activas = inversiones_activas_global(df_inv)
+        mostrar_metricas("Resultado", [("Capital activo total", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))])
+
+    elif consulta == "Capital activo por activo":
+        activas = inversiones_activas_global(df_inv)
+        if activas.empty:
+            st.info("No hay inversiones activas.")
+        else:
+            activas["activo"] = activas.apply(detectar_activo, axis=1)
+            resumen = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
+            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
+
+    elif consulta == "Capital activo por inversor":
+        activas = inversiones_activas_global(df_inv)
+        if activas.empty:
+            st.info("No hay inversiones activas.")
+        else:
+            resumen = activas.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
+            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
+
+    elif consulta in ["Capital activo de un inversor concreto", "Capital desglosado por inversor"]:
+        inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
+        nombre = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
+        if consulta == "Capital desglosado por inversor":
+            c1, c2 = st.columns(2)
+            anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year))
+            mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month))
+            fecha = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
+        else:
+            fecha = pd.Timestamp.today().normalize()
+        activas = inversiones_activas_global(df_inv, fecha=fecha)
+        filtrado = activas[activas["inversor"].astype(str).str.lower() == str(nombre).lower()].copy()
+        mostrar_metricas("Resultado", [("Capital activo", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
+        if not filtrado.empty:
+            filtrado["activo"] = filtrado.apply(detectar_activo, axis=1)
+            resumen = filtrado.groupby(["activo", "nombre_activo"], as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"})
+            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
+
+    elif consulta == "Resumen mensual global":
+        c1, c2 = st.columns(2)
+        anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year))
+        mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month))
+        c_notas, p_notas, b_notas, d_notas, _ = resumen_notas_mes(df_inv, df_cal, anio, mes)
+        detalles = []
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+            det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
+            if not det.empty:
+                det["activo"] = activo
+                detalles.append(det)
+        d_fijos = pd.concat(detalles, ignore_index=True) if detalles else pd.DataFrame()
+        c_fijos = d_fijos["ingreso_bruto"].sum() if not d_fijos.empty else 0
+        p_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
+        b_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
+        mostrar_metricas(f"Resumen global {nombre_mes_es(mes)} {anio}", [("Cobro compañía", fmt(c_notas + c_fijos)), ("Pago inversores", fmt(p_notas + p_fijos)), ("Beneficio", fmt(b_notas + b_fijos))])
+        if not d_notas.empty:
+            with st.expander("Detalle notas"):
+                st.dataframe(preparar_tabla_monetaria(d_notas, ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]), use_container_width=True)
+        if not d_fijos.empty:
+            with st.expander("Detalle activos fijos"):
+                st.dataframe(preparar_tabla_monetaria(d_fijos, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
+
+    elif consulta == "Validaciones":
+        resultados = []
+        if "motivo" in df_inv.columns:
+            call_sin_fecha = df_inv[(df_inv["motivo"].apply(limpiar_texto) == "call") & (df_inv["fecha_final_inversion"].isna())]
+            resultados.append({"validacion": "Inversiones con motivo CALL y sin fecha final", "cantidad": len(call_sin_fecha)})
+        notas = filtrar_notas(df_inv)
+        resultados.append({"validacion": "Inversiones de notas sin número detectado", "cantidad": int(notas[notas["nota_num"].isna()].shape[0])})
+        resultados.append({"validacion": "Inversiones sin fecha de inversión", "cantidad": int(df_inv[df_inv["fecha_inversion"].isna()].shape[0])})
+        if not df_calls.empty and "fecha_call" in df_calls.columns:
+            resultados.append({"validacion": "Calls sin fecha válida", "cantidad": int(df_calls[df_calls["fecha_call"].isna()].shape[0])})
+        st.dataframe(pd.DataFrame(resultados), use_container_width=True)
+
+    else:
+        if df_calls.empty or "fecha_call" not in df_calls.columns:
+            st.warning("No existe la hoja CALENDARIO_CALLS o no tiene la columna fecha_call.")
+            return
+        hoy = pd.Timestamp.today().normalize()
+        if consulta == "Calls de esta semana":
+            inicio = hoy - pd.Timedelta(days=hoy.weekday())
+            fin = inicio + pd.Timedelta(days=6)
+            res = df_calls[(df_calls["fecha_call"] >= inicio) & (df_calls["fecha_call"] <= fin)].copy()
+        elif consulta == "Calls de este mes":
+            res = df_calls[(df_calls["fecha_call"].dt.year == hoy.year) & (df_calls["fecha_call"].dt.month == hoy.month)].copy()
+        elif consulta == "Próximos calls":
+            res = df_calls[df_calls["fecha_call"] >= hoy].copy().sort_values("fecha_call").head(20)
+        else:
+            res = df_calls[df_calls["fecha_call"] < hoy].copy()
+            if "estado" in res.columns:
+                res = res[~res["estado"].apply(limpiar_texto).isin(["hecho", "realizado", "ejecutado", "call ejecutado"])]
+        st.dataframe(preparar_tabla_monetaria(res, []), use_container_width=True) if not res.empty else st.info("No hay calls para esta consulta.")
+
+
+def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int):
+    df = df_inv.copy()
+    for col in ["inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "tipo_operacion", "capital_nuevo_real"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+    if "capital_nuevo_real" in df.columns:
+        df = df[df["capital_nuevo_real"].str.upper().isin(["SI", ""])].copy()
+    if modo == "Un inversor" and inversor_elegido:
+        df = df[df["inversor"].str.upper() == inversor_elegido.upper()].copy()
+    fecha_corte = datetime(anio, mes, ultimo_dia_mes(anio, mes))
+    filas = []
+    for _, row in df.iterrows():
+        fecha_inicio = row.get("fecha_inversion")
+        if pd.isna(fecha_inicio):
+            continue
+        fecha_final_excel = row.get("fecha_final_inversion")
+        fecha_fin = fecha_corte if pd.isna(fecha_final_excel) else min(pd.Timestamp(fecha_final_excel).to_pydatetime(), fecha_corte)
+        if pd.Timestamp(fecha_inicio).to_pydatetime() > fecha_fin:
+            continue
+        actual = datetime(fecha_inicio.year, fecha_inicio.month, 1)
+        fin_mes = datetime(fecha_fin.year, fecha_fin.month, 1)
+        while actual <= fin_mes:
+            dias_mes = calendar.monthrange(actual.year, actual.month)[1]
+            inicio_mes = datetime(actual.year, actual.month, 1)
+            fin_mes_real = datetime(actual.year, actual.month, dias_mes)
+            inicio_calc = max(pd.Timestamp(fecha_inicio).to_pydatetime(), inicio_mes)
+            fin_calc = min(fecha_fin, fin_mes_real)
+            if inicio_calc <= fin_calc:
+                dias = (fin_calc - inicio_calc).days + 1
+                capital = float(row.get("capital_invertido", 0))
+                interes = float(row.get("interes_inversor_anual", 0))
+                interes_mes = round((capital * interes / 12) * dias / dias_mes, 2)
+                filas.append({
+                    "inversor": row.get("inversor", ""),
+                    "id_inversion": row.get("id_inversion", ""),
+                    "tipo_inversion": row.get("tipo_inversion", ""),
+                    "subtipo_inversion": row.get("subtipo_inversion", ""),
+                    "nombre_activo": row.get("nombre_activo", ""),
+                    "mes": f"{actual.month:02d}/{actual.year}",
+                    "fecha_inversion": pd.Timestamp(fecha_inicio).strftime("%d/%m/%Y"),
+                    "capital_invertido": capital,
+                    "dias_devengados": dias,
+                    "dias_mes": dias_mes,
+                    "interes_mes": interes_mes,
+                })
+            actual = datetime(actual.year + 1, 1, 1) if actual.month == 12 else datetime(actual.year, actual.month + 1, 1)
+    resultado = pd.DataFrame(filas)
+    if resultado.empty:
+        return []
+    archivos = []
+    for inversor, grupo in resultado.groupby("inversor"):
+        detalle = grupo.copy()
+        totales_mes = detalle.groupby("mes", as_index=False)["interes_mes"].sum().rename(columns={"interes_mes": "total_mes"})
+        capital_total = detalle.groupby("id_inversion")["capital_invertido"].first().sum()
+        resumen = pd.DataFrame([{"inversor": inversor, "fecha_corte": fecha_corte.strftime("%d/%m/%Y"), "capital_total": round(capital_total, 2), "total_intereses_acumulados": round(detalle["interes_mes"].sum(), 2)}])
+        salida = BytesIO()
+        with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+            resumen.to_excel(writer, sheet_name="RESUMEN", index=False)
+            totales_mes.to_excel(writer, sheet_name="TOTALES_MES", index=False)
+            detalle.to_excel(writer, sheet_name="DETALLE", index=False)
+        nombre_archivo = f"extracto_{str(inversor).upper().replace(' ', '_')}_{fecha_corte.strftime('%d%m%Y')}.xlsx"
+        archivos.append((nombre_archivo, salida.getvalue()))
+    return archivos
+
+
+def seccion_extractos():
+    df_inv, _, _ = cargar_excel_completo()
+    st.header("📤 Extractos")
+    modo = st.radio("¿Qué quieres generar?", ["Todos", "Un inversor"], horizontal=True)
+    inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
+    inversor = None
+    if modo == "Un inversor":
+        inversor = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
+    c1, c2 = st.columns(2)
+    anio = int(c1.number_input("Año de corte", min_value=2020, max_value=2100, value=pd.Timestamp.today().year))
+    mes = int(c2.number_input("Mes de corte", min_value=1, max_value=12, value=pd.Timestamp.today().month))
+    if st.button("Generar extractos"):
+        archivos = generar_extractos(df_inv, modo, inversor, anio, mes)
+        if not archivos:
+            st.warning("No se han generado extractos. Revisa el Excel o la fecha seleccionada.")
+        elif len(archivos) == 1:
+            nombre, contenido = archivos[0]
+            st.success(f"Extracto generado: {nombre}")
+            st.download_button("Descargar extracto", contenido, file_name=nombre, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for nombre, contenido in archivos:
+                    zf.writestr(nombre, contenido)
+            st.success(f"Se han generado {len(archivos)} extractos.")
+            st.download_button("Descargar todos en ZIP", zip_buffer.getvalue(), file_name=f"extractos_{mes}_{anio}.zip", mime="application/zip")
+
+
 st.title("📊 Sistema Fondo")
 st.caption("Aplicación conectada al Excel inversiones.xlsx")
 
@@ -613,7 +1109,7 @@ except Exception as e:
 
 menu = st.sidebar.selectbox(
     "Selecciona una sección",
-    ["Inicio", "Ver Excel", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick"],
+    ["Inicio", "Ver Excel", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos"],
 )
 
 if menu == "Inicio":
@@ -641,3 +1137,17 @@ elif menu == "Consultas Paraguay":
 elif menu == "Consultas MotoClick":
     seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
 
+elif menu == "Alertas Notas":
+    seccion_alertas_notas()
+
+elif menu == "Alertas Semana":
+    seccion_alertas_semana()
+
+elif menu == "Calendario Notas":
+    seccion_calendario_notas()
+
+elif menu == "Sistema Fondo":
+    seccion_sistema_fondo()
+
+elif menu == "Extractos":
+    seccion_extractos()
