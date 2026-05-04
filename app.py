@@ -16,7 +16,7 @@ st.set_page_config(page_title="Sistema Fondo", layout="wide")
 # =========================
 # 🔒 PROTECCIÓN CON CONTRASEÑA
 # =========================
-CLAVE_APP = "21052022"
+CLAVE_APP = "21052023"
 
 password = st.text_input("🔒 Introduce la contraseña", type="password")
 
