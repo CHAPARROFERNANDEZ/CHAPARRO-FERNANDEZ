@@ -14,15 +14,48 @@ except Exception:
 st.set_page_config(page_title="Sistema Fondo", layout="wide")
 
 # =========================
-# 🔒 PROTECCIÓN CON CONTRASEÑA
+# 🔒 LOGIN PROFESIONAL POR USUARIO
 # =========================
-CLAVE_APP = "21052022"
+USUARIOS = {
+    "Yuri": "1234",
+    "Jordi": "12345",
+    "Alan": "123456",
+}
 
-password = st.text_input("🔒 Introduce la contraseña", type="password")
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
 
-if password != CLAVE_APP:
-    st.warning("Acceso restringido")
+if "usuario" not in st.session_state:
+    st.session_state.usuario = None
+
+if not st.session_state.autenticado:
+    st.title("🔒 Acceso privado")
+    st.caption("Introduce tu usuario y contraseña para acceder al Sistema Fondo.")
+
+    with st.form("login_form"):
+        usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
+        password = st.text_input("Contraseña", type="password")
+        entrar = st.form_submit_button("Entrar")
+
+    if entrar:
+        if USUARIOS.get(usuario) == password:
+            st.session_state.autenticado = True
+            st.session_state.usuario = usuario
+            st.rerun()
+        else:
+            st.error("Usuario o contraseña incorrectos")
+
     st.stop()
+
+# Barra superior una vez dentro
+col_usuario, col_salida = st.columns([4, 1])
+with col_usuario:
+    st.caption(f"Sesión iniciada como: **{st.session_state.usuario}**")
+with col_salida:
+    if st.button("Cerrar sesión"):
+        st.session_state.autenticado = False
+        st.session_state.usuario = None
+        st.rerun()
 
 ARCHIVO = "inversiones.xlsx"
 HOJA_INVERSIONES = "INVERSIONES"
