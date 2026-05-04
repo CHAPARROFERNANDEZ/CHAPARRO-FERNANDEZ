@@ -67,17 +67,18 @@ def limpiar_texto(x):
 
 
 @st.cache_data(ttl=60)
-def leer_excel(nombre_archivo):
+def leer_nombres_hojas(nombre_archivo):
     if not os.path.exists(nombre_archivo):
         raise FileNotFoundError(f"No encuentro el archivo {nombre_archivo}. Súbelo a GitHub en la misma carpeta que app.py")
-    return pd.ExcelFile(nombre_archivo)
+    # Devolvemos una lista de textos, no un objeto pd.ExcelFile, porque Streamlit sí puede cachear listas.
+    return pd.ExcelFile(nombre_archivo).sheet_names
 
 
 @st.cache_data(ttl=60)
 def cargar_hoja(nombre_archivo, hoja, upper=False):
-    xls = leer_excel(nombre_archivo)
-    if hoja not in xls.sheet_names:
-        raise ValueError(f"No existe la hoja {hoja} dentro de {nombre_archivo}. Hojas disponibles: {', '.join(xls.sheet_names)}")
+    hojas = leer_nombres_hojas(nombre_archivo)
+    if hoja not in hojas:
+        raise ValueError(f"No existe la hoja {hoja} dentro de {nombre_archivo}. Hojas disponibles: {', '.join(hojas)}")
     df = pd.read_excel(nombre_archivo, sheet_name=hoja)
     return normalizar_columnas(df, upper=upper)
 
