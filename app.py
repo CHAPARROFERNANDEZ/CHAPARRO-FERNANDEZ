@@ -25,9 +25,9 @@ TASA_ANUAL_PARAGUAY = 0.15
 
 def fmt(x):
     try:
-        return f"{float(x):,.2f} €"
+        return f"${float(x):,.2f}"
     except Exception:
-        return "0.00 €"
+        return "$0.00"
 
 
 def nombre_mes_es(mes: int) -> str:
@@ -1206,7 +1206,7 @@ def formatear_extracto_excel_bytes(contenido: bytes, inversor: str, fecha_corte:
             cell.alignment = Alignment(horizontal="center")
         for row_num in range(5, ws.max_row + 1):
             if ws.max_column >= 2:
-                ws.cell(row_num, 2).number_format = '#,##0.00 €'
+                ws.cell(row_num, 2).number_format = '$#,##0.00'
             for col_num in range(1, ws.max_column + 1):
                 ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
         ws.column_dimensions["A"].width = 18
@@ -1231,7 +1231,7 @@ def formatear_extracto_excel_bytes(contenido: bytes, inversor: str, fecha_corte:
                 ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
             for col_num in [8, 11]:
                 if ws.max_column >= col_num:
-                    ws.cell(row_num, col_num).number_format = '#,##0.00 €'
+                    ws.cell(row_num, col_num).number_format = '$#,##0.00'
         anchos = {"A": 24, "B": 16, "C": 18, "D": 18, "E": 20, "F": 14, "G": 18, "H": 18, "I": 16, "J": 12, "K": 18}
         for col, ancho in anchos.items():
             ws.column_dimensions[col].width = ancho
