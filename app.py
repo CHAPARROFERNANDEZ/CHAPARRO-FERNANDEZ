@@ -1,4 +1,4 @@
-import calendar
+mport calendar
 import re
 from datetime import datetime
 from typing import Optional, Tuple
@@ -565,11 +565,17 @@ def seccion_notas():
 
         elif consulta == "¿Cuál es el próximo pago de una nota?":
             fecha = proximo_evento_nota(df_cal, int(nota), "PAGO")
-            st.success(f"El próximo pago de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}") if fecha is not None else st.info("No hay pagos futuros para esa nota.")
+            if fecha is not None:
+                st.success(f"El próximo pago de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}")
+            else:
+                st.info("No hay pagos futuros para esa nota.")
 
         elif consulta == "¿Cuál es la próxima observación de una nota?":
             fecha = proximo_evento_nota(df_cal, int(nota), "OBSERVACION")
-            st.success(f"La próxima observación de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}") if fecha is not None else st.info("No hay observaciones futuras para esa nota.")
+            if fecha is not None:
+                st.success(f"La próxima observación de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}")
+            else:
+                st.info("No hay observaciones futuras para esa nota.")
 
         elif consulta == "¿Cuánto capital hay invertido en total?":
             total = filtrar_notas(df_inv)["capital_invertido"].sum()
@@ -607,6 +613,9 @@ def seccion_notas():
 # =========================
 from io import BytesIO
 import zipfile
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
 
 
 def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
@@ -722,6 +731,115 @@ def evaluar_nota_en_fecha(df_control: pd.DataFrame, nota: int, fecha_obs, prefer
     return ("POSITIVA" if todo_ok else "NEGATIVA"), pd.DataFrame(filas)
 
 
+
+def seccion_notas_archivo():
+    """Equivalente web de notas.py: resumen de CONTROL_NOTAS con precios actuales."""
+    _, _, df_control = cargar_excel_completo()
+    st.header("🧾 Notas")
+    st.caption("Resumen tipo notas.py: precio actual, variación, barrera de contingencia y alertas por nota.")
+
+    if yf is None:
+        st.error("Falta yfinance. Añade yfinance a requirements.txt.")
+        return None
+
+    control = df_control.copy()
+    if control.empty:
+        st.warning("La hoja CONTROL_NOTAS está vacía o no existe.")
+        return None
+
+    # Compatibilidad con nombres usados en tus archivos: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.
+    barrera_col = None
+    for candidato in ["contingency", "barrera_capital", "barrera_cupon"]:
+        if candidato in control.columns:
+            barrera_col = candidato
+            break
+
+    columnas_minimas = ["nota", "ticker", "precio_compra"]
+    faltan = [c for c in columnas_minimas if c not in control.columns]
+    if faltan:
+        st.error(f"En CONTROL_NOTAS faltan columnas: {', '.join(faltan)}")
+        return None
+    if barrera_col is None:
+        st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
+        return None
+
+    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
+    control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
+    control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
+    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce")
+    control[barrera_col] = control[barrera_col].apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
+    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
+
+    if control.empty:
+        st.warning("No hay filas válidas en CONTROL_NOTAS.")
+        return None
+
+    if st.button("Actualizar precios actuales"):
+        st.cache_data.clear()
+
+    filas = []
+    with st.spinner("Descargando precios actuales..."):
+        for _, row in control.iterrows():
+            ticker = row["ticker"]
+            precio_actual = None
+            try:
+                hist = yf.Ticker(ticker).history(period="5d")
+                if not hist.empty:
+                    precio_actual = float(hist["Close"].dropna().iloc[-1])
+            except Exception:
+                precio_actual = None
+
+            precio_compra = float(row["precio_compra"])
+            barrera = float(row[barrera_col])
+            precio_contingencia = precio_compra * barrera
+            variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
+            estado = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
+
+            filas.append({
+                "nota": int(row["nota"]),
+                "ticker": ticker,
+                "precio_compra": precio_compra,
+                "precio_actual": precio_actual,
+                "variacion_%": variacion,
+                "precio_contingencia": precio_contingencia,
+                "estado": estado,
+            })
+
+    resumen = pd.DataFrame(filas)
+    if resumen.empty:
+        st.warning("No se pudo generar el resumen.")
+        return None
+
+    notas_riesgo = resumen[resumen["estado"].eq("RIESGO")]["nota"].nunique()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Notas analizadas", resumen["nota"].nunique())
+    c2.metric("Tickers", len(resumen))
+    c3.metric("Notas en riesgo", int(notas_riesgo))
+
+    st.subheader("Resumen por ticker")
+    st.dataframe(preparar_tabla_monetaria(resumen, ["precio_compra", "precio_actual", "precio_contingencia"]), use_container_width=True)
+
+    alertas = []
+    for nota, grupo in resumen.groupby("nota"):
+        riesgo = grupo[grupo["estado"].eq("RIESGO")]
+        if not riesgo.empty:
+            alertas.append({"nota": int(nota), "tickers_en_riesgo": ", ".join(riesgo["ticker"].astype(str))})
+    if alertas:
+        st.error("Hay notas en riesgo.")
+        st.dataframe(pd.DataFrame(alertas), use_container_width=True)
+    else:
+        st.success("Ninguna nota en riesgo.")
+
+    peor = resumen.dropna(subset=["variacion_%"]).sort_values("variacion_%").head(1)
+    mejor = resumen.dropna(subset=["variacion_%"]).sort_values("variacion_%", ascending=False).head(1)
+    if not peor.empty and not mejor.empty:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Peor ticker", f"{peor.iloc[0]['ticker']} ({peor.iloc[0]['variacion_%']:.2f}%)")
+        c2.metric("Mejor ticker", f"{mejor.iloc[0]['ticker']} ({mejor.iloc[0]['variacion_%']:.2f}%)")
+        c3.metric("Variación media", f"{resumen['variacion_%'].mean():.2f}%")
+
+    return None
+
 def seccion_alertas_notas():
     df_inv, df_cal, df_control = cargar_excel_completo()
     st.header("🚨 Alertas Notas")
@@ -819,7 +937,10 @@ def seccion_calendario_notas():
         fin = inicio + pd.Timedelta(days=6)
         eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= inicio) & (df_cal["fecha"] <= fin)].copy().sort_values(["fecha", "nota", "tipo_evento"])
         st.caption(f"Del {inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}")
-        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True) if not eventos.empty else st.info("No hay eventos esta semana.")
+        if not eventos.empty:
+            st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+        else:
+            st.info("No hay eventos esta semana.")
 
     else:
         c1, c2 = st.columns(2)
@@ -829,12 +950,18 @@ def seccion_calendario_notas():
 
         if consulta == "Mes completo":
             st.subheader(f"Calendario de {nombre_mes_es(mes)} {anio}")
-            st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True) if not eventos.empty else st.info("No hay eventos ese mes.")
+            if not eventos.empty:
+                st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+            else:
+                st.info("No hay eventos ese mes.")
 
         elif consulta == "Semana concreta de un mes":
             semana = int(st.number_input("Semana del mes", min_value=1, max_value=5, value=1))
             filtrado = eventos[eventos["semana_mes"] == semana].copy() if not eventos.empty else pd.DataFrame()
-            st.dataframe(preparar_tabla_monetaria(filtrado, []), use_container_width=True) if not filtrado.empty else st.info("No hay eventos en esa semana.")
+            if not filtrado.empty:
+                st.dataframe(preparar_tabla_monetaria(filtrado, []), use_container_width=True)
+            else:
+                st.info("No hay eventos en esa semana.")
 
         elif consulta == "Exportar calendario de un mes":
             if eventos.empty:
@@ -851,6 +978,7 @@ def seccion_calendario_notas():
                     file_name=f"calendario_notas_{mes}_{anio}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
+    return None
 
 
 def detectar_activo(row):
@@ -908,7 +1036,10 @@ def seccion_sistema_fondo():
             st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
         proximos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= pd.Timestamp.today().normalize())].sort_values("fecha").head(10)
         st.subheader("Próximos eventos")
-        st.dataframe(preparar_tabla_monetaria(proximos, []), use_container_width=True) if not proximos.empty else st.info("No hay próximos eventos.")
+        if not proximos.empty:
+            st.dataframe(preparar_tabla_monetaria(proximos, []), use_container_width=True)
+        else:
+            st.info("No hay próximos eventos.")
 
     elif consulta == "Capital activo total":
         activas = inversiones_activas_global(df_inv)
@@ -1001,8 +1132,113 @@ def seccion_sistema_fondo():
             res = df_calls[df_calls["fecha_call"] < hoy].copy()
             if "estado" in res.columns:
                 res = res[~res["estado"].apply(limpiar_texto).isin(["hecho", "realizado", "ejecutado", "call ejecutado"])]
-        st.dataframe(preparar_tabla_monetaria(res, []), use_container_width=True) if not res.empty else st.info("No hay calls para esta consulta.")
+        if not res.empty:
+            st.dataframe(preparar_tabla_monetaria(res, []), use_container_width=True)
+        else:
+            st.info("No hay calls para esta consulta.")
 
+
+
+def formatear_extracto_excel_bytes(contenido: bytes, inversor: str, fecha_corte: datetime) -> bytes:
+    """Aplica el formato bonito del generador de terminal, pero en memoria para descarga web."""
+    bio = BytesIO(contenido)
+    wb = load_workbook(bio)
+
+    azul = "1F4E78"
+    azul_claro = "D9EAF7"
+    verde = "E2F0D9"
+    blanco = "FFFFFF"
+    borde_fino = Side(style="thin", color="D9D9D9")
+    borde = Border(left=borde_fino, right=borde_fino, top=borde_fino, bottom=borde_fino)
+
+    for ws in wb.worksheets:
+        ws.sheet_view.showGridLines = False
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.font = Font(name="Calibri", size=11)
+                cell.alignment = Alignment(vertical="center")
+                cell.border = borde
+        for col in range(1, ws.max_column + 1):
+            ws.column_dimensions[get_column_letter(col)].width = 18
+        for row_num in range(1, ws.max_row + 1):
+            ws.row_dimensions[row_num].height = 22
+
+    if "RESUMEN" in wb.sheetnames:
+        ws = wb["RESUMEN"]
+        ws.insert_rows(1, 5)
+        ws["A1"] = "EXTRACTO DE INVERSIÓN"
+        ws["A1"].font = Font(name="Calibri", size=20, bold=True, color=blanco)
+        ws["A1"].fill = PatternFill("solid", fgColor=azul)
+        ws["A1"].alignment = Alignment(horizontal="center")
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(4, ws.max_column))
+        ws["A3"] = "Inversor"
+        ws["B3"] = inversor
+        ws["A4"] = "Fecha de corte"
+        ws["B4"] = fecha_corte.strftime("%d/%m/%Y")
+        for cell in ["A3", "A4"]:
+            ws[cell].font = Font(bold=True)
+            ws[cell].fill = PatternFill("solid", fgColor=azul_claro)
+        header_row = 6
+        for cell in ws[header_row]:
+            cell.font = Font(bold=True, color=blanco)
+            cell.fill = PatternFill("solid", fgColor=azul)
+            cell.alignment = Alignment(horizontal="center")
+        for row_num in range(header_row + 1, ws.max_row + 1):
+            for col_num in range(1, ws.max_column + 1):
+                ws.cell(row_num, col_num).fill = PatternFill("solid", fgColor=verde)
+                ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
+        ws.column_dimensions["A"].width = 24
+        ws.column_dimensions["B"].width = 20
+        ws.column_dimensions["C"].width = 22
+        ws.column_dimensions["D"].width = 26
+
+    if "TOTALES_MES" in wb.sheetnames:
+        ws = wb["TOTALES_MES"]
+        ws.insert_rows(1, 3)
+        ws["A1"] = "RESUMEN MENSUAL"
+        ws["A1"].font = Font(size=18, bold=True, color=blanco)
+        ws["A1"].fill = PatternFill("solid", fgColor=azul)
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(2, ws.max_column))
+        ws["A1"].alignment = Alignment(horizontal="center")
+        for cell in ws[4]:
+            cell.font = Font(bold=True, color=blanco)
+            cell.fill = PatternFill("solid", fgColor=azul)
+            cell.alignment = Alignment(horizontal="center")
+        for row_num in range(5, ws.max_row + 1):
+            if ws.max_column >= 2:
+                ws.cell(row_num, 2).number_format = '#,##0.00 €'
+            for col_num in range(1, ws.max_column + 1):
+                ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
+        ws.column_dimensions["A"].width = 18
+        ws.column_dimensions["B"].width = 18
+
+    if "DETALLE" in wb.sheetnames:
+        ws = wb["DETALLE"]
+        ws.insert_rows(1, 3)
+        ws["A1"] = "DETALLE DEL EXTRACTO"
+        ws["A1"].font = Font(size=18, bold=True, color=blanco)
+        ws["A1"].fill = PatternFill("solid", fgColor=azul)
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ws.max_column)
+        ws["A1"].alignment = Alignment(horizontal="center")
+        for cell in ws[4]:
+            cell.font = Font(bold=True, color=blanco)
+            cell.fill = PatternFill("solid", fgColor=azul)
+            cell.alignment = Alignment(horizontal="center")
+        for row_num in range(5, ws.max_row + 1):
+            fill = azul_claro if row_num % 2 == 0 else blanco
+            for col_num in range(1, ws.max_column + 1):
+                ws.cell(row_num, col_num).fill = PatternFill("solid", fgColor=fill)
+                ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
+            for col_num in [8, 11]:
+                if ws.max_column >= col_num:
+                    ws.cell(row_num, col_num).number_format = '#,##0.00 €'
+        anchos = {"A": 24, "B": 16, "C": 18, "D": 18, "E": 20, "F": 14, "G": 18, "H": 18, "I": 16, "J": 12, "K": 18}
+        for col, ancho in anchos.items():
+            ws.column_dimensions[col].width = ancho
+
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int):
     df = df_inv.copy()
@@ -1065,7 +1301,8 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
             totales_mes.to_excel(writer, sheet_name="TOTALES_MES", index=False)
             detalle.to_excel(writer, sheet_name="DETALLE", index=False)
         nombre_archivo = f"extracto_{str(inversor).upper().replace(' ', '_')}_{fecha_corte.strftime('%d%m%Y')}.xlsx"
-        archivos.append((nombre_archivo, salida.getvalue()))
+        contenido_formateado = formatear_extracto_excel_bytes(salida.getvalue(), str(inversor), fecha_corte)
+        archivos.append((nombre_archivo, contenido_formateado))
     return archivos
 
 
@@ -1109,7 +1346,7 @@ except Exception as e:
 
 menu = st.sidebar.selectbox(
     "Selecciona una sección",
-    ["Inicio", "Ver Excel", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos"],
+    ["Inicio", "Ver Excel", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick", "Notas", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos"],
 )
 
 if menu == "Inicio":
@@ -1137,6 +1374,9 @@ elif menu == "Consultas Paraguay":
 elif menu == "Consultas MotoClick":
     seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
 
+elif menu == "Notas":
+    seccion_notas_archivo()
+
 elif menu == "Alertas Notas":
     seccion_alertas_notas()
 
@@ -1151,3 +1391,4 @@ elif menu == "Sistema Fondo":
 
 elif menu == "Extractos":
     seccion_extractos()
+
