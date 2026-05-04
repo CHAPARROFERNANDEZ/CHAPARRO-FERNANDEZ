@@ -461,54 +461,6 @@ def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incl
             mostrar_metricas("Resultado", [("Beneficio acumulado", fmt(ingreso - pagado))])
 
 
-
-# =========================
-# VISTA TIPO TERMINAL
-# =========================
-def preparar_vista_terminal_notas(df: pd.DataFrame) -> str:
-    """Devuelve una tabla en texto similar a la terminal antigua, pero con dólares."""
-    if df is None or df.empty:
-        return "No hay detalle para mostrar."
-
-    mostrar = df.copy()
-
-    # Orden y nombres parecidos a la terminal
-    columnas_preferidas = [
-        "fecha_pago", "fecha_observacion", "nota", "resultado_observacion",
-        "id_inversion", "inversor", "cuenta_cobro",
-        "cobro_teorico_compania", "cobro_compania", "pago_inversor", "beneficio_empresa",
-        "capital_invertido"
-    ]
-    columnas = [c for c in columnas_preferidas if c in mostrar.columns]
-    if columnas:
-        mostrar = mostrar[columnas]
-
-    for col in ["fecha_pago", "fecha_observacion", "fecha"]:
-        if col in mostrar.columns:
-            mostrar[col] = pd.to_datetime(mostrar[col], errors="coerce").dt.strftime("%d/%m/%Y")
-            mostrar[col] = mostrar[col].fillna("")
-
-    for col in [
-        "capital_invertido", "cobro_teorico_compania", "cobro_compania",
-        "pago_inversor", "beneficio_empresa", "cobro_mes", "capital"
-    ]:
-        if col in mostrar.columns:
-            mostrar[col] = mostrar[col].apply(fmt)
-
-    # Evita cortes raros y se parece más al print antiguo
-    return mostrar.to_string(index=False)
-
-
-def mostrar_terminal_y_tabla(titulo: str, df: pd.DataFrame, columnas_monetarias=None):
-    if df is None or df.empty:
-        st.info("No hay datos para mostrar.")
-        return
-    st.markdown(f"**{titulo}**")
-    st.code(preparar_vista_terminal_notas(df), language="text")
-    with st.expander("Ver tabla interactiva"):
-        st.dataframe(preparar_tabla_monetaria(df, columnas_monetarias or []), use_container_width=True)
-
-
 def seccion_notas():
     df_inv, df_cal, _ = cargar_excel_completo()
     st.header("🧾 Consultas Notas")
@@ -588,14 +540,10 @@ def seccion_notas():
 
             if not pagos.empty:
                 with st.expander("Ver pagos detectados"):
-                    mostrar_terminal_y_tabla("Pagos detectados", pagos, [])
+                    st.dataframe(preparar_tabla_monetaria(pagos, []), use_container_width=True)
             if not detalle.empty:
-                with st.expander("Ver detalle por nota e inversión", expanded=True):
-                    mostrar_terminal_y_tabla(
-                        "Detalle tipo terminal",
-                        detalle,
-                        ["capital_invertido", "cobro_teorico_compania", "cobro_compania", "pago_inversor", "beneficio_empresa"],
-                    )
+                with st.expander("Ver detalle por nota e inversión"):
+                    st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]), use_container_width=True)
 
         elif consulta == "¿Cuánto ha cobrado la compañía desde el inicio?":
             detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal))
