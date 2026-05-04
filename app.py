@@ -3,44 +3,36 @@ import pandas as pd
 
 st.set_page_config(page_title="Sistema Fondo", layout="wide")
 
-# =========================
-# CARGA EXCEL (CORREGIDO)
-# =========================
 @st.cache_data
-def leer_excel():
-    archivo = "inversiones.xlsx"
-    xls = pd.ExcelFile(archivo)
+def cargar_datos():
+    return pd.read_excel("inversiones.xlsx", sheet_name="INVERSIONES")
 
-    data = {}
-    for hoja in xls.sheet_names:
-        data[hoja] = pd.read_excel(xls, sheet_name=hoja)
+df = cargar_datos()
 
-    return data
-
-
-data = leer_excel()
-
-# =========================
-# INTERFAZ
-# =========================
 st.title("📊 Sistema Fondo")
-st.write("Aplicación conectada al Excel inversiones.xlsx")
 
 menu = st.sidebar.selectbox(
-    "Selecciona una sección",
-    [
-        "Inicio",
-        "Ver Excel",
-    ]
+    "Menú",
+    ["Inicio", "Consultas Fútbol"]
 )
 
-# =========================
-# FUNCIONES
-# =========================
 if menu == "Inicio":
-    st.subheader("Bienvenido")
-    st.write("Sistema conectado correctamente.")
+    st.write("Sistema funcionando correctamente")
 
-elif menu == "Ver Excel":
-    hoja = st.selectbox("Selecciona hoja", list(data.keys()))
-    st.dataframe(data[hoja])
+elif menu == "Consultas Fútbol":
+
+    st.subheader("Consulta ingresos fútbol")
+
+    año = st.number_input("Año", value=2025)
+    mes = st.number_input("Mes (1-12)", min_value=1, max_value=12, value=1)
+
+    if st.button("Calcular"):
+
+        df_futbol = df[
+            df["subtipo_inversion"].str.lower().str.contains("futbol", na=False)
+        ]
+
+        total = df_futbol["capital_invertido"].sum()
+
+        st.success(f"Capital total en fútbol: {total:,.2f} €")
+        st.dataframe(df_futbol)
