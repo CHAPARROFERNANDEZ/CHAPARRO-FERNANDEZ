@@ -67,6 +67,8 @@ def aplicar_estilo_profesional():
         section[data-testid="stSidebar"] {
             background: linear-gradient(180deg, #071425 0%, #102a43 100%);
             border-right: 1px solid rgba(191, 154, 95, 0.32);
+            transform: none !important;
+            visibility: visible !important;
         }
         section[data-testid="stSidebar"] label,
         section[data-testid="stSidebar"] p,
@@ -130,7 +132,8 @@ def aplicar_estilo_profesional():
         }
         .login-title { font-size: 26px; font-weight: 800; color: #0e2338; letter-spacing: -0.03em; margin-bottom: 6px; }
         .login-subtitle { font-size: 14px; color: #667085; margin-bottom: 20px; }
-        #MainMenu, footer, header {visibility: hidden;}
+        #MainMenu, footer {visibility: hidden;}
+        header {visibility: visible;}
         </style>
         """,
         unsafe_allow_html=True,
