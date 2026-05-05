@@ -1145,6 +1145,56 @@ def grafico_beneficio_mensual(df_inv, df_cal, df_control):
     st.plotly_chart(fig, use_container_width=True)
 
 
+
+def mostrar_rentabilidad_por_activo_dashboard(tabla_activo: pd.DataFrame):
+    """Muestra tarjetas y tabla de rentabilidad por activo directamente en el dashboard."""
+    st.markdown("### Rentabilidad por activo")
+    st.caption("Beneficio y coste de inversores por cada tipo de activo en el mes actual.")
+
+    if tabla_activo is None or tabla_activo.empty:
+        st.info("No hay datos de rentabilidad por activo para este mes.")
+        return
+
+    tabla = tabla_activo.copy().sort_values("beneficio_empresa_mes", ascending=False)
+
+    cols = st.columns(min(4, len(tabla)))
+    for i, (_, row) in enumerate(tabla.iterrows()):
+        activo = str(row.get("activo", "Activo")).upper()
+        capital = float(row.get("capital", 0) or 0)
+        beneficio = float(row.get("beneficio_empresa_mes", 0) or 0)
+        rent_mes = float(row.get("rentabilidad_beneficio_mes", 0) or 0)
+        rent_anual = float(row.get("rentabilidad_beneficio_anualizada", 0) or 0)
+        pagado_mes = float(row.get("rentabilidad_pagada_inversor_mes", 0) or 0)
+        pagado_anual = float(row.get("rentabilidad_pagada_inversor_anualizada", 0) or 0)
+
+        subtitulo = (
+            f"Capital {fmt(capital)} · Beneficio {fmt(beneficio)}<br>"
+            f"Pago inversores {fmt_pct(pagado_mes)} mes / {fmt_pct(pagado_anual)} anual"
+        )
+        estado = "positivo" if beneficio >= 0 else "negativo"
+        with cols[i % len(cols)]:
+            tarjeta_kpi(
+                f"{activo} · rent. beneficio",
+                f"{fmt_pct(rent_mes)} / {fmt_pct(rent_anual)} anual",
+                subtitulo,
+                estado,
+            )
+
+    with st.expander("Ver tabla completa de rentabilidad por activo", expanded=True):
+        columnas = [
+            "activo",
+            "capital",
+            "cobro_compania_mes",
+            "pago_inversor_mes",
+            "beneficio_empresa_mes",
+            "rentabilidad_beneficio_mes",
+            "rentabilidad_beneficio_anualizada",
+            "rentabilidad_pagada_inversor_mes",
+            "rentabilidad_pagada_inversor_anualizada",
+        ]
+        columnas = [c for c in columnas if c in tabla.columns]
+        st.dataframe(preparar_tabla_rentabilidad(tabla[columnas]), use_container_width=True)
+
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
     resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control)
@@ -1173,6 +1223,8 @@ def dashboard_financiero():
         tarjeta_kpi("% pagado inversores mes", fmt_pct(resumen["rentabilidad_pagada_inversor_mes"]), "Pago inversores / capital", "riesgo")
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
+
+    mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
     st.markdown("---")
     if not alertas.empty:
@@ -2083,6 +2135,3 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
-
-
-
