@@ -514,35 +514,107 @@ def columna_barrera_control(df_control: pd.DataFrame, preferida="contingency"):
 
 
 def evaluar_nota_en_fecha(df_control: pd.DataFrame, nota: int, fecha_obs, preferida="contingency") -> tuple[str, pd.DataFrame]:
-    if df_control.empty:
+    """
+    Evalúa una nota en una fecha de observación.
+
+    Lógica definitiva:
+    - Si la fecha de observación es futura: PENDIENTE y cuenta como cobro previsto.
+    - Si ya llegó la observación y no hay dato de precio: SIN DATO, pero NO se trata como negativa.
+    - Solo es NEGATIVA si ya llegó la observación y existe precio real por debajo de la barrera.
+    """
+    hoy = pd.Timestamp.today().normalize()
+
+    if fecha_obs is None or pd.isna(fecha_obs):
+        return "SIN_OBSERVACION", pd.DataFrame()
+
+    fecha_obs = pd.Timestamp(fecha_obs).normalize()
+
+    if df_control is None or df_control.empty:
         return "SIN_CONTROL", pd.DataFrame()
+
     sub = df_control[df_control.get("nota") == nota].copy()
     if sub.empty:
         return "SIN_CONTROL", pd.DataFrame()
+
     barrera_col = columna_barrera_control(sub, preferida=preferida)
     if barrera_col is None or "precio_compra" not in sub.columns or "ticker" not in sub.columns:
         return "SIN_COLUMNAS", pd.DataFrame()
+
     filas = []
-    todo_ok = True
+
+    # Si la observación aún no ha llegado, no se descarga precio histórico.
+    # Se marca como pendiente y se mantiene el cobro previsto.
+    if fecha_obs > hoy:
+        for _, row in sub.iterrows():
+            ticker = row.get("ticker", "")
+            compra = pd.to_numeric(row.get("precio_compra"), errors="coerce")
+            barrera_pct = normalizar_barrera(row.get(barrera_col))
+            precio_barrera = float(compra) * float(barrera_pct) if pd.notna(compra) and barrera_pct is not None else None
+            filas.append({
+                "ticker": ticker,
+                "precio_compra": float(compra) if pd.notna(compra) else None,
+                "barrera_%": barrera_pct,
+                "precio_barrera": precio_barrera,
+                "cierre_usado": None,
+                "estado": "PENDIENTE",
+            })
+        return "PENDIENTE", pd.DataFrame(filas)
+
+    hay_negativa_real = False
+    hay_sin_dato = False
+
     for _, row in sub.iterrows():
         ticker = row.get("ticker", "")
         compra = pd.to_numeric(row.get("precio_compra"), errors="coerce")
         barrera_pct = normalizar_barrera(row.get(barrera_col))
+
         if pd.isna(compra) or barrera_pct is None:
-            filas.append({"ticker": ticker, "estado": "FALTAN DATOS"})
-            todo_ok = False
+            filas.append({
+                "ticker": ticker,
+                "precio_compra": float(compra) if pd.notna(compra) else None,
+                "barrera_%": barrera_pct,
+                "precio_barrera": None,
+                "cierre_usado": None,
+                "estado": "FALTAN DATOS",
+            })
+            hay_sin_dato = True
             continue
+
         precio_barrera = float(compra) * float(barrera_pct)
         cierre = obtener_cierre_ticker_fecha(ticker, fecha_obs)
+
         if cierre is None:
-            filas.append({"ticker": ticker, "precio_compra": compra, "precio_barrera": precio_barrera, "cierre_usado": None, "estado": "SIN DATO"})
-            todo_ok = False
+            filas.append({
+                "ticker": ticker,
+                "precio_compra": float(compra),
+                "barrera_%": barrera_pct,
+                "precio_barrera": precio_barrera,
+                "cierre_usado": None,
+                "estado": "SIN DATO",
+            })
+            hay_sin_dato = True
             continue
+
         estado = "OK" if cierre >= precio_barrera else "NO OK"
-        if estado != "OK":
-            todo_ok = False
-        filas.append({"ticker": ticker, "precio_compra": float(compra), "barrera_%": barrera_pct, "precio_barrera": precio_barrera, "cierre_usado": cierre, "estado": estado})
-    return ("POSITIVA" if todo_ok else "NEGATIVA"), pd.DataFrame(filas)
+        if estado == "NO OK":
+            hay_negativa_real = True
+
+        filas.append({
+            "ticker": ticker,
+            "precio_compra": float(compra),
+            "barrera_%": barrera_pct,
+            "precio_barrera": precio_barrera,
+            "cierre_usado": cierre,
+            "estado": estado,
+        })
+
+    detalle = pd.DataFrame(filas)
+
+    if hay_negativa_real:
+        return "NEGATIVA", detalle
+    if hay_sin_dato:
+        return "SIN DATO", detalle
+    return "POSITIVA", detalle
 
 
 def resumen_detalle_observacion(detalle_obs: pd.DataFrame) -> str:
@@ -564,38 +636,61 @@ def resumen_detalle_observacion(detalle_obs: pd.DataFrame) -> str:
 def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal: pd.DataFrame | None = None, df_control: pd.DataFrame | None = None) -> pd.DataFrame:
     filas = []
     cache_observaciones = {}
+
     for _, evento in df_pagos.iterrows():
         nota = evento.get("nota")
         fecha_pago = evento.get("fecha")
+
         if pd.isna(nota) or pd.isna(fecha_pago):
             continue
+
         nota_int = int(nota)
+        fecha_pago = pd.Timestamp(fecha_pago).normalize()
         fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, fecha_pago) if df_cal is not None else None
+
         resultado_obs = "NO_EVALUADA"
         detalle_obs = pd.DataFrame()
+
+        # Por defecto el cobro cuenta como previsto.
+        # Solo se elimina si la observación es NEGATIVA real.
         ingreso_habilitado = True
+
         if fecha_obs is not None and df_control is not None and not df_control.empty:
             clave = (nota_int, pd.Timestamp(fecha_obs).normalize())
             if clave not in cache_observaciones:
                 cache_observaciones[clave] = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency")
             resultado_obs, detalle_obs = cache_observaciones[clave]
+
             if resultado_obs == "NEGATIVA":
                 ingreso_habilitado = False
+
         activas = inversiones_activas_para_nota(df_inv, nota_int, fecha_pago)
+
         for _, fila in activas.iterrows():
             capital = float(fila.get("capital_invertido", 0))
             cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12
             cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
             pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12
+
             filas.append({
-                "fecha_pago": fecha_pago, "nota": nota_int, "fecha_observacion_usada": fecha_obs,
-                "resultado_observacion": resultado_obs, "detalle_observacion": resumen_detalle_observacion(detalle_obs),
-                "ingreso_habilitado": "SI" if ingreso_habilitado else "NO", "id_inversion": fila.get("id_inversion", ""),
-                "inversor": fila.get("inversor", ""), "cuenta_cobro": fila.get("cuenta_cobro", "SIN CLASIFICAR"),
-                "capital_invertido": capital, "interes_nota_anual": fila.get("interes_nota_anual", 0),
-                "interes_inversor_anual": fila.get("interes_inversor_anual", 0), "cobro_teorico_compania": cobro_teorico,
-                "cobro_compania": cobro_compania, "pago_inversor": pago_inversor, "beneficio_empresa": cobro_compania - pago_inversor,
+                "fecha_pago": fecha_pago,
+                "nota": nota_int,
+                "fecha_observacion_usada": fecha_obs,
+                "resultado_observacion": resultado_obs,
+                "detalle_observacion": resumen_detalle_observacion(detalle_obs),
+                "ingreso_habilitado": "SI" if ingreso_habilitado else "NO",
+                "id_inversion": fila.get("id_inversion", ""),
+                "inversor": fila.get("inversor", ""),
+                "cuenta_cobro": fila.get("cuenta_cobro", "SIN CLASIFICAR"),
+                "capital_invertido": capital,
+                "interes_nota_anual": fila.get("interes_nota_anual", 0),
+                "interes_inversor_anual": fila.get("interes_inversor_anual", 0),
+                "cobro_teorico_compania": cobro_teorico,
+                "cobro_compania": cobro_compania,
+                "pago_inversor": pago_inversor,
+                "beneficio_empresa": cobro_compania - pago_inversor,
             })
+
     return pd.DataFrame(filas)
 
 
@@ -689,23 +784,163 @@ def validar_base_datos(df_inv, df_cal, df_control):
 
 
 def detectar_alertas_financieras(df_inv, df_cal, df_control):
+    """
+    Alertas mejoradas para notas:
+    - Evento próximo: observaciones y pagos cercanos.
+    - Observación negativa real: solo si ya pasó y el precio está bajo barrera.
+    - Observación sin dato: se avisa, pero no bloquea el cobro previsto.
+    - Pago bloqueado: pago futuro o histórico cuya observación previa fue negativa real.
+    - Pago previsto: pago futuro con observación pendiente o sin dato.
+    """
     hoy = pd.Timestamp.today().normalize()
     alertas = []
-    eventos_7 = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy) & (df_cal["fecha"] <= hoy + pd.Timedelta(days=7))].copy() if not df_cal.empty and "fecha" in df_cal.columns else pd.DataFrame()
-    for _, row in eventos_7.iterrows():
-        alertas.append({"Tipo": "Evento próximo", "Detalle": f"{row.get('tipo_evento', '')} de NOTA {row.get('nota', '')}", "Fecha": pd.Timestamp(row.get("fecha")).strftime("%d/%m/%Y"), "Prioridad": "MEDIA"})
-    if not df_control.empty and "nota" in df_control.columns:
-        notas = sorted([int(x) for x in df_control["nota"].dropna().unique()])
-        for nota in notas:
-            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, hoy, preferida="contingency")
+
+    def add(tipo, detalle, fecha, prioridad, nota=""):
+        alertas.append({
+            "Tipo": tipo,
+            "Nota": nota,
+            "Detalle": detalle,
+            "Fecha": pd.Timestamp(fecha).strftime("%d/%m/%Y") if pd.notna(fecha) else "",
+            "Prioridad": prioridad,
+        })
+
+    if df_cal is not None and not df_cal.empty and "fecha" in df_cal.columns:
+        eventos_7 = df_cal[
+            (df_cal["fecha"].notna())
+            & (df_cal["fecha"] >= hoy)
+            & (df_cal["fecha"] <= hoy + pd.Timedelta(days=7))
+        ].copy().sort_values(["fecha", "tipo_evento", "nota"])
+
+        for _, row in eventos_7.iterrows():
+            add(
+                "Evento próximo",
+                f"{row.get('tipo_evento', '')} de NOTA {row.get('nota', '')}",
+                row.get("fecha"),
+                "MEDIA",
+                row.get("nota", ""),
+            )
+
+        # Observaciones ya vencidas o de hoy: revisar si fueron negativas reales o sin dato.
+        observaciones_vencidas = df_cal[
+            (df_cal["tipo_evento"] == "OBSERVACION")
+            & (df_cal["fecha"].notna())
+            & (df_cal["fecha"] <= hoy)
+        ].copy().sort_values("fecha")
+
+        for _, row in observaciones_vencidas.iterrows():
+            nota = row.get("nota")
+            fecha_obs = row.get("fecha")
+            if pd.isna(nota):
+                continue
+            nota_int = int(nota)
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency")
+            detalle_txt = resumen_detalle_observacion(detalle)
+
             if resultado == "NEGATIVA":
-                tickers = ", ".join(detalle[detalle["estado"] != "OK"]["ticker"].astype(str)) if not detalle.empty and "estado" in detalle.columns else ""
-                alertas.append({"Tipo": "Nota en riesgo", "Detalle": f"NOTA {nota} con tickers en riesgo: {tickers}", "Fecha": hoy.strftime("%d/%m/%Y"), "Prioridad": "ALTA"})
+                add(
+                    "Nota negativa real",
+                    f"NOTA {nota_int}: observación negativa. No debe contarse el cobro. {detalle_txt}",
+                    fecha_obs,
+                    "ALTA",
+                    nota_int,
+                )
+            elif resultado == "SIN DATO":
+                add(
+                    "Revisar dato faltante",
+                    f"NOTA {nota_int}: la observación ya pasó, pero falta precio. Se mantiene como cobro previsto hasta revisar. {detalle_txt}",
+                    fecha_obs,
+                    "MEDIA",
+                    nota_int,
+                )
+            elif resultado in ["SIN_CONTROL", "SIN_COLUMNAS", "SIN_OBSERVACION"]:
+                add(
+                    "Revisar configuración",
+                    f"NOTA {nota_int}: no se ha podido evaluar correctamente ({resultado}).",
+                    fecha_obs,
+                    "ALTA",
+                    nota_int,
+                )
+
+        # Observaciones futuras a 30 días: seguimiento.
+        observaciones_futuras = df_cal[
+            (df_cal["tipo_evento"] == "OBSERVACION")
+            & (df_cal["fecha"].notna())
+            & (df_cal["fecha"] > hoy)
+            & (df_cal["fecha"] <= hoy + pd.Timedelta(days=30))
+        ].copy().sort_values("fecha")
+
+        for _, row in observaciones_futuras.iterrows():
+            add(
+                "Observación pendiente",
+                f"NOTA {row.get('nota', '')}: observación futura. Se cuenta como cobro previsto hasta que llegue la fecha.",
+                row.get("fecha"),
+                "BAJA",
+                row.get("nota", ""),
+            )
+
+        # Pagos próximos: indicar si están habilitados, previstos o bloqueados.
+        pagos_30 = df_cal[
+            (df_cal["tipo_evento"] == "PAGO")
+            & (df_cal["fecha"].notna())
+            & (df_cal["fecha"] >= hoy)
+            & (df_cal["fecha"] <= hoy + pd.Timedelta(days=30))
+        ].copy().sort_values("fecha")
+
+        for _, row in pagos_30.iterrows():
+            nota = row.get("nota")
+            fecha_pago = row.get("fecha")
+            if pd.isna(nota):
+                continue
+            nota_int = int(nota)
+            fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, fecha_pago)
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency") if fecha_obs is not None else ("SIN_OBSERVACION", pd.DataFrame())
+            detalle_txt = resumen_detalle_observacion(detalle)
+
+            if resultado == "NEGATIVA":
+                add(
+                    "Pago bloqueado",
+                    f"NOTA {nota_int}: pago próximo bloqueado por observación negativa. {detalle_txt}",
+                    fecha_pago,
+                    "ALTA",
+                    nota_int,
+                )
+            elif resultado in ["PENDIENTE", "SIN DATO", "NO_EVALUADA"]:
+                add(
+                    "Pago previsto",
+                    f"NOTA {nota_int}: pago próximo contado como previsto. Estado observación: {resultado}. {detalle_txt}",
+                    fecha_pago,
+                    "MEDIA",
+                    nota_int,
+                )
+            elif resultado == "POSITIVA":
+                add(
+                    "Pago habilitado",
+                    f"NOTA {nota_int}: pago próximo habilitado por observación positiva. {detalle_txt}",
+                    fecha_pago,
+                    "BAJA",
+                    nota_int,
+                )
+
     validaciones = validar_base_datos(df_inv, df_cal, df_control)
     errores_altos = validaciones[(validaciones["Incidencias"] > 0) & (validaciones["Estado"] == "ALTA")]
     for _, row in errores_altos.iterrows():
-        alertas.append({"Tipo": "Validación crítica", "Detalle": f"{row['Validación']}: {row['Incidencias']} incidencias", "Fecha": hoy.strftime("%d/%m/%Y"), "Prioridad": "ALTA"})
-    return pd.DataFrame(alertas)
+        add(
+            "Validación crítica",
+            f"{row['Validación']}: {row['Incidencias']} incidencias",
+            hoy,
+            "ALTA",
+            "",
+        )
+
+    if not alertas:
+        return pd.DataFrame(columns=["Tipo", "Nota", "Detalle", "Fecha", "Prioridad"])
+
+    orden = {"ALTA": 0, "MEDIA": 1, "BAJA": 2}
+    out = pd.DataFrame(alertas)
+    out["orden_prioridad"] = out["Prioridad"].map(orden).fillna(9)
+    out["fecha_orden"] = pd.to_datetime(out["Fecha"], errors="coerce", dayfirst=True)
+    out = out.sort_values(["orden_prioridad", "fecha_orden", "Tipo"]).drop(columns=["orden_prioridad", "fecha_orden"])
+    return out
 
 
 def obtener_resumen_dashboard(df_inv, df_cal, df_control):
@@ -1674,3 +1909,5 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
+
+
