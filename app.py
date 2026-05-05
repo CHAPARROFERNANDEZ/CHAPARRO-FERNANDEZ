@@ -1059,14 +1059,9 @@ def resumen_cobros_semanales_mes_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
     return resumen[["semana", "nota", "fecha_pago", "cobro_compania"]]
 
 
-def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
+def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
     st.markdown("### Cobros semanales del mes")
     st.caption("Resumen semanal de cobros previstos por notas. Se muestra solo el total por semana, sin desglose por nota.")
-
-    hoy = pd.Timestamp.today().normalize()
-    col_anio, col_mes = st.columns(2)
-    anio = int(col_anio.number_input("Año para cobros semanales", 2020, 2100, hoy.year, key="dashboard_cobros_sem_anio"))
-    mes = int(col_mes.number_input("Mes para cobros semanales", 1, 12, hoy.month, key="dashboard_cobros_sem_mes"))
 
     tabla_semanal = resumen_cobros_semanales_mes_notas(df_inv, df_cal, df_control, anio, mes)
     if tabla_semanal.empty:
@@ -1080,16 +1075,21 @@ def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFram
 
 
 
-def obtener_resumen_dashboard(df_inv, df_cal, df_control):
-    hoy = pd.Timestamp.today().normalize()
-    activas = inversiones_activas_global(df_inv, hoy)
+def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None):
+    hoy_real = pd.Timestamp.today().normalize()
+    if anio is None:
+        anio = hoy_real.year
+    if mes is None:
+        mes = hoy_real.month
+    fecha_analisis = pd.Timestamp(int(anio), int(mes), ultimo_dia_mes(int(anio), int(mes))).normalize()
+    activas = inversiones_activas_global(df_inv, fecha_analisis)
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
-    c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, hoy.year, hoy.month)
+    c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, int(anio), int(mes))
     detalles_fijos = []
     for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
-        det = detalle_activo_mes(df_inv, activo, tasa, hoy.year, hoy.month)
+        det = detalle_activo_mes(df_inv, activo, tasa, int(anio), int(mes))
         if not det.empty:
             det["activo"] = activo
             detalles_fijos.append(det)
@@ -1107,7 +1107,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control):
     rentabilidad_pagada_inversor_mes = pago_total_mes / capital_total if capital_total else 0
     rentabilidad_pagada_inversor_anualizada = rentabilidad_pagada_inversor_mes * 12
 
-    rentabilidad_inversiones = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, hoy.year, hoy.month)
+    rentabilidad_inversiones = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, int(anio), int(mes))
 
     if not rentabilidad_inversiones.empty:
         rentabilidad_por_activo = rentabilidad_inversiones.groupby("activo", as_index=False).agg(
@@ -1123,7 +1123,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control):
     else:
         rentabilidad_por_activo = pd.DataFrame()
 
-    eventos_futuros = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy)].copy().sort_values("fecha") if not df_cal.empty else pd.DataFrame()
+    eventos_futuros = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= fecha_analisis)].copy().sort_values("fecha") if not df_cal.empty else pd.DataFrame()
     return {
         "activas": activas,
         "capital_total": capital_total,
@@ -1244,9 +1244,28 @@ def mostrar_rentabilidad_por_activo_dashboard(tabla_activo: pd.DataFrame):
 
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
-    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control)
     st.markdown("## Dashboard financiero")
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
+
+    hoy = pd.Timestamp.today().normalize()
+    col_periodo_1, col_periodo_2 = st.columns(2)
+    anio_dashboard = int(col_periodo_1.number_input(
+        "Año del dashboard",
+        min_value=2020,
+        max_value=2100,
+        value=hoy.year,
+        key="dashboard_anio_general",
+    ))
+    mes_dashboard = int(col_periodo_2.number_input(
+        "Mes del dashboard",
+        min_value=1,
+        max_value=12,
+        value=hoy.month,
+        key="dashboard_mes_general",
+    ))
+    st.caption(f"Periodo seleccionado: {nombre_mes_es(mes_dashboard)} {anio_dashboard}")
+
+    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1270,7 +1289,7 @@ def dashboard_financiero():
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
-    mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control)
+    mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
@@ -1290,7 +1309,7 @@ def dashboard_financiero():
     with tab3:
         grafico_beneficio_mensual(df_inv, df_cal, df_control)
     with tab4:
-        st.caption("Resumen del mes actual por tipo de activo. La rentabilidad anualizada es la rentabilidad mensual multiplicada por 12.")
+        st.caption("Resumen del periodo seleccionado por tipo de activo. La rentabilidad anualizada es la rentabilidad mensual multiplicada por 12.")
         tabla_activo = resumen.get("rentabilidad_por_activo", pd.DataFrame())
         if tabla_activo is None or tabla_activo.empty:
             st.info("No hay datos de rentabilidad por activo para este mes.")
@@ -2350,4 +2369,5 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
+
 
