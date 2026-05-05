@@ -13,6 +13,230 @@ except Exception:
 
 st.set_page_config(page_title="Sistema Fondo", layout="wide")
 
+
+# =========================
+# 🎨 ESTILO PROFESIONAL CHAPARRO FERNÁNDEZ WEALTH
+# =========================
+def aplicar_estilo_profesional():
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+        html, body, [class*="css"] {
+            font-family: 'Inter', sans-serif;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(191, 154, 95, 0.18), transparent 30%),
+                linear-gradient(135deg, #071425 0%, #0e2338 42%, #f6f3ee 42%, #f6f3ee 100%);
+            background-attachment: fixed;
+        }
+
+        .block-container {
+            max-width: 1180px;
+            padding-top: 2.2rem;
+            padding-bottom: 3rem;
+            background: rgba(255, 255, 255, 0.92);
+            border: 1px solid rgba(255, 255, 255, 0.55);
+            border-radius: 28px;
+            box-shadow: 0 24px 70px rgba(4, 20, 37, 0.18);
+            margin-top: 1.2rem;
+            margin-bottom: 1.2rem;
+        }
+
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #071425 0%, #102a43 100%);
+            border-right: 1px solid rgba(191, 154, 95, 0.32);
+        }
+
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] div {
+            color: #f7f1e8 !important;
+        }
+
+        section[data-testid="stSidebar"] [data-baseweb="select"] div {
+            color: #071425 !important;
+        }
+
+        h1, h2, h3 {
+            color: #102033;
+            letter-spacing: -0.03em;
+        }
+
+        div[data-testid="stMetric"] {
+            background: linear-gradient(145deg, #ffffff 0%, #f5f0e8 100%);
+            border: 1px solid rgba(191, 154, 95, 0.24);
+            border-radius: 20px;
+            padding: 18px 20px;
+            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.08);
+        }
+
+        div[data-testid="stMetricValue"] {
+            color: #0e2338;
+            font-weight: 800;
+        }
+
+        .stButton > button,
+        .stDownloadButton > button,
+        button[kind="primary"] {
+            border-radius: 999px !important;
+            background: linear-gradient(135deg, #0e2338 0%, #173b5c 60%, #bf9a5f 100%) !important;
+            color: white !important;
+            border: 0 !important;
+            font-weight: 700 !important;
+            padding: 0.55rem 1.2rem !important;
+            box-shadow: 0 10px 24px rgba(14, 35, 56, 0.20);
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 14px 28px rgba(14, 35, 56, 0.28);
+        }
+
+        div[data-testid="stDataFrame"] {
+            border-radius: 18px;
+            overflow: hidden;
+            border: 1px solid rgba(14, 35, 56, 0.10);
+            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.06);
+        }
+
+        .brand-hero {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            padding: 26px 30px;
+            margin-bottom: 26px;
+            border-radius: 26px;
+            background:
+                linear-gradient(135deg, rgba(14,35,56,0.97) 0%, rgba(20,53,82,0.94) 58%, rgba(191,154,95,0.92) 100%);
+            box-shadow: 0 18px 45px rgba(7, 20, 37, 0.22);
+            color: white;
+        }
+
+        .brand-left {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+        }
+
+        .brand-logo {
+            width: 76px;
+            height: 76px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.94);
+            color: #0e2338;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 34px;
+            font-weight: 800;
+            letter-spacing: -0.10em;
+            border: 1px solid rgba(191,154,95,0.45);
+            box-shadow: inset 0 0 0 2px rgba(191,154,95,0.12), 0 10px 24px rgba(0,0,0,0.16);
+        }
+
+        .brand-title {
+            font-size: 30px;
+            line-height: 1.05;
+            font-weight: 800;
+            letter-spacing: -0.04em;
+        }
+
+        .brand-subtitle {
+            margin-top: 8px;
+            color: rgba(255,255,255,0.78);
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .brand-tag {
+            padding: 9px 14px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.13);
+            border: 1px solid rgba(255,255,255,0.25);
+            font-size: 13px;
+            font-weight: 700;
+            color: #fff;
+            white-space: nowrap;
+        }
+
+        .login-card {
+            max-width: 460px;
+            margin: 6vh auto 0 auto;
+            padding: 34px 34px 30px 34px;
+            border-radius: 30px;
+            background: rgba(255,255,255,0.94);
+            border: 1px solid rgba(191,154,95,0.30);
+            box-shadow: 0 26px 80px rgba(4, 20, 37, 0.32);
+            text-align: center;
+        }
+
+        .login-logo {
+            width: 96px;
+            height: 96px;
+            border-radius: 26px;
+            margin: 0 auto 18px auto;
+            background: linear-gradient(145deg, #ffffff, #f3eadc);
+            color: #0e2338;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 42px;
+            font-weight: 800;
+            letter-spacing: -0.10em;
+            border: 1px solid rgba(191,154,95,0.45);
+        }
+
+        .login-title {
+            font-size: 26px;
+            font-weight: 800;
+            color: #0e2338;
+            letter-spacing: -0.03em;
+            margin-bottom: 6px;
+        }
+
+        .login-subtitle {
+            font-size: 14px;
+            color: #667085;
+            margin-bottom: 20px;
+        }
+
+        #MainMenu, footer, header {visibility: hidden;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def mostrar_hero(usuario=None):
+    subtitulo = "Sistema privado de control, inversiones, notas, alertas y extractos"
+    tag = f"Sesión: {usuario}" if usuario else "Private Wealth Dashboard"
+    st.markdown(
+        f"""
+        <div class="brand-hero">
+            <div class="brand-left">
+                <div class="brand-logo">CF</div>
+                <div>
+                    <div class="brand-title">Chaparro Fernández Wealth</div>
+                    <div class="brand-subtitle">{subtitulo}</div>
+                </div>
+            </div>
+            <div class="brand-tag">{tag}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+aplicar_estilo_profesional()
+
+
 # =========================
 # 🔒 LOGIN PROFESIONAL POR USUARIO
 # =========================
@@ -29,8 +253,16 @@ if "usuario" not in st.session_state:
     st.session_state.usuario = None
 
 if not st.session_state.autenticado:
-    st.title("🔒 Acceso privado")
-    st.caption("Introduce tu usuario y contraseña para acceder al Sistema Fondo.")
+    st.markdown(
+        """
+        <div class="login-card">
+            <div class="login-logo">CF</div>
+            <div class="login-title">Chaparro Fernández Wealth</div>
+            <div class="login-subtitle">Acceso privado al sistema financiero interno</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.form("login_form"):
         usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
@@ -47,15 +279,12 @@ if not st.session_state.autenticado:
 
     st.stop()
 
-# Barra superior una vez dentro
-col_usuario, col_salida = st.columns([4, 1])
-with col_usuario:
-    st.caption(f"Sesión iniciada como: **{st.session_state.usuario}**")
-with col_salida:
-    if st.button("Cerrar sesión"):
-        st.session_state.autenticado = False
-        st.session_state.usuario = None
-        st.rerun()
+# Barra lateral de sesión una vez dentro
+st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+if st.sidebar.button("Cerrar sesión"):
+    st.session_state.autenticado = False
+    st.session_state.usuario = None
+    st.rerun()
 
 ARCHIVO = "inversiones.xlsx"
 HOJA_INVERSIONES = "INVERSIONES"
@@ -1435,8 +1664,7 @@ def seccion_extractos():
             st.download_button("Descargar todos en ZIP", zip_buffer.getvalue(), file_name=f"extractos_{mes}_{anio}.zip", mime="application/zip")
 
 
-st.title("📊 Sistema Fondo")
-st.caption("Aplicación conectada al Excel inversiones.xlsx")
+mostrar_hero(st.session_state.usuario)
 
 try:
     df_inv, df_cal, df_control = cargar_excel_completo()
