@@ -214,6 +214,15 @@ def fmt(x):
         return "$0.00"
 
 
+def fmt_pct(x):
+    try:
+        if pd.isna(x):
+            return "0.00%"
+        return f"{float(x) * 100:.2f}%"
+    except Exception:
+        return "0.00%"
+
+
 def nombre_mes_es(mes: int) -> str:
     meses = {1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio", 7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"}
     return meses.get(int(mes), str(mes))
@@ -943,6 +952,87 @@ def detectar_alertas_financieras(df_inv, df_cal, df_control):
     return out
 
 
+def calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio: int, mes: int) -> pd.DataFrame:
+    """
+    Construye una tabla homogénea de rentabilidad mensual por inversión.
+    - rentabilidad_beneficio_mes: beneficio empresa / capital.
+    - rentabilidad_beneficio_anualizada: rentabilidad mensual x 12.
+    - rentabilidad_pagada_inversor_mes: pago inversor / capital.
+    - rentabilidad_pagada_inversor_anualizada: rentabilidad mensual pagada x 12.
+    """
+    filas = []
+
+    # Notas estructuradas
+    _, _, _, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
+    if detalle_notas is not None and not detalle_notas.empty:
+        for _, row in detalle_notas.iterrows():
+            capital = float(row.get("capital_invertido", 0) or 0)
+            cobro = float(row.get("cobro_compania", 0) or 0)
+            pago = float(row.get("pago_inversor", 0) or 0)
+            beneficio = float(row.get("beneficio_empresa", 0) or 0)
+            filas.append({
+                "activo": "notas",
+                "nombre_activo": f"NOTA {row.get('nota', '')}",
+                "id_inversion": row.get("id_inversion", ""),
+                "inversor": row.get("inversor", ""),
+                "capital": capital,
+                "cobro_compania_mes": cobro,
+                "pago_inversor_mes": pago,
+                "beneficio_empresa_mes": beneficio,
+                "resultado_observacion": row.get("resultado_observacion", ""),
+                "rentabilidad_beneficio_mes": beneficio / capital if capital else 0,
+                "rentabilidad_beneficio_anualizada": (beneficio / capital * 12) if capital else 0,
+                "rentabilidad_pagada_inversor_mes": pago / capital if capital else 0,
+                "rentabilidad_pagada_inversor_anualizada": (pago / capital * 12) if capital else 0,
+            })
+
+    # Activos con rentabilidad fija / operativa
+    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
+        if det is None or det.empty:
+            continue
+        for _, row in det.iterrows():
+            capital = float(row.get("capital_invertido", 0) or 0)
+            cobro = float(row.get("ingreso_bruto", 0) or 0)
+            pago = float(row.get("pago_inversor_mes", 0) or 0)
+            beneficio = float(row.get("beneficio_empresa_mes", 0) or 0)
+            filas.append({
+                "activo": activo,
+                "nombre_activo": activo,
+                "id_inversion": row.get("id_inversion", ""),
+                "inversor": row.get("inversor", ""),
+                "capital": capital,
+                "cobro_compania_mes": cobro,
+                "pago_inversor_mes": pago,
+                "beneficio_empresa_mes": beneficio,
+                "resultado_observacion": "NO APLICA",
+                "rentabilidad_beneficio_mes": beneficio / capital if capital else 0,
+                "rentabilidad_beneficio_anualizada": (beneficio / capital * 12) if capital else 0,
+                "rentabilidad_pagada_inversor_mes": pago / capital if capital else 0,
+                "rentabilidad_pagada_inversor_anualizada": (pago / capital * 12) if capital else 0,
+            })
+
+    return pd.DataFrame(filas)
+
+
+def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in ["capital", "cobro_compania_mes", "pago_inversor_mes", "beneficio_empresa_mes"]:
+        if col in out.columns:
+            out[col] = out[col].map(fmt)
+    for col in [
+        "rentabilidad_beneficio_mes",
+        "rentabilidad_beneficio_anualizada",
+        "rentabilidad_pagada_inversor_mes",
+        "rentabilidad_pagada_inversor_anualizada",
+    ]:
+        if col in out.columns:
+            out[col] = out[col].map(fmt_pct)
+    return out
+
+
 def obtener_resumen_dashboard(df_inv, df_cal, df_control):
     hoy = pd.Timestamp.today().normalize()
     activas = inversiones_activas_global(df_inv, hoy)
@@ -960,8 +1050,49 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control):
     cobro_fijos = d_fijos["ingreso_bruto"].sum() if not d_fijos.empty else 0
     pago_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
     beneficio_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
+
+    cobro_total_mes = c_notas + cobro_fijos
+    pago_total_mes = p_notas + pago_fijos
+    beneficio_total_mes = b_notas + beneficio_fijos
+
+    rentabilidad_beneficio_mes = beneficio_total_mes / capital_total if capital_total else 0
+    rentabilidad_beneficio_anualizada = rentabilidad_beneficio_mes * 12
+    rentabilidad_pagada_inversor_mes = pago_total_mes / capital_total if capital_total else 0
+    rentabilidad_pagada_inversor_anualizada = rentabilidad_pagada_inversor_mes * 12
+
+    rentabilidad_inversiones = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, hoy.year, hoy.month)
+
+    if not rentabilidad_inversiones.empty:
+        rentabilidad_por_activo = rentabilidad_inversiones.groupby("activo", as_index=False).agg(
+            capital=("capital", "sum"),
+            cobro_compania_mes=("cobro_compania_mes", "sum"),
+            pago_inversor_mes=("pago_inversor_mes", "sum"),
+            beneficio_empresa_mes=("beneficio_empresa_mes", "sum"),
+        )
+        rentabilidad_por_activo["rentabilidad_beneficio_mes"] = rentabilidad_por_activo.apply(lambda r: r["beneficio_empresa_mes"] / r["capital"] if r["capital"] else 0, axis=1)
+        rentabilidad_por_activo["rentabilidad_beneficio_anualizada"] = rentabilidad_por_activo["rentabilidad_beneficio_mes"] * 12
+        rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] = rentabilidad_por_activo.apply(lambda r: r["pago_inversor_mes"] / r["capital"] if r["capital"] else 0, axis=1)
+        rentabilidad_por_activo["rentabilidad_pagada_inversor_anualizada"] = rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] * 12
+    else:
+        rentabilidad_por_activo = pd.DataFrame()
+
     eventos_futuros = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy)].copy().sort_values("fecha") if not df_cal.empty else pd.DataFrame()
-    return {"activas": activas, "capital_total": capital_total, "cobro_total_mes": c_notas + cobro_fijos, "pago_total_mes": p_notas + pago_fijos, "beneficio_total_mes": b_notas + beneficio_fijos, "eventos_futuros": eventos_futuros, "detalle_notas": detalle_notas, "detalle_fijos": d_fijos}
+    return {
+        "activas": activas,
+        "capital_total": capital_total,
+        "cobro_total_mes": cobro_total_mes,
+        "pago_total_mes": pago_total_mes,
+        "beneficio_total_mes": beneficio_total_mes,
+        "rentabilidad_beneficio_mes": rentabilidad_beneficio_mes,
+        "rentabilidad_beneficio_anualizada": rentabilidad_beneficio_anualizada,
+        "rentabilidad_pagada_inversor_mes": rentabilidad_pagada_inversor_mes,
+        "rentabilidad_pagada_inversor_anualizada": rentabilidad_pagada_inversor_anualizada,
+        "rentabilidad_inversiones": rentabilidad_inversiones,
+        "rentabilidad_por_activo": rentabilidad_por_activo,
+        "eventos_futuros": eventos_futuros,
+        "detalle_notas": detalle_notas,
+        "detalle_fijos": d_fijos,
+    }
 
 
 def grafico_capital_por_activo(activas):
@@ -1019,7 +1150,8 @@ def dashboard_financiero():
     resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control)
     alertas = detectar_alertas_financieras(df_inv, df_cal, df_control)
     st.markdown("## Dashboard financiero")
-    st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio, riesgos y próximos eventos.")
+    st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio, rentabilidades, riesgos y próximos eventos.")
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         tarjeta_kpi("Capital activo total", fmt(resumen["capital_total"]), "Capital actualmente vivo", "normal")
@@ -1030,6 +1162,18 @@ def dashboard_financiero():
     with c4:
         estado = "positivo" if resumen["beneficio_total_mes"] >= 0 else "negativo"
         tarjeta_kpi("Beneficio estimado mes", fmt(resumen["beneficio_total_mes"]), "Margen neto estimado", estado)
+
+    st.markdown("### Rentabilidad del mes")
+    r1, r2, r3, r4 = st.columns(4)
+    with r1:
+        tarjeta_kpi("Rent. beneficio mensual", fmt_pct(resumen["rentabilidad_beneficio_mes"]), "Beneficio / capital activo", "positivo" if resumen["rentabilidad_beneficio_mes"] >= 0 else "negativo")
+    with r2:
+        tarjeta_kpi("Rent. beneficio anualizada", fmt_pct(resumen["rentabilidad_beneficio_anualizada"]), "Mensual x 12", "positivo" if resumen["rentabilidad_beneficio_anualizada"] >= 0 else "negativo")
+    with r3:
+        tarjeta_kpi("% pagado inversores mes", fmt_pct(resumen["rentabilidad_pagada_inversor_mes"]), "Pago inversores / capital", "riesgo")
+    with r4:
+        tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
+
     st.markdown("---")
     if not alertas.empty:
         altas = alertas[alertas["Prioridad"] == "ALTA"]
@@ -1041,13 +1185,43 @@ def dashboard_financiero():
             st.dataframe(alertas, use_container_width=True)
     else:
         st.success("No hay alertas activas. Sistema estable.")
-    tab1, tab2, tab3 = st.tabs(["Capital por activo", "Capital por inversor", "Beneficio mensual"])
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Capital por activo",
+        "Capital por inversor",
+        "Beneficio mensual",
+        "Rentabilidad por activo",
+        "Rentabilidad por inversión",
+    ])
     with tab1:
         grafico_capital_por_activo(resumen["activas"])
     with tab2:
         grafico_capital_por_inversor(resumen["activas"])
     with tab3:
         grafico_beneficio_mensual(df_inv, df_cal, df_control)
+    with tab4:
+        st.caption("Resumen del mes actual por tipo de activo. La rentabilidad anualizada es la rentabilidad mensual multiplicada por 12.")
+        tabla_activo = resumen.get("rentabilidad_por_activo", pd.DataFrame())
+        if tabla_activo is None or tabla_activo.empty:
+            st.info("No hay datos de rentabilidad por activo para este mes.")
+        else:
+            st.dataframe(preparar_tabla_rentabilidad(tabla_activo), use_container_width=True)
+    with tab5:
+        st.caption("Detalle inversión por inversión: cuánto genera, cuánto se paga al inversor y qué rentabilidad de beneficio deja.")
+        tabla_inv = resumen.get("rentabilidad_inversiones", pd.DataFrame())
+        if tabla_inv is None or tabla_inv.empty:
+            st.info("No hay datos de rentabilidad por inversión para este mes.")
+        else:
+            columnas = [
+                "activo", "nombre_activo", "id_inversion", "inversor", "capital",
+                "cobro_compania_mes", "pago_inversor_mes", "beneficio_empresa_mes",
+                "rentabilidad_beneficio_mes", "rentabilidad_beneficio_anualizada",
+                "rentabilidad_pagada_inversor_mes", "rentabilidad_pagada_inversor_anualizada",
+                "resultado_observacion",
+            ]
+            columnas = [c for c in columnas if c in tabla_inv.columns]
+            st.dataframe(preparar_tabla_rentabilidad(tabla_inv[columnas]), use_container_width=True)
+
     st.markdown("### Próximos eventos")
     eventos = resumen["eventos_futuros"].head(12)
     if eventos.empty:
@@ -1909,5 +2083,6 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
+
 
 
