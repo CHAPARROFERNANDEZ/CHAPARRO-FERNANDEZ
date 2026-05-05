@@ -1032,31 +1032,6 @@ def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = out[col].map(fmt_pct)
     return out
 
-@st.cache_data(show_spinner=False)
-def obtener_precio_bitcoin_usd():
-    """Devuelve el último precio disponible de Bitcoin en USD usando yfinance."""
-    if yf is None:
-        return None, None
-    try:
-        btc = yf.Ticker("BTC-USD")
-        hist = btc.history(period="1d", interval="1m")
-        if hist is not None and not hist.empty and "Close" in hist.columns:
-            serie = hist["Close"].dropna()
-            if not serie.empty:
-                precio = float(serie.iloc[-1])
-                fecha = pd.Timestamp(serie.index[-1])
-                return precio, fecha
-
-        # Fallback por si el histórico intradía falla.
-        fast_info = getattr(btc, "fast_info", {})
-        precio = fast_info.get("last_price") if hasattr(fast_info, "get") else None
-        if precio is not None:
-            return float(precio), pd.Timestamp.now()
-    except Exception:
-        return None, None
-    return None, None
-
-
 def inicio_semana_lunes(fecha):
     fecha = pd.Timestamp(fecha).normalize()
     return fecha - pd.Timedelta(days=fecha.weekday())
@@ -1084,31 +1059,14 @@ def resumen_cobros_semanales_mes_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
     return resumen[["semana", "nota", "fecha_pago", "cobro_compania"]]
 
 
-def mostrar_bitcoin_y_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
-    st.markdown("### Bitcoin y cobros semanales del mes")
-    st.caption("El precio de BTC-USD queda guardado hasta que pulses el botón manual de actualización.")
-
-    col_btc, col_boton, col_filtros = st.columns([1.4, 0.9, 2.7])
-
-    with col_boton:
-        st.write("")
-        if st.button("Actualizar BTC", key="btn_actualizar_btc_dashboard"):
-            st.cache_data.clear()
-            st.rerun()
-
-    precio_btc, fecha_btc = obtener_precio_bitcoin_usd()
-    with col_btc:
-        if precio_btc is None:
-            tarjeta_kpi("Bitcoin BTC-USD", "Sin dato", "Pulsa actualizar o revisa yfinance", "riesgo")
-        else:
-            fecha_txt = pd.Timestamp(fecha_btc).strftime("%d/%m/%Y %H:%M") if fecha_btc is not None else "último dato disponible"
-            tarjeta_kpi("Bitcoin BTC-USD", fmt(precio_btc), f"Última actualización: {fecha_txt}", "normal")
+def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
+    st.markdown("### Cobros semanales del mes")
+    st.caption("Resumen semanal de cobros previstos por notas. Se muestra solo el total por semana, sin desglose por nota.")
 
     hoy = pd.Timestamp.today().normalize()
-    with col_filtros:
-        col_anio, col_mes = st.columns(2)
-        anio = int(col_anio.number_input("Año para cobros semanales", 2020, 2100, hoy.year, key="dashboard_cobros_sem_anio"))
-        mes = int(col_mes.number_input("Mes para cobros semanales", 1, 12, hoy.month, key="dashboard_cobros_sem_mes"))
+    col_anio, col_mes = st.columns(2)
+    anio = int(col_anio.number_input("Año para cobros semanales", 2020, 2100, hoy.year, key="dashboard_cobros_sem_anio"))
+    mes = int(col_mes.number_input("Mes para cobros semanales", 1, 12, hoy.month, key="dashboard_cobros_sem_mes"))
 
     tabla_semanal = resumen_cobros_semanales_mes_notas(df_inv, df_cal, df_control, anio, mes)
     if tabla_semanal.empty:
@@ -1118,13 +1076,7 @@ def mostrar_bitcoin_y_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: p
     resumen_semana = tabla_semanal.groupby("semana", as_index=False)["cobro_compania"].sum()
     resumen_semana = resumen_semana.rename(columns={"cobro_compania": "total_semana"})
 
-    st.markdown("#### Total por semana")
     st.dataframe(preparar_tabla_monetaria(resumen_semana, ["total_semana"]), use_container_width=True)
-
-    st.markdown("#### Desglose por nota")
-    detalle = tabla_semanal.copy()
-    detalle["fecha_pago"] = pd.to_datetime(detalle["fecha_pago"], errors="coerce").dt.strftime("%d/%m/%Y")
-    st.dataframe(preparar_tabla_monetaria(detalle, ["cobro_compania"]), use_container_width=True)
 
 
 
@@ -1318,7 +1270,7 @@ def dashboard_financiero():
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
-    mostrar_bitcoin_y_cobros_semanales_dashboard(df_inv, df_cal, df_control)
+    mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
