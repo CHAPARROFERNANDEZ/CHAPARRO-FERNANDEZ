@@ -1032,6 +1032,94 @@ def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = out[col].map(fmt_pct)
     return out
 
+@st.cache_data(show_spinner=False, ttl=60)
+def obtener_precio_bitcoin_usd():
+    """Devuelve el último precio disponible de Bitcoin en USD usando yfinance."""
+    if yf is None:
+        return None, None
+    try:
+        btc = yf.Ticker("BTC-USD")
+        hist = btc.history(period="1d", interval="1m")
+        if hist is not None and not hist.empty and "Close" in hist.columns:
+            serie = hist["Close"].dropna()
+            if not serie.empty:
+                precio = float(serie.iloc[-1])
+                fecha = pd.Timestamp(serie.index[-1])
+                return precio, fecha
+
+        # Fallback por si el histórico intradía falla.
+        fast_info = getattr(btc, "fast_info", {})
+        precio = fast_info.get("last_price") if hasattr(fast_info, "get") else None
+        if precio is not None:
+            return float(precio), pd.Timestamp.now()
+    except Exception:
+        return None, None
+    return None, None
+
+
+def inicio_semana_lunes(fecha):
+    fecha = pd.Timestamp(fecha).normalize()
+    return fecha - pd.Timedelta(days=fecha.weekday())
+
+
+def resumen_cobros_semanales_mes_notas(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
+    """Agrupa los cobros de notas por semanas naturales lunes-domingo dentro de un mes."""
+    pagos_mes = pagos_notas_mes(df_cal, anio, mes)
+    detalle = preparar_detalle_notas(df_inv, pagos_mes, df_cal=df_cal, df_control=df_control)
+    if detalle is None or detalle.empty:
+        return pd.DataFrame(columns=["semana", "nota", "fecha_pago", "cobro_compania"])
+
+    trabajo = detalle.copy()
+    trabajo["fecha_pago"] = pd.to_datetime(trabajo["fecha_pago"], errors="coerce").dt.normalize()
+    trabajo = trabajo[trabajo["fecha_pago"].notna()].copy()
+    trabajo["inicio_semana"] = trabajo["fecha_pago"].apply(inicio_semana_lunes)
+    trabajo["fin_semana"] = trabajo["inicio_semana"] + pd.Timedelta(days=6)
+    trabajo["semana"] = trabajo.apply(
+        lambda r: f"Semana del {r['inicio_semana'].day} - {r['fin_semana'].day} de {nombre_mes_es(int(r['inicio_semana'].month))}",
+        axis=1,
+    )
+
+    resumen = trabajo.groupby(["inicio_semana", "fin_semana", "semana", "nota", "fecha_pago"], as_index=False)["cobro_compania"].sum()
+    resumen = resumen.sort_values(["inicio_semana", "fecha_pago", "nota"])
+    return resumen[["semana", "nota", "fecha_pago", "cobro_compania"]]
+
+
+def mostrar_bitcoin_y_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
+    st.markdown("### Bitcoin y cobros semanales del mes")
+    st.caption("Precio de BTC-USD actualizado desde yfinance y cobros previstos por semana natural del mes seleccionado.")
+
+    precio_btc, fecha_btc = obtener_precio_bitcoin_usd()
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if precio_btc is None:
+            tarjeta_kpi("Bitcoin BTC-USD", "Sin dato", "Revisa conexión o yfinance", "riesgo")
+        else:
+            fecha_txt = pd.Timestamp(fecha_btc).strftime("%d/%m/%Y %H:%M") if fecha_btc is not None else "último dato disponible"
+            tarjeta_kpi("Bitcoin BTC-USD", fmt(precio_btc), f"Último dato: {fecha_txt}", "normal")
+
+    hoy = pd.Timestamp.today().normalize()
+    with c2:
+        col_anio, col_mes = st.columns(2)
+        anio = int(col_anio.number_input("Año para cobros semanales", 2020, 2100, hoy.year, key="dashboard_cobros_sem_anio"))
+        mes = int(col_mes.number_input("Mes para cobros semanales", 1, 12, hoy.month, key="dashboard_cobros_sem_mes"))
+
+    tabla_semanal = resumen_cobros_semanales_mes_notas(df_inv, df_cal, df_control, anio, mes)
+    if tabla_semanal.empty:
+        st.info("No hay cobros de notas previstos para ese mes.")
+        return
+
+    resumen_semana = tabla_semanal.groupby("semana", as_index=False)["cobro_compania"].sum()
+    resumen_semana = resumen_semana.rename(columns={"cobro_compania": "total_semana"})
+
+    st.markdown("#### Total por semana")
+    st.dataframe(preparar_tabla_monetaria(resumen_semana, ["total_semana"]), use_container_width=True)
+
+    st.markdown("#### Desglose por nota")
+    detalle = tabla_semanal.copy()
+    detalle["fecha_pago"] = pd.to_datetime(detalle["fecha_pago"], errors="coerce").dt.strftime("%d/%m/%Y")
+    st.dataframe(preparar_tabla_monetaria(detalle, ["cobro_compania"]), use_container_width=True)
+
+
 
 def obtener_resumen_dashboard(df_inv, df_cal, df_control):
     hoy = pd.Timestamp.today().normalize()
@@ -1198,9 +1286,8 @@ def mostrar_rentabilidad_por_activo_dashboard(tabla_activo: pd.DataFrame):
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
     resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control)
-    alertas = detectar_alertas_financieras(df_inv, df_cal, df_control)
     st.markdown("## Dashboard financiero")
-    st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio, rentabilidades, riesgos y próximos eventos.")
+    st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1224,19 +1311,11 @@ def dashboard_financiero():
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
+    mostrar_bitcoin_y_cobros_semanales_dashboard(df_inv, df_cal, df_control)
+
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
     st.markdown("---")
-    if not alertas.empty:
-        altas = alertas[alertas["Prioridad"] == "ALTA"]
-        if not altas.empty:
-            st.error(f"Hay {len(altas)} alertas críticas que requieren revisión.")
-        else:
-            st.warning(f"Hay {len(alertas)} alertas próximas o de seguimiento.")
-        with st.expander("Ver alertas del sistema", expanded=True):
-            st.dataframe(alertas, use_container_width=True)
-    else:
-        st.success("No hay alertas activas. Sistema estable.")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Capital por activo",
@@ -1273,15 +1352,6 @@ def dashboard_financiero():
             ]
             columnas = [c for c in columnas if c in tabla_inv.columns]
             st.dataframe(preparar_tabla_rentabilidad(tabla_inv[columnas]), use_container_width=True)
-
-    st.markdown("### Próximos eventos")
-    eventos = resumen["eventos_futuros"].head(12)
-    if eventos.empty:
-        st.info("No hay próximos eventos registrados.")
-    else:
-        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
-    st.markdown("### Estado de calidad de datos")
-    st.dataframe(validar_base_datos(df_inv, df_cal, df_control), use_container_width=True)
 
 
 def centro_control_inversiones():
@@ -2303,22 +2373,3 @@ elif menu == "Consultas Notas":
 elif menu == "Consultas Paraguay":
     seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
 elif menu == "Consultas MotoClick":
-    seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
-elif menu == "Notas estructuradas":
-    seccion_notas_archivo()
-elif menu == "Alertas y calendario":
-    panel_alertas_y_calendario()
-elif menu == "Sistema Fondo":
-    seccion_sistema_fondo()
-elif menu == "Extractos":
-    seccion_extractos()
-elif menu == "Gestión de Excel":
-    seccion_gestion_excel()
-elif menu == "Calidad de datos":
-    panel_calidad_datos()
-elif menu == "Base de datos":
-    st.markdown("## Base de datos")
-    hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
-    hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
-    st.dataframe(hojas[hoja], use_container_width=True)
-
