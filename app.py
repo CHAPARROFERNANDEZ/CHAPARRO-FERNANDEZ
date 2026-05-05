@@ -1416,6 +1416,208 @@ def seccion_extractos():
             st.download_button("Descargar todos en ZIP", zip_buffer.getvalue(), file_name=f"extractos_{mes}_{anio}.zip", mime="application/zip")
 
 
+
+# =========================
+# GESTIÓN DE EXCEL DESDE LA APP
+# =========================
+def leer_todas_las_hojas_excel() -> dict:
+    """Lee todas las hojas del archivo Excel para poder conservarlas al guardar."""
+    try:
+        hojas = pd.read_excel(ARCHIVO, sheet_name=None)
+        return {str(nombre): df for nombre, df in hojas.items()}
+    except Exception:
+        return {}
+
+
+def excel_hojas_a_bytes(hojas: dict) -> bytes:
+    """Convierte un diccionario de hojas en un Excel descargable."""
+    salida = BytesIO()
+    with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+        for nombre_hoja, df in hojas.items():
+            nombre_limpio = str(nombre_hoja)[:31] if str(nombre_hoja).strip() else "Hoja"
+            if df is None:
+                df = pd.DataFrame()
+            df.to_excel(writer, sheet_name=nombre_limpio, index=False)
+    return salida.getvalue()
+
+
+def guardar_excel_completo_desde_hojas(hojas: dict):
+    """Guarda todas las hojas en inversiones.xlsx y limpia la caché."""
+    contenido = excel_hojas_a_bytes(hojas)
+    with open(ARCHIVO, "wb") as f:
+        f.write(contenido)
+    st.cache_data.clear()
+
+
+def aplicar_formula_simple(df: pd.DataFrame, operacion: str, columna_a: str, columna_b: str | None, nueva_columna: str) -> pd.DataFrame:
+    """Aplica cálculos tipo Excel básicos sobre columnas numéricas."""
+    out = df.copy()
+    if not nueva_columna or not str(nueva_columna).strip():
+        nueva_columna = "columna_calculada"
+    nueva_columna = str(nueva_columna).strip()
+
+    a = pd.to_numeric(out[columna_a], errors="coerce") if columna_a in out.columns else pd.Series(0, index=out.index)
+    b = pd.to_numeric(out[columna_b], errors="coerce") if columna_b and columna_b in out.columns else pd.Series(0, index=out.index)
+
+    if operacion == "Sumar A + B":
+        out[nueva_columna] = a.fillna(0) + b.fillna(0)
+    elif operacion == "Restar A - B":
+        out[nueva_columna] = a.fillna(0) - b.fillna(0)
+    elif operacion == "Multiplicar A x B":
+        out[nueva_columna] = a.fillna(0) * b.fillna(0)
+    elif operacion == "Dividir A / B":
+        out[nueva_columna] = a / b.replace(0, pd.NA)
+    elif operacion == "Porcentaje A sobre B":
+        out[nueva_columna] = (a / b.replace(0, pd.NA)) * 100
+    elif operacion == "Interés mensual: capital x interés / 12":
+        if "capital_invertido" in out.columns and "interes_inversor_anual" in out.columns:
+            capital = pd.to_numeric(out["capital_invertido"], errors="coerce").fillna(0)
+            interes = pd.to_numeric(out["interes_inversor_anual"], errors="coerce").fillna(0)
+            out[nueva_columna] = capital * interes / 12
+        else:
+            st.warning("Para esta fórmula necesitas las columnas capital_invertido e interes_inversor_anual.")
+    elif operacion == "Interés nota mensual: capital x interés nota / 12":
+        if "capital_invertido" in out.columns and "interes_nota_anual" in out.columns:
+            capital = pd.to_numeric(out["capital_invertido"], errors="coerce").fillna(0)
+            interes = pd.to_numeric(out["interes_nota_anual"], errors="coerce").fillna(0)
+            out[nueva_columna] = capital * interes / 12
+        else:
+            st.warning("Para esta fórmula necesitas las columnas capital_invertido e interes_nota_anual.")
+    return out
+
+
+def mostrar_sumatorias_excel(df: pd.DataFrame):
+    """Muestra sumatorias rápidas de columnas numéricas como apoyo tipo Excel."""
+    if df is None or df.empty:
+        return
+    numericas = []
+    for col in df.columns:
+        serie = pd.to_numeric(df[col], errors="coerce")
+        if serie.notna().sum() > 0:
+            numericas.append(col)
+    if not numericas:
+        st.info("No hay columnas numéricas para sumar.")
+        return
+    seleccion = st.multiselect("Columnas para calcular sumatorias", numericas, default=numericas[: min(4, len(numericas))])
+    if seleccion:
+        cols = st.columns(min(4, len(seleccion)))
+        for i, col in enumerate(seleccion):
+            total = pd.to_numeric(df[col], errors="coerce").sum()
+            cols[i % len(cols)].metric(f"Suma {col}", fmt(total))
+
+
+def seccion_gestion_excel():
+    st.markdown("## Gestión de Excel")
+    st.caption("Sube, edita, calcula, guarda y descarga la base de datos directamente desde la app.")
+
+    tab_subir, tab_editar, tab_descargar = st.tabs(["Subir Excel", "Editar y calcular", "Descargar copia"])
+
+    with tab_subir:
+        st.subheader("Subir o reemplazar inversiones.xlsx")
+        st.warning("En Streamlit Cloud los cambios guardados pueden ser temporales. Para dejarlos permanentes, descarga el Excel actualizado y súbelo también a GitHub.")
+        archivo_subido = st.file_uploader("Sube el archivo actualizado", type=["xlsx"])
+        if archivo_subido is not None:
+            nombre = archivo_subido.name.strip()
+            if nombre != ARCHIVO:
+                st.warning(f"El archivo se llama '{nombre}'. El sistema trabaja con '{ARCHIVO}'. Se guardará igualmente como {ARCHIVO}.")
+            if st.button("Reemplazar Excel actual", type="primary"):
+                with open(ARCHIVO, "wb") as f:
+                    f.write(archivo_subido.read())
+                st.cache_data.clear()
+                for k in list(st.session_state.keys()):
+                    if str(k).startswith("excel_editor_"):
+                        del st.session_state[k]
+                st.success("Excel actualizado correctamente dentro de la app.")
+                st.rerun()
+
+    with tab_editar:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas:
+            st.error("No se ha podido leer el Excel actual.")
+            return
+
+        hoja = st.selectbox("Selecciona la hoja que quieres editar", list(hojas.keys()))
+        editor_key = f"excel_editor_{hoja}"
+
+        c1, c2 = st.columns([1, 1])
+        if editor_key not in st.session_state:
+            st.session_state[editor_key] = hojas[hoja].copy()
+        if c1.button("Recargar hoja desde el Excel"):
+            st.session_state[editor_key] = hojas[hoja].copy()
+            st.rerun()
+        if c2.button("Limpiar caché de datos"):
+            st.cache_data.clear()
+            st.success("Caché limpiada.")
+
+        st.info("Puedes editar celdas, añadir filas nuevas y después guardar los cambios en el Excel.")
+        df_editado = st.data_editor(
+            st.session_state[editor_key],
+            use_container_width=True,
+            num_rows="dynamic",
+            key=f"data_editor_{hoja}",
+        )
+        st.session_state[editor_key] = df_editado
+
+        with st.expander("Sumatorias rápidas", expanded=True):
+            mostrar_sumatorias_excel(df_editado)
+
+        with st.expander("Añadir columna calculada tipo fórmula", expanded=False):
+            columnas = list(df_editado.columns)
+            columnas_numericas = [c for c in columnas if pd.to_numeric(df_editado[c], errors="coerce").notna().sum() > 0]
+            if not columnas_numericas:
+                st.info("No hay columnas numéricas disponibles para crear fórmulas.")
+            else:
+                operacion = st.selectbox(
+                    "Fórmula",
+                    [
+                        "Sumar A + B",
+                        "Restar A - B",
+                        "Multiplicar A x B",
+                        "Dividir A / B",
+                        "Porcentaje A sobre B",
+                        "Interés mensual: capital x interés / 12",
+                        "Interés nota mensual: capital x interés nota / 12",
+                    ],
+                )
+                c1, c2, c3 = st.columns(3)
+                columna_a = c1.selectbox("Columna A", columnas_numericas)
+                columna_b = c2.selectbox("Columna B", columnas_numericas) if operacion not in ["Interés mensual: capital x interés / 12", "Interés nota mensual: capital x interés nota / 12"] else None
+                nueva_columna = c3.text_input("Nombre nueva columna", value="columna_calculada")
+                if st.button("Aplicar fórmula a la hoja"):
+                    st.session_state[editor_key] = aplicar_formula_simple(df_editado, operacion, columna_a, columna_b, nueva_columna)
+                    st.success("Fórmula aplicada. Revisa la nueva columna en la tabla.")
+                    st.rerun()
+
+        c1, c2 = st.columns(2)
+        if c1.button("Guardar cambios en inversiones.xlsx", type="primary"):
+            hojas_actualizadas = leer_todas_las_hojas_excel()
+            hojas_actualizadas[hoja] = st.session_state[editor_key].copy()
+            guardar_excel_completo_desde_hojas(hojas_actualizadas)
+            st.success("Cambios guardados en el Excel de la app.")
+            st.rerun()
+
+        hojas_para_descargar = leer_todas_las_hojas_excel()
+        hojas_para_descargar[hoja] = st.session_state[editor_key].copy()
+        c2.download_button(
+            "Descargar Excel con estos cambios",
+            data=excel_hojas_a_bytes(hojas_para_descargar),
+            file_name=ARCHIVO,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    with tab_descargar:
+        st.subheader("Descargar copia actual")
+        hojas = leer_todas_las_hojas_excel()
+        if hojas:
+            st.download_button(
+                "Descargar inversiones.xlsx",
+                data=excel_hojas_a_bytes(hojas),
+                file_name=ARCHIVO,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.error("No se ha podido preparar la descarga.")
+
 # =========================
 # APP FINAL
 # =========================
@@ -1433,7 +1635,7 @@ menu = st.sidebar.selectbox(
     "Menú principal",
     [
         "Dashboard financiero", "Centro de control", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick",
-        "Notas estructuradas", "Alertas y calendario", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos", "Calidad de datos", "Base de datos",
+        "Notas estructuradas", "Alertas y calendario", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos", "Gestión de Excel", "Calidad de datos", "Base de datos",
     ],
 )
 
@@ -1463,6 +1665,8 @@ elif menu == "Sistema Fondo":
     seccion_sistema_fondo()
 elif menu == "Extractos":
     seccion_extractos()
+elif menu == "Gestión de Excel":
+    seccion_gestion_excel()
 elif menu == "Calidad de datos":
     panel_calidad_datos()
 elif menu == "Base de datos":
