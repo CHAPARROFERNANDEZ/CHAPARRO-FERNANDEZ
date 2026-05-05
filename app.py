@@ -3,7 +3,10 @@ import re
 from datetime import datetime
 from typing import Optional, Tuple
 
+import base64
+
 import pandas as pd
+import requests
 import streamlit as st
 
 try:
@@ -13,278 +16,16 @@ except Exception:
 
 st.set_page_config(page_title="Sistema Fondo", layout="wide")
 
-
 # =========================
-# 🎨 ESTILO PROFESIONAL CHAPARRO FERNÁNDEZ WEALTH
+# 🔒 PROTECCIÓN CON CONTRASEÑA
 # =========================
-def aplicar_estilo_profesional():
-    st.markdown(
-        """
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+CLAVE_APP = "21052022"
 
-        html, body, [class*="css"] {
-            font-family: 'Inter', sans-serif;
-        }
+password = st.text_input("🔒 Introduce la contraseña", type="password")
 
-        .stApp {
-            background:
-                radial-gradient(circle at top left, rgba(191, 154, 95, 0.18), transparent 30%),
-                linear-gradient(135deg, #071425 0%, #0e2338 42%, #f6f3ee 42%, #f6f3ee 100%);
-            background-attachment: fixed;
-        }
-
-        .block-container {
-            max-width: 1180px;
-            padding-top: 2.2rem;
-            padding-bottom: 3rem;
-            background: rgba(255, 255, 255, 0.92);
-            border: 1px solid rgba(255, 255, 255, 0.55);
-            border-radius: 28px;
-            box-shadow: 0 24px 70px rgba(4, 20, 37, 0.18);
-            margin-top: 1.2rem;
-            margin-bottom: 1.2rem;
-        }
-
-        section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #071425 0%, #102a43 100%);
-            border-right: 1px solid rgba(191, 154, 95, 0.32);
-        }
-
-        section[data-testid="stSidebar"] label,
-        section[data-testid="stSidebar"] p,
-        section[data-testid="stSidebar"] span,
-        section[data-testid="stSidebar"] div {
-            color: #f7f1e8 !important;
-        }
-
-        section[data-testid="stSidebar"] [data-baseweb="select"] div {
-            color: #071425 !important;
-        }
-
-        h1, h2, h3 {
-            color: #102033;
-            letter-spacing: -0.03em;
-        }
-
-        div[data-testid="stMetric"] {
-            background: linear-gradient(145deg, #ffffff 0%, #f5f0e8 100%);
-            border: 1px solid rgba(191, 154, 95, 0.24);
-            border-radius: 20px;
-            padding: 18px 20px;
-            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.08);
-        }
-
-        div[data-testid="stMetricValue"] {
-            color: #0e2338;
-            font-weight: 800;
-        }
-
-        .stButton > button,
-        .stDownloadButton > button,
-        button[kind="primary"] {
-            border-radius: 999px !important;
-            background: linear-gradient(135deg, #0e2338 0%, #173b5c 60%, #bf9a5f 100%) !important;
-            color: white !important;
-            border: 0 !important;
-            font-weight: 700 !important;
-            padding: 0.55rem 1.2rem !important;
-            box-shadow: 0 10px 24px rgba(14, 35, 56, 0.20);
-        }
-
-        .stButton > button:hover,
-        .stDownloadButton > button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 14px 28px rgba(14, 35, 56, 0.28);
-        }
-
-        div[data-testid="stDataFrame"] {
-            border-radius: 18px;
-            overflow: hidden;
-            border: 1px solid rgba(14, 35, 56, 0.10);
-            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.06);
-        }
-
-        .brand-hero {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 24px;
-            padding: 26px 30px;
-            margin-bottom: 26px;
-            border-radius: 26px;
-            background:
-                linear-gradient(135deg, rgba(14,35,56,0.97) 0%, rgba(20,53,82,0.94) 58%, rgba(191,154,95,0.92) 100%);
-            box-shadow: 0 18px 45px rgba(7, 20, 37, 0.22);
-            color: white;
-        }
-
-        .brand-left {
-            display: flex;
-            align-items: center;
-            gap: 18px;
-        }
-
-        .brand-logo {
-            width: 76px;
-            height: 76px;
-            border-radius: 20px;
-            background: rgba(255,255,255,0.94);
-            color: #0e2338;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 34px;
-            font-weight: 800;
-            letter-spacing: -0.10em;
-            border: 1px solid rgba(191,154,95,0.45);
-            box-shadow: inset 0 0 0 2px rgba(191,154,95,0.12), 0 10px 24px rgba(0,0,0,0.16);
-        }
-
-        .brand-title {
-            font-size: 30px;
-            line-height: 1.05;
-            font-weight: 800;
-            letter-spacing: -0.04em;
-        }
-
-        .brand-subtitle {
-            margin-top: 8px;
-            color: rgba(255,255,255,0.78);
-            font-size: 14px;
-            font-weight: 500;
-        }
-
-        .brand-tag {
-            padding: 9px 14px;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.13);
-            border: 1px solid rgba(255,255,255,0.25);
-            font-size: 13px;
-            font-weight: 700;
-            color: #fff;
-            white-space: nowrap;
-        }
-
-        .login-card {
-            max-width: 460px;
-            margin: 6vh auto 0 auto;
-            padding: 34px 34px 30px 34px;
-            border-radius: 30px;
-            background: rgba(255,255,255,0.94);
-            border: 1px solid rgba(191,154,95,0.30);
-            box-shadow: 0 26px 80px rgba(4, 20, 37, 0.32);
-            text-align: center;
-        }
-
-        .login-logo {
-            width: 96px;
-            height: 96px;
-            border-radius: 26px;
-            margin: 0 auto 18px auto;
-            background: linear-gradient(145deg, #ffffff, #f3eadc);
-            color: #0e2338;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 42px;
-            font-weight: 800;
-            letter-spacing: -0.10em;
-            border: 1px solid rgba(191,154,95,0.45);
-        }
-
-        .login-title {
-            font-size: 26px;
-            font-weight: 800;
-            color: #0e2338;
-            letter-spacing: -0.03em;
-            margin-bottom: 6px;
-        }
-
-        .login-subtitle {
-            font-size: 14px;
-            color: #667085;
-            margin-bottom: 20px;
-        }
-
-        #MainMenu, footer, header {visibility: hidden;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def mostrar_hero(usuario=None):
-    subtitulo = "Sistema privado de control, inversiones, notas, alertas y extractos"
-    tag = f"Sesión: {usuario}" if usuario else "Private Wealth Dashboard"
-    st.markdown(
-        f"""
-        <div class="brand-hero">
-            <div class="brand-left">
-                <div class="brand-logo">CF</div>
-                <div>
-                    <div class="brand-title">Chaparro Fernández Wealth</div>
-                    <div class="brand-subtitle">{subtitulo}</div>
-                </div>
-            </div>
-            <div class="brand-tag">{tag}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-aplicar_estilo_profesional()
-
-
-# =========================
-# 🔒 LOGIN PROFESIONAL POR USUARIO
-# =========================
-USUARIOS = {
-    "Yuri": "1234",
-    "Jordi": "12345",
-    "Alan": "123456",
-}
-
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
-
-if "usuario" not in st.session_state:
-    st.session_state.usuario = None
-
-if not st.session_state.autenticado:
-    st.markdown(
-        """
-        <div class="login-card">
-            <div class="login-logo">CF</div>
-            <div class="login-title">Chaparro Fernández Wealth</div>
-            <div class="login-subtitle">Acceso privado al sistema financiero interno</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    with st.form("login_form"):
-        usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
-        password = st.text_input("Contraseña", type="password")
-        entrar = st.form_submit_button("Entrar")
-
-    if entrar:
-        if USUARIOS.get(usuario) == password:
-            st.session_state.autenticado = True
-            st.session_state.usuario = usuario
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrectos")
-
+if password != CLAVE_APP:
+    st.warning("Acceso restringido")
     st.stop()
-
-# Barra lateral de sesión una vez dentro
-st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
-if st.sidebar.button("Cerrar sesión"):
-    st.session_state.autenticado = False
-    st.session_state.usuario = None
-    st.rerun()
 
 ARCHIVO = "inversiones.xlsx"
 HOJA_INVERSIONES = "INVERSIONES"
@@ -373,6 +114,144 @@ def cargar_excel_completo():
                 control[col] = pd.to_numeric(control[col], errors="coerce")
 
     return inv, cal, control
+
+
+
+@st.cache_data(show_spinner=False)
+def cargar_todas_las_hojas_excel():
+    """Carga todas las hojas del Excel para poder editarlas sin perder ninguna."""
+    try:
+        hojas = pd.read_excel(ARCHIVO, sheet_name=None)
+        return {nombre: df.copy() for nombre, df in hojas.items()}
+    except Exception:
+        return {}
+
+
+def crear_excel_en_memoria(hojas: dict[str, pd.DataFrame]) -> bytes:
+    """Crea un archivo Excel en memoria manteniendo todas las hojas disponibles."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for nombre_hoja, df in hojas.items():
+            nombre_limpio = str(nombre_hoja)[:31]  # límite de Excel
+            if isinstance(df, pd.DataFrame):
+                df.to_excel(writer, sheet_name=nombre_limpio, index=False)
+    return output.getvalue()
+
+
+def obtener_config_github():
+    """Lee la configuración segura desde Streamlit Secrets."""
+    token = st.secrets.get("GITHUB_TOKEN", "")
+    repo = st.secrets.get("GITHUB_REPO", st.secrets.get("REPO", ""))
+    path = st.secrets.get("GITHUB_FILE_PATH", st.secrets.get("FILE_PATH", ARCHIVO))
+    branch = st.secrets.get("GITHUB_BRANCH", "main")
+    return token, repo, path, branch
+
+
+def guardar_excel_en_github(hojas: dict[str, pd.DataFrame]) -> tuple[bool, str]:
+    """Sobrescribe inversiones.xlsx en GitHub usando la API oficial."""
+    token, repo, path, branch = obtener_config_github()
+
+    if not token or not repo or not path:
+        return False, (
+            "Faltan Secrets. En Streamlit Cloud añade: "
+            "GITHUB_TOKEN, GITHUB_REPO y GITHUB_FILE_PATH."
+        )
+
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    # 1) Obtener SHA actual del archivo
+    r_get = requests.get(url, headers=headers, params={"ref": branch}, timeout=30)
+    if r_get.status_code != 200:
+        return False, f"No se pudo leer el archivo en GitHub: {r_get.status_code} - {r_get.text}"
+
+    sha = r_get.json().get("sha")
+    if not sha:
+        return False, "GitHub no devolvió el SHA del archivo."
+
+    # 2) Crear Excel actualizado en memoria
+    contenido_excel = crear_excel_en_memoria(hojas)
+    contenido_b64 = base64.b64encode(contenido_excel).decode("utf-8")
+
+    # 3) Subir nueva versión
+    payload = {
+        "message": "Actualizar inversiones.xlsx desde la app",
+        "content": contenido_b64,
+        "sha": sha,
+        "branch": branch,
+    }
+    r_put = requests.put(url, headers=headers, json=payload, timeout=60)
+
+    if r_put.status_code not in (200, 201):
+        return False, f"Error al guardar en GitHub: {r_put.status_code} - {r_put.text}"
+
+    st.cache_data.clear()
+    return True, "Excel guardado correctamente en GitHub."
+
+
+def seccion_gestion_datos():
+    st.header("⚙️ Gestión de Datos")
+    st.caption("Edita las hojas del Excel desde la app y guarda los cambios automáticamente en GitHub.")
+
+    hojas = cargar_todas_las_hojas_excel()
+    if not hojas:
+        st.error("No se ha podido cargar el Excel completo.")
+        return
+
+    token, repo, path, branch = obtener_config_github()
+    if not token or not repo:
+        st.warning("Para guardar automáticamente falta configurar Streamlit Secrets.")
+        st.code(
+            'GITHUB_TOKEN = "tu_token"\n'
+            'GITHUB_REPO = "tu_usuario/tu_repo"\n'
+            'GITHUB_FILE_PATH = "inversiones.xlsx"\n'
+            'GITHUB_BRANCH = "main"',
+            language="toml",
+        )
+
+    hoja = st.selectbox("Selecciona la hoja que quieres editar", list(hojas.keys()))
+    df_original = hojas[hoja].copy()
+
+    st.info("Puedes editar celdas, añadir filas o eliminar filas. Luego pulsa Guardar en GitHub.")
+    df_editado = st.data_editor(
+        df_original,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"editor_{hoja}",
+    )
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        guardar = st.button("💾 Guardar en GitHub", type="primary")
+    with c2:
+        st.caption("Al guardar, se sobrescribe inversiones.xlsx en el repositorio y la app queda actualizada.")
+
+    if guardar:
+        hojas_actualizadas = {nombre: df.copy() for nombre, df in hojas.items()}
+        hojas_actualizadas[hoja] = df_editado.copy()
+
+        with st.spinner("Guardando cambios en GitHub..."):
+            ok, mensaje = guardar_excel_en_github(hojas_actualizadas)
+
+        if ok:
+            st.success(mensaje)
+            st.info("Espera unos segundos y recarga la app para ver los cambios aplicados en todas las secciones.")
+        else:
+            st.error(mensaje)
+
+    with st.expander("Descarga de seguridad opcional"):
+        hojas_preview = {nombre: df.copy() for nombre, df in hojas.items()}
+        hojas_preview[hoja] = df_editado.copy()
+        st.download_button(
+            "⬇️ Descargar copia actualizada",
+            data=crear_excel_en_memoria(hojas_preview),
+            file_name="inversiones.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 def filtrar_activo(df_base: pd.DataFrame, activo: str) -> pd.DataFrame:
@@ -1664,7 +1543,8 @@ def seccion_extractos():
             st.download_button("Descargar todos en ZIP", zip_buffer.getvalue(), file_name=f"extractos_{mes}_{anio}.zip", mime="application/zip")
 
 
-mostrar_hero(st.session_state.usuario)
+st.title("📊 Sistema Fondo")
+st.caption("Aplicación conectada al Excel inversiones.xlsx")
 
 try:
     df_inv, df_cal, df_control = cargar_excel_completo()
@@ -1675,7 +1555,7 @@ except Exception as e:
 
 menu = st.sidebar.selectbox(
     "Selecciona una sección",
-    ["Inicio", "Ver Excel", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick", "Notas", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos"],
+    ["Inicio", "Ver Excel", "Gestión de Datos", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick", "Notas", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos"],
 )
 
 if menu == "Inicio":
@@ -1690,6 +1570,9 @@ elif menu == "Ver Excel":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
+
+elif menu == "Gestión de Datos":
+    seccion_gestion_datos()
 
 elif menu == "Consultas Fútbol":
     seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
