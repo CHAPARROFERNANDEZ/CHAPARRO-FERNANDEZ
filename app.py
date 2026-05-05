@@ -1624,32 +1624,224 @@ def seccion_calendario_notas():
             st.download_button("Descargar Excel", data=salida.getvalue(), file_name=f"calendario_notas_{mes}_{anio}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+
+
+def preparar_calendario_integrado_notas(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, df_calls: pd.DataFrame | None = None, fecha_inicio=None, fecha_fin=None) -> pd.DataFrame:
+    """Calendario único de notas: observaciones, pagos cobrables y calls.
+
+    Reglas de pago:
+    - Si la observación asociada es NEGATIVA real, el pago NO se muestra.
+    - Si está PENDIENTE, POSITIVA, SIN DATO, SIN CONTROL o NO EVALUADA, se muestra como pago previsto/habilitado.
+    """
+    filas = []
+
+    if fecha_inicio is not None:
+        fecha_inicio = pd.Timestamp(fecha_inicio).normalize()
+    if fecha_fin is not None:
+        fecha_fin = pd.Timestamp(fecha_fin).normalize()
+
+    def dentro_rango(fecha):
+        if pd.isna(fecha):
+            return False
+        fecha = pd.Timestamp(fecha).normalize()
+        if fecha_inicio is not None and fecha < fecha_inicio:
+            return False
+        if fecha_fin is not None and fecha > fecha_fin:
+            return False
+        return True
+
+    # 1) Observaciones
+    if df_cal is not None and not df_cal.empty:
+        observaciones = df_cal[(df_cal["tipo_evento"] == "OBSERVACION") & (df_cal["fecha"].notna())].copy()
+        for _, row in observaciones.iterrows():
+            fecha = row.get("fecha")
+            if not dentro_rango(fecha):
+                continue
+            nota = row.get("nota")
+            if pd.isna(nota):
+                continue
+            nota_int = int(nota)
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota_int, fecha, preferida="contingency") if df_control is not None else ("NO_EVALUADA", pd.DataFrame())
+            filas.append({
+                "fecha": pd.Timestamp(fecha).normalize(),
+                "tipo_evento": "OBSERVACION",
+                "nota": nota_int,
+                "estado": resultado,
+                "monto_cobro": 0.0,
+                "detalle": resumen_detalle_observacion(detalle),
+            })
+
+        # 2) Pagos: solo se muestran si el cobro_compania total de la nota es > 0
+        pagos = df_cal[(df_cal["tipo_evento"] == "PAGO") & (df_cal["fecha"].notna())].copy()
+        for _, row in pagos.iterrows():
+            fecha = row.get("fecha")
+            if not dentro_rango(fecha):
+                continue
+            nota = row.get("nota")
+            if pd.isna(nota):
+                continue
+            nota_int = int(nota)
+            pago_df = pd.DataFrame([row])
+            detalle_pago = preparar_detalle_notas(df_inv, pago_df, df_cal=df_cal, df_control=df_control)
+            monto = float(detalle_pago["cobro_compania"].sum()) if not detalle_pago.empty and "cobro_compania" in detalle_pago.columns else 0.0
+            fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, fecha)
+            resultado_obs = "NO_EVALUADA"
+            detalle_obs = pd.DataFrame()
+            if fecha_obs is not None and df_control is not None and not df_control.empty:
+                resultado_obs, detalle_obs = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency")
+
+            # Si la observación fue negativa real o el monto queda a 0, no ponemos el pago en calendario.
+            if resultado_obs == "NEGATIVA" or monto <= 0:
+                continue
+
+            filas.append({
+                "fecha": pd.Timestamp(fecha).normalize(),
+                "tipo_evento": "PAGO",
+                "nota": nota_int,
+                "estado": resultado_obs,
+                "monto_cobro": monto,
+                "detalle": f"Cobro previsto/habilitado. Observación usada: {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y') if fecha_obs is not None else 'sin observación'}",
+            })
+
+    # 3) Calls
+    if df_calls is not None and not df_calls.empty:
+        calls = df_calls.copy()
+        # Normalización flexible por si la hoja tiene fecha_call o fecha.
+        if "fecha_call" in calls.columns:
+            calls["fecha_call"] = pd.to_datetime(calls["fecha_call"], errors="coerce", dayfirst=True).dt.normalize()
+            col_fecha_call = "fecha_call"
+        elif "fecha" in calls.columns:
+            calls["fecha"] = pd.to_datetime(calls["fecha"], errors="coerce", dayfirst=True).dt.normalize()
+            col_fecha_call = "fecha"
+        else:
+            col_fecha_call = None
+
+        if col_fecha_call is not None:
+            if "nota" in calls.columns:
+                calls["nota"] = pd.to_numeric(calls["nota"], errors="coerce").astype("Int64")
+            for _, row in calls.iterrows():
+                fecha = row.get(col_fecha_call)
+                if not dentro_rango(fecha):
+                    continue
+                nota = row.get("nota", pd.NA)
+                filas.append({
+                    "fecha": pd.Timestamp(fecha).normalize(),
+                    "tipo_evento": "CALL",
+                    "nota": int(nota) if pd.notna(nota) else "",
+                    "estado": str(row.get("estado", "CALL POSIBLE")).upper() if "estado" in calls.columns else "CALL POSIBLE",
+                    "monto_cobro": 0.0,
+                    "detalle": "Fecha de posible call / cancelación anticipada",
+                })
+
+    calendario = pd.DataFrame(filas)
+    if calendario.empty:
+        return calendario
+    orden_tipo = {"OBSERVACION": 1, "CALL": 2, "PAGO": 3}
+    calendario["orden_tipo"] = calendario["tipo_evento"].map(orden_tipo).fillna(9)
+    calendario = calendario.sort_values(["fecha", "orden_tipo", "nota"]).drop(columns=["orden_tipo"])
+    return calendario
+
+
+def preparar_tabla_calendario_integrado(calendario: pd.DataFrame) -> pd.DataFrame:
+    if calendario is None or calendario.empty:
+        return calendario
+    out = calendario.copy()
+    out["fecha"] = pd.to_datetime(out["fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
+    if "monto_cobro" in out.columns:
+        out["monto_cobro"] = out["monto_cobro"].map(fmt)
+    return out
+
+
 def panel_alertas_y_calendario():
     df_inv, df_cal, df_control = cargar_excel_completo()
-    st.markdown("## Alertas y calendario")
-    alertas = detectar_alertas_financieras(df_inv, df_cal, df_control)
-    if alertas.empty:
-        st.success("No hay alertas activas.")
-    else:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Alertas totales", len(alertas))
-        c2.metric("Críticas", len(alertas[alertas["Prioridad"] == "ALTA"]))
-        c3.metric("Seguimiento", len(alertas[alertas["Prioridad"] == "MEDIA"]))
-        st.dataframe(alertas, use_container_width=True)
-    st.markdown("### Calendario próximo")
-    hoy = pd.Timestamp.today().normalize()
-    horizonte = st.slider("Días hacia adelante", 7, 90, 30)
-    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy) & (df_cal["fecha"] <= hoy + pd.Timedelta(days=horizonte))].copy().sort_values(["fecha", "tipo_evento", "nota"]) if not df_cal.empty else pd.DataFrame()
-    if eventos.empty:
-        st.info("No hay eventos en el horizonte seleccionado.")
-    else:
-        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
-        if px is not None:
-            resumen_eventos = eventos.groupby("tipo_evento", as_index=False).size()
-            fig = px.bar(resumen_eventos, x="tipo_evento", y="size", title="Eventos por tipo")
-            fig.update_layout(height=360, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig, use_container_width=True)
+    df_calls = leer_hoja_excel("CALENDARIO_CALLS")
 
+    st.markdown("## Alertas y calendario")
+    st.caption("Calendario único con observaciones, pagos cobrables y calls. Los pagos con observación negativa real no aparecen como cobro.")
+
+    hoy = pd.Timestamp.today().normalize()
+
+    c1, c2, c3 = st.columns(3)
+    vista = c1.selectbox("Vista", ["Próximos 30 días", "Este mes", "Mes concreto", "Rango personalizado"])
+
+    if vista == "Próximos 30 días":
+        fecha_inicio = hoy
+        fecha_fin = hoy + pd.Timedelta(days=30)
+    elif vista == "Este mes":
+        fecha_inicio = pd.Timestamp(hoy.year, hoy.month, 1)
+        fecha_fin = fecha_inicio + pd.offsets.MonthEnd(0)
+    elif vista == "Mes concreto":
+        anio = int(c2.number_input("Año", 2020, 2100, hoy.year, key="cal_unico_anio"))
+        mes = int(c3.number_input("Mes", 1, 12, hoy.month, key="cal_unico_mes"))
+        fecha_inicio = pd.Timestamp(anio, mes, 1)
+        fecha_fin = fecha_inicio + pd.offsets.MonthEnd(0)
+    else:
+        fecha_inicio = pd.Timestamp(c2.date_input("Desde", value=hoy.date(), key="cal_unico_desde")).normalize()
+        fecha_fin = pd.Timestamp(c3.date_input("Hasta", value=(hoy + pd.Timedelta(days=30)).date(), key="cal_unico_hasta")).normalize()
+
+    calendario = preparar_calendario_integrado_notas(
+        df_inv=df_inv,
+        df_cal=df_cal,
+        df_control=df_control,
+        df_calls=df_calls,
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+    )
+
+    alertas = detectar_alertas_financieras(df_inv, df_cal, df_control)
+
+    pagos = calendario[calendario["tipo_evento"] == "PAGO"] if not calendario.empty else pd.DataFrame()
+    observaciones = calendario[calendario["tipo_evento"] == "OBSERVACION"] if not calendario.empty else pd.DataFrame()
+    calls = calendario[calendario["tipo_evento"] == "CALL"] if not calendario.empty else pd.DataFrame()
+    monto_total = float(pagos["monto_cobro"].sum()) if not pagos.empty and "monto_cobro" in pagos.columns else 0.0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Observaciones", len(observaciones))
+    m2.metric("Pagos cobrables", len(pagos))
+    m3.metric("Monto a cobrar", fmt(monto_total))
+    m4.metric("Calls", len(calls))
+
+    if not alertas.empty:
+        criticas = alertas[alertas["Prioridad"] == "ALTA"] if "Prioridad" in alertas.columns else pd.DataFrame()
+        if not criticas.empty:
+            st.error(f"Hay {len(criticas)} alertas críticas que requieren revisión.")
+        else:
+            st.warning(f"Hay {len(alertas)} alertas de seguimiento.")
+        with st.expander("Ver alertas del sistema", expanded=False):
+            st.dataframe(alertas, use_container_width=True)
+    else:
+        st.success("No hay alertas activas.")
+
+    st.markdown("### Calendario único")
+    if calendario.empty:
+        st.info("No hay observaciones, pagos cobrables ni calls en el periodo seleccionado.")
+    else:
+        filtro_tipo = st.multiselect(
+            "Filtrar eventos",
+            ["OBSERVACION", "PAGO", "CALL"],
+            default=["OBSERVACION", "PAGO", "CALL"],
+        )
+        tabla = calendario[calendario["tipo_evento"].isin(filtro_tipo)].copy() if filtro_tipo else calendario.copy()
+        st.dataframe(preparar_tabla_calendario_integrado(tabla), use_container_width=True)
+
+        salida = BytesIO()
+        exportar = tabla.copy()
+        exportar["fecha"] = pd.to_datetime(exportar["fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
+        with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+            exportar.to_excel(writer, index=False, sheet_name="CALENDARIO_UNICO")
+        st.download_button(
+            "Descargar calendario único en Excel",
+            data=salida.getvalue(),
+            file_name=f"calendario_unico_notas_{fecha_inicio.strftime('%Y%m%d')}_{fecha_fin.strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    if px is not None and not calendario.empty:
+        st.markdown("### Resumen visual")
+        resumen_eventos = calendario.groupby("tipo_evento", as_index=False).size()
+        fig = px.bar(resumen_eventos, x="tipo_evento", y="size", title="Eventos por tipo")
+        fig.update_layout(height=330, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_title="Tipo", yaxis_title="Cantidad")
+        st.plotly_chart(fig, use_container_width=True)
 
 def panel_calidad_datos():
     df_inv, df_cal, df_control = cargar_excel_completo()
@@ -2096,7 +2288,7 @@ menu = st.sidebar.selectbox(
     "Menú principal",
     [
         "Dashboard financiero", "Centro de control", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick",
-        "Notas estructuradas", "Alertas y calendario", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos", "Gestión de Excel", "Calidad de datos", "Base de datos",
+        "Notas estructuradas", "Alertas y calendario", "Sistema Fondo", "Extractos", "Gestión de Excel", "Calidad de datos", "Base de datos",
     ],
 )
 
@@ -2116,12 +2308,6 @@ elif menu == "Notas estructuradas":
     seccion_notas_archivo()
 elif menu == "Alertas y calendario":
     panel_alertas_y_calendario()
-elif menu == "Alertas Notas":
-    seccion_alertas_notas()
-elif menu == "Alertas Semana":
-    seccion_alertas_semana()
-elif menu == "Calendario Notas":
-    seccion_calendario_notas()
 elif menu == "Sistema Fondo":
     seccion_sistema_fondo()
 elif menu == "Extractos":
@@ -2135,3 +2321,4 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
+
