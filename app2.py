@@ -1,31 +1,28 @@
 import calendar
 import re
+import zipfile
 from datetime import datetime
-from typing import Optional, Tuple
-
-import base64
+from io import BytesIO
+from typing import Optional
 
 import pandas as pd
-import requests
 import streamlit as st
+
+try:
+    import plotly.express as px
+except Exception:
+    px = None
 
 try:
     import yfinance as yf
 except Exception:
     yf = None
 
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
+
 st.set_page_config(page_title="Sistema Fondo", layout="wide")
-
-# =========================
-# 🔒 PROTECCIÓN CON CONTRASEÑA
-# =========================
-CLAVE_APP = "21052022"
-
-password = st.text_input("🔒 Introduce la contraseña", type="password")
-
-if password != CLAVE_APP:
-    st.warning("Acceso restringido")
-    st.stop()
 
 ARCHIVO = "inversiones.xlsx"
 HOJA_INVERSIONES = "INVERSIONES"
@@ -37,6 +34,171 @@ TASA_ANUAL_MOTOCLICK = 0.25
 TASA_ANUAL_PARAGUAY = 0.15
 
 
+# =========================
+# ESTILO PROFESIONAL
+# =========================
+def aplicar_estilo_profesional():
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(191, 154, 95, 0.18), transparent 30%),
+                linear-gradient(135deg, #071425 0%, #0e2338 42%, #f6f3ee 42%, #f6f3ee 100%);
+            background-attachment: fixed;
+        }
+        .block-container {
+            max-width: 1240px;
+            padding-top: 2.2rem;
+            padding-bottom: 3rem;
+            background: rgba(255, 255, 255, 0.94);
+            border: 1px solid rgba(255, 255, 255, 0.55);
+            border-radius: 28px;
+            box-shadow: 0 24px 70px rgba(4, 20, 37, 0.18);
+            margin-top: 1.2rem;
+            margin-bottom: 1.2rem;
+        }
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #071425 0%, #102a43 100%);
+            border-right: 1px solid rgba(191, 154, 95, 0.32);
+        }
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] div { color: #f7f1e8 !important; }
+        section[data-testid="stSidebar"] [data-baseweb="select"] div,
+        section[data-testid="stSidebar"] input { color: #071425 !important; }
+        h1, h2, h3 { color: #102033; letter-spacing: -0.03em; }
+        div[data-testid="stMetric"] {
+            background: linear-gradient(145deg, #ffffff 0%, #f5f0e8 100%);
+            border: 1px solid rgba(191, 154, 95, 0.24);
+            border-radius: 20px;
+            padding: 18px 20px;
+            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.08);
+        }
+        div[data-testid="stMetricValue"] { color: #0e2338; font-weight: 800; }
+        .stButton > button, .stDownloadButton > button, button[kind="primary"] {
+            border-radius: 999px !important;
+            background: linear-gradient(135deg, #0e2338 0%, #173b5c 60%, #bf9a5f 100%) !important;
+            color: white !important;
+            border: 0 !important;
+            font-weight: 700 !important;
+            padding: 0.55rem 1.2rem !important;
+            box-shadow: 0 10px 24px rgba(14, 35, 56, 0.20);
+        }
+        div[data-testid="stDataFrame"] {
+            border-radius: 18px;
+            overflow: hidden;
+            border: 1px solid rgba(14, 35, 56, 0.10);
+            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.06);
+        }
+        .brand-hero {
+            display: flex; align-items: center; justify-content: space-between; gap: 24px;
+            padding: 26px 30px; margin-bottom: 26px; border-radius: 26px;
+            background: linear-gradient(135deg, rgba(14,35,56,0.97) 0%, rgba(20,53,82,0.94) 58%, rgba(191,154,95,0.92) 100%);
+            box-shadow: 0 18px 45px rgba(7, 20, 37, 0.22); color: white;
+        }
+        .brand-left { display: flex; align-items: center; gap: 18px; }
+        .brand-logo {
+            width: 76px; height: 76px; border-radius: 20px; background: rgba(255,255,255,0.94); color: #0e2338;
+            display: flex; align-items: center; justify-content: center; font-size: 34px; font-weight: 800;
+            letter-spacing: -0.10em; border: 1px solid rgba(191,154,95,0.45);
+            box-shadow: inset 0 0 0 2px rgba(191,154,95,0.12), 0 10px 24px rgba(0,0,0,0.16);
+        }
+        .brand-title { font-size: 30px; line-height: 1.05; font-weight: 800; letter-spacing: -0.04em; }
+        .brand-subtitle { margin-top: 8px; color: rgba(255,255,255,0.78); font-size: 14px; font-weight: 500; }
+        .brand-tag {
+            padding: 9px 14px; border-radius: 999px; background: rgba(255,255,255,0.13);
+            border: 1px solid rgba(255,255,255,0.25); font-size: 13px; font-weight: 700; color: #fff; white-space: nowrap;
+        }
+        .login-card {
+            max-width: 460px; margin: 6vh auto 0 auto; padding: 34px 34px 30px 34px; border-radius: 30px;
+            background: rgba(255,255,255,0.94); border: 1px solid rgba(191,154,95,0.30);
+            box-shadow: 0 26px 80px rgba(4, 20, 37, 0.32); text-align: center;
+        }
+        .login-logo {
+            width: 96px; height: 96px; border-radius: 26px; margin: 0 auto 18px auto;
+            background: linear-gradient(145deg, #ffffff, #f3eadc); color: #0e2338;
+            display: flex; align-items: center; justify-content: center; font-size: 42px; font-weight: 800;
+            letter-spacing: -0.10em; border: 1px solid rgba(191,154,95,0.45);
+        }
+        .login-title { font-size: 26px; font-weight: 800; color: #0e2338; letter-spacing: -0.03em; margin-bottom: 6px; }
+        .login-subtitle { font-size: 14px; color: #667085; margin-bottom: 20px; }
+        #MainMenu, footer, header {visibility: hidden;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def mostrar_hero(usuario=None):
+    tag = f"Sesión: {usuario}" if usuario else "Private Wealth Dashboard"
+    st.markdown(
+        f"""
+        <div class="brand-hero">
+            <div class="brand-left">
+                <div class="brand-logo">CF</div>
+                <div>
+                    <div class="brand-title">Chaparro Fernández Wealth</div>
+                    <div class="brand-subtitle">Sistema privado de control, inversiones, notas, alertas y extractos</div>
+                </div>
+            </div>
+            <div class="brand-tag">{tag}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+aplicar_estilo_profesional()
+
+
+# =========================
+# LOGIN
+# =========================
+USUARIOS = {"Yuri": "1234", "Jordi": "12345", "Alan": "123456"}
+
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+if "usuario" not in st.session_state:
+    st.session_state.usuario = None
+
+if not st.session_state.autenticado:
+    st.markdown(
+        """
+        <div class="login-card">
+            <div class="login-logo">CF</div>
+            <div class="login-title">Chaparro Fernández Wealth</div>
+            <div class="login-subtitle">Acceso privado al sistema financiero interno</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.form("login_form"):
+        usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
+        password = st.text_input("Contraseña", type="password")
+        entrar = st.form_submit_button("Entrar")
+    if entrar:
+        if USUARIOS.get(usuario) == password:
+            st.session_state.autenticado = True
+            st.session_state.usuario = usuario
+            st.rerun()
+        else:
+            st.error("Usuario o contraseña incorrectos")
+    st.stop()
+
+st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+if st.sidebar.button("Cerrar sesión"):
+    st.session_state.autenticado = False
+    st.session_state.usuario = None
+    st.rerun()
+
+
+# =========================
+# UTILIDADES Y CARGA
+# =========================
 def fmt(x):
     try:
         return f"${float(x):,.2f}"
@@ -45,11 +207,7 @@ def fmt(x):
 
 
 def nombre_mes_es(mes: int) -> str:
-    meses = {
-        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
-    }
+    meses = {1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio", 7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"}
     return meses.get(int(mes), str(mes))
 
 
@@ -79,11 +237,7 @@ def cargar_excel_completo():
     if "unnamed: 6" in inv.columns and "cuenta_cobro" not in inv.columns:
         inv = inv.rename(columns={"unnamed: 6": "cuenta_cobro"})
 
-    for col in [
-        "id_inversion", "inversor", "tipo_inversion", "subtipo_inversion",
-        "nombre_activo", "metodo_calculo", "activo_generador_interes",
-        "tipo_operacion", "capital_nuevo_real", "cuenta_cobro",
-    ]:
+    for col in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "metodo_calculo", "activo_generador_interes", "tipo_operacion", "capital_nuevo_real", "cuenta_cobro", "motivo"]:
         if col in inv.columns:
             inv[col] = inv[col].fillna("").astype(str).str.strip()
 
@@ -109,156 +263,48 @@ def cargar_excel_completo():
             control["nota"] = pd.to_numeric(control["nota"], errors="coerce").astype("Int64")
         if "ticker" in control.columns:
             control["ticker"] = control["ticker"].fillna("").astype(str).str.strip().str.upper()
-        for col in ["precio_compra", "barrera_cupon", "contingency"]:
+        for col in ["precio_compra", "barrera_cupon", "contingency", "barrera_capital"]:
             if col in control.columns:
                 control[col] = pd.to_numeric(control[col], errors="coerce")
-
     return inv, cal, control
 
 
-
-@st.cache_data(show_spinner=False)
-def cargar_todas_las_hojas_excel():
-    """Carga todas las hojas del Excel para poder editarlas sin perder ninguna."""
+def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
     try:
-        hojas = pd.read_excel(ARCHIVO, sheet_name=None)
-        return {nombre: df.copy() for nombre, df in hojas.items()}
+        df = pd.read_excel(ARCHIVO, sheet_name=nombre_hoja)
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        return df
     except Exception:
-        return {}
+        return pd.DataFrame()
 
 
-def crear_excel_en_memoria(hojas: dict[str, pd.DataFrame]) -> bytes:
-    """Crea un archivo Excel en memoria manteniendo todas las hojas disponibles."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for nombre_hoja, df in hojas.items():
-            nombre_limpio = str(nombre_hoja)[:31]  # límite de Excel
-            if isinstance(df, pd.DataFrame):
-                df.to_excel(writer, sheet_name=nombre_limpio, index=False)
-    return output.getvalue()
+def preparar_tabla_monetaria(df: pd.DataFrame, columnas_monetarias) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        if "fecha" in col:
+            out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%d/%m/%Y")
+    for col in columnas_monetarias:
+        if col in out.columns:
+            out[col] = out[col].map(fmt)
+    return out
 
 
-def obtener_config_github():
-    """Lee la configuración segura desde Streamlit Secrets."""
-    token = st.secrets.get("GITHUB_TOKEN", "")
-    repo = st.secrets.get("GITHUB_REPO", st.secrets.get("REPO", ""))
-    path = st.secrets.get("GITHUB_FILE_PATH", st.secrets.get("FILE_PATH", ARCHIVO))
-    branch = st.secrets.get("GITHUB_BRANCH", "main")
-    return token, repo, path, branch
+def mostrar_metricas(titulo, valores):
+    st.subheader(titulo)
+    cols = st.columns(len(valores))
+    for col, (label, value) in zip(cols, valores):
+        col.metric(label, value)
 
 
-def guardar_excel_en_github(hojas: dict[str, pd.DataFrame]) -> tuple[bool, str]:
-    """Sobrescribe inversiones.xlsx en GitHub usando la API oficial."""
-    token, repo, path, branch = obtener_config_github()
-
-    if not token or not repo or not path:
-        return False, (
-            "Faltan Secrets. En Streamlit Cloud añade: "
-            "GITHUB_TOKEN, GITHUB_REPO y GITHUB_FILE_PATH."
-        )
-
-    url = f"https://api.github.com/repos/{repo}/contents/{path}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    # 1) Obtener SHA actual del archivo
-    r_get = requests.get(url, headers=headers, params={"ref": branch}, timeout=30)
-    if r_get.status_code != 200:
-        return False, f"No se pudo leer el archivo en GitHub: {r_get.status_code} - {r_get.text}"
-
-    sha = r_get.json().get("sha")
-    if not sha:
-        return False, "GitHub no devolvió el SHA del archivo."
-
-    # 2) Crear Excel actualizado en memoria
-    contenido_excel = crear_excel_en_memoria(hojas)
-    contenido_b64 = base64.b64encode(contenido_excel).decode("utf-8")
-
-    # 3) Subir nueva versión
-    payload = {
-        "message": "Actualizar inversiones.xlsx desde la app",
-        "content": contenido_b64,
-        "sha": sha,
-        "branch": branch,
-    }
-    r_put = requests.put(url, headers=headers, json=payload, timeout=60)
-
-    if r_put.status_code not in (200, 201):
-        return False, f"Error al guardar en GitHub: {r_put.status_code} - {r_put.text}"
-
-    st.cache_data.clear()
-    return True, "Excel guardado correctamente en GitHub."
-
-
-def seccion_gestion_datos():
-    st.header("⚙️ Gestión de Datos")
-    st.caption("Edita las hojas del Excel desde la app y guarda los cambios automáticamente en GitHub.")
-
-    hojas = cargar_todas_las_hojas_excel()
-    if not hojas:
-        st.error("No se ha podido cargar el Excel completo.")
-        return
-
-    token, repo, path, branch = obtener_config_github()
-    if not token or not repo:
-        st.warning("Para guardar automáticamente falta configurar Streamlit Secrets.")
-        st.code(
-            'GITHUB_TOKEN = "tu_token"\n'
-            'GITHUB_REPO = "tu_usuario/tu_repo"\n'
-            'GITHUB_FILE_PATH = "inversiones.xlsx"\n'
-            'GITHUB_BRANCH = "main"',
-            language="toml",
-        )
-
-    hoja = st.selectbox("Selecciona la hoja que quieres editar", list(hojas.keys()))
-    df_original = hojas[hoja].copy()
-
-    st.info("Puedes editar celdas, añadir filas o eliminar filas. Luego pulsa Guardar en GitHub.")
-    df_editado = st.data_editor(
-        df_original,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"editor_{hoja}",
-    )
-
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        guardar = st.button("💾 Guardar en GitHub", type="primary")
-    with c2:
-        st.caption("Al guardar, se sobrescribe inversiones.xlsx en el repositorio y la app queda actualizada.")
-
-    if guardar:
-        hojas_actualizadas = {nombre: df.copy() for nombre, df in hojas.items()}
-        hojas_actualizadas[hoja] = df_editado.copy()
-
-        with st.spinner("Guardando cambios en GitHub..."):
-            ok, mensaje = guardar_excel_en_github(hojas_actualizadas)
-
-        if ok:
-            st.success(mensaje)
-            st.info("Espera unos segundos y recarga la app para ver los cambios aplicados en todas las secciones.")
-        else:
-            st.error(mensaje)
-
-    with st.expander("Descarga de seguridad opcional"):
-        hojas_preview = {nombre: df.copy() for nombre, df in hojas.items()}
-        hojas_preview[hoja] = df_editado.copy()
-        st.download_button(
-            "⬇️ Descargar copia actualizada",
-            data=crear_excel_en_memoria(hojas_preview),
-            file_name="inversiones.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-
+# =========================
+# CÁLCULOS ACTIVOS
+# =========================
 def filtrar_activo(df_base: pd.DataFrame, activo: str) -> pd.DataFrame:
     activo_l = activo.lower()
     subtipo = df_base.get("subtipo_inversion", pd.Series(index=df_base.index, dtype=str)).astype(str).str.lower()
     nombre = df_base.get("nombre_activo", pd.Series(index=df_base.index, dtype=str)).astype(str).str.lower()
-
     if activo_l == "futbol":
         return df_base[subtipo.isin(["futbol", "fútbol"]) | nombre.isin(["futbol", "fútbol"])].copy()
     return df_base[subtipo.eq(activo_l) | nombre.eq(activo_l)].copy()
@@ -267,12 +313,10 @@ def filtrar_activo(df_base: pd.DataFrame, activo: str) -> pd.DataFrame:
 def dias_activos_en_mes(fecha_inicio, fecha_fin, anio: int, mes: int) -> int:
     inicio_mes = pd.Timestamp(anio, mes, 1)
     fin_mes = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
-
     if pd.isna(fecha_inicio) or fecha_inicio > fin_mes:
         return 0
     if pd.notna(fecha_fin) and fecha_fin < inicio_mes:
         return 0
-
     inicio_real = max(fecha_inicio, inicio_mes)
     fin_real = fin_mes if pd.isna(fecha_fin) else min(fecha_fin, fin_mes)
     if inicio_real > fin_real:
@@ -284,7 +328,6 @@ def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, an
     df_activo = filtrar_activo(df_base, activo)
     dias_mes = ultimo_dia_mes(anio, mes)
     filas = []
-
     for _, fila in df_activo.iterrows():
         dias = dias_activos_en_mes(fila.get("fecha_inversion"), fila.get("fecha_final_inversion"), anio, mes)
         if dias == 0:
@@ -294,16 +337,11 @@ def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, an
         ingreso_bruto = capital * tasa_anual / 12 * proporcion
         pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12 * proporcion
         filas.append({
-            "id_inversion": fila.get("id_inversion", ""),
-            "inversor": fila.get("inversor", ""),
-            "capital_invertido": capital,
-            "fecha_inversion": fila.get("fecha_inversion"),
-            "fecha_final_inversion": fila.get("fecha_final_inversion"),
-            "dias_activos": dias,
-            "dias_mes": dias_mes,
-            "ingreso_bruto": ingreso_bruto,
-            "pago_inversor_mes": pago_inversor,
-            "beneficio_empresa_mes": ingreso_bruto - pago_inversor,
+            "id_inversion": fila.get("id_inversion", ""), "inversor": fila.get("inversor", ""),
+            "capital_invertido": capital, "fecha_inversion": fila.get("fecha_inversion"),
+            "fecha_final_inversion": fila.get("fecha_final_inversion"), "dias_activos": dias,
+            "dias_mes": dias_mes, "ingreso_bruto": ingreso_bruto,
+            "pago_inversor_mes": pago_inversor, "beneficio_empresa_mes": ingreso_bruto - pago_inversor,
         })
     return pd.DataFrame(filas)
 
@@ -315,12 +353,7 @@ def capital_activo_en_fecha(df_base: pd.DataFrame, fecha_consulta, activo: Optio
         trabajo = filtrar_activo(trabajo, activo)
     if solo_real and "capital_nuevo_real" in trabajo.columns:
         trabajo = trabajo[trabajo["capital_nuevo_real"].astype(str).str.lower() == "si"].copy()
-
-    filtrado = trabajo[
-        (trabajo["fecha_inversion"].notna())
-        & (trabajo["fecha_inversion"] <= fecha_consulta)
-        & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_consulta))
-    ]
+    filtrado = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha_consulta) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_consulta))]
     return float(filtrado["capital_invertido"].sum()) if not filtrado.empty else 0.0
 
 
@@ -366,6 +399,9 @@ def total_ingresado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa
     return float(total)
 
 
+# =========================
+# NOTAS
+# =========================
 def normalizar_cuenta(valor):
     texto = str(valor).strip().lower()
     if texto in ["jordi", "cuenta jordi"]:
@@ -386,6 +422,8 @@ def filtrar_notas(df_base: pd.DataFrame) -> pd.DataFrame:
     trabajo = df_base.copy()
     if "tipo_inversion" in trabajo.columns:
         trabajo = trabajo[trabajo["tipo_inversion"].astype(str).str.lower() == "nota"].copy()
+    if "nombre_activo" not in trabajo.columns:
+        trabajo["nombre_activo"] = ""
     trabajo["nota_num"] = trabajo["nombre_activo"].apply(extraer_numero_nota)
     trabajo["nota_num"] = pd.to_numeric(trabajo["nota_num"], errors="coerce").astype("Int64")
     if "activo_generador_interes" in trabajo.columns:
@@ -399,441 +437,26 @@ def filtrar_notas(df_base: pd.DataFrame) -> pd.DataFrame:
 def inversiones_activas_para_nota(df_base: pd.DataFrame, nota: int, fecha_pago) -> pd.DataFrame:
     fecha_pago = pd.Timestamp(fecha_pago).normalize()
     trabajo = filtrar_notas(df_base)
-    return trabajo[
-        (trabajo["nota_num"] == nota)
-        & (trabajo["fecha_inversion"].notna())
-        & (trabajo["fecha_inversion"] <= fecha_pago)
-        & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_pago))
-    ].copy()
+    return trabajo[(trabajo["nota_num"] == nota) & (trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha_pago) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_pago))].copy()
 
 
 def pagos_notas_mes(df_cal: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
     if df_cal.empty:
         return pd.DataFrame()
-    return df_cal[
-        (df_cal["tipo_evento"] == "PAGO")
-        & (df_cal["fecha"].notna())
-        & (df_cal["fecha"].dt.year == anio)
-        & (df_cal["fecha"].dt.month == mes)
-    ].copy().sort_values(["fecha", "nota"])
+    return df_cal[(df_cal["tipo_evento"] == "PAGO") & (df_cal["fecha"].notna()) & (df_cal["fecha"].dt.year == anio) & (df_cal["fecha"].dt.month == mes)].copy().sort_values(["fecha", "nota"])
 
 
 def pagos_notas_hasta_hoy(df_cal: pd.DataFrame) -> pd.DataFrame:
     hoy = pd.Timestamp.today().normalize()
-    return df_cal[
-        (df_cal["tipo_evento"] == "PAGO")
-        & (df_cal["fecha"].notna())
-        & (df_cal["fecha"] <= hoy)
-    ].copy().sort_values(["fecha", "nota"])
+    return df_cal[(df_cal["tipo_evento"] == "PAGO") & (df_cal["fecha"].notna()) & (df_cal["fecha"] <= hoy)].copy().sort_values(["fecha", "nota"])
 
 
 def obtener_observacion_previa_nota(df_cal: pd.DataFrame, nota: int, fecha_pago):
-    """Devuelve la última observación de la nota en o antes del día de pago."""
     if df_cal is None or df_cal.empty:
         return None
     fecha_pago = pd.Timestamp(fecha_pago).normalize()
-    obs = df_cal[
-        (df_cal["nota"] == nota)
-        & (df_cal["tipo_evento"] == "OBSERVACION")
-        & (df_cal["fecha"].notna())
-        & (df_cal["fecha"] <= fecha_pago)
-    ].copy().sort_values("fecha")
+    obs = df_cal[(df_cal["nota"] == nota) & (df_cal["tipo_evento"] == "OBSERVACION") & (df_cal["fecha"].notna()) & (df_cal["fecha"] <= fecha_pago)].copy().sort_values("fecha")
     return None if obs.empty else obs.iloc[-1]["fecha"]
-
-
-def resumen_detalle_observacion(detalle_obs: pd.DataFrame) -> str:
-    if detalle_obs is None or detalle_obs.empty:
-        return ""
-    partes = []
-    for _, row in detalle_obs.iterrows():
-        ticker = row.get("ticker", "")
-        estado = row.get("estado", "")
-        cierre = row.get("cierre_usado", None)
-        barrera = row.get("precio_barrera", None)
-        if pd.notna(cierre) and pd.notna(barrera):
-            partes.append(f"{ticker}: {estado} cierre {float(cierre):.2f} / barrera {float(barrera):.2f}")
-        else:
-            partes.append(f"{ticker}: {estado}")
-    return " | ".join(partes)
-
-
-def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal: pd.DataFrame | None = None, df_control: pd.DataFrame | None = None) -> pd.DataFrame:
-    filas = []
-    cache_observaciones = {}
-
-    for _, evento in df_pagos.iterrows():
-        nota = evento.get("nota")
-        fecha_pago = evento.get("fecha")
-        if pd.isna(nota) or pd.isna(fecha_pago):
-            continue
-
-        nota_int = int(nota)
-        fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, fecha_pago) if df_cal is not None else None
-
-        resultado_obs = "NO_EVALUADA"
-        detalle_obs = pd.DataFrame()
-        ingreso_habilitado = True
-
-        if fecha_obs is not None and df_control is not None and not df_control.empty:
-            clave = (nota_int, pd.Timestamp(fecha_obs).normalize())
-            if clave not in cache_observaciones:
-                cache_observaciones[clave] = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency")
-            resultado_obs, detalle_obs = cache_observaciones[clave]
-
-            # Regla de negocio: si en la observación la nota queda por debajo de contingencia,
-            # la compañía no ingresa cupón, pero el pago al inversor se mantiene.
-            if resultado_obs == "NEGATIVA":
-                ingreso_habilitado = False
-
-        activas = inversiones_activas_para_nota(df_inv, nota_int, fecha_pago)
-        for _, fila in activas.iterrows():
-            capital = float(fila.get("capital_invertido", 0))
-            cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12
-            cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
-            pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12
-            filas.append({
-                "fecha_pago": fecha_pago,
-                "nota": nota_int,
-                "fecha_observacion_usada": fecha_obs,
-                "resultado_observacion": resultado_obs,
-                "detalle_observacion": resumen_detalle_observacion(detalle_obs),
-                "ingreso_habilitado": "SI" if ingreso_habilitado else "NO",
-                "id_inversion": fila.get("id_inversion", ""),
-                "inversor": fila.get("inversor", ""),
-                "cuenta_cobro": fila.get("cuenta_cobro", "SIN CLASIFICAR"),
-                "capital_invertido": capital,
-                "interes_nota_anual": fila.get("interes_nota_anual", 0),
-                "interes_inversor_anual": fila.get("interes_inversor_anual", 0),
-                "cobro_teorico_compania": cobro_teorico,
-                "cobro_compania": cobro_compania,
-                "pago_inversor": pago_inversor,
-                "beneficio_empresa": cobro_compania - pago_inversor,
-            })
-    return pd.DataFrame(filas)
-
-
-def resumen_notas_mes(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
-    pagos = pagos_notas_mes(df_cal, anio, mes)
-    detalle = preparar_detalle_notas(df_inv, pagos, df_cal=df_cal, df_control=df_control)
-    if detalle.empty:
-        return 0.0, 0.0, 0.0, detalle, pagos
-    return (
-        float(detalle["cobro_compania"].sum()),
-        float(detalle["pago_inversor"].sum()),
-        float(detalle["beneficio_empresa"].sum()),
-        detalle,
-        pagos,
-    )
-
-
-def resumen_por_cuenta_cobro(detalle: pd.DataFrame) -> pd.DataFrame:
-    if detalle.empty:
-        return pd.DataFrame(columns=["cuenta_cobro", "cobro_compania"])
-    return detalle.groupby("cuenta_cobro", as_index=False)["cobro_compania"].sum().sort_values("cobro_compania", ascending=False)
-
-
-def resumen_capital_por_inversor_notas(df_inv: pd.DataFrame, solo_activo: bool = False) -> pd.DataFrame:
-    trabajo = filtrar_notas(df_inv)
-    hoy = pd.Timestamp.today().normalize()
-    if solo_activo:
-        trabajo = trabajo[
-            (trabajo["fecha_inversion"].notna())
-            & (trabajo["fecha_inversion"] <= hoy)
-            & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))
-        ]
-    if trabajo.empty:
-        return pd.DataFrame(columns=["inversor", "capital"])
-    return trabajo.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
-
-
-def proximo_evento_nota(df_cal: pd.DataFrame, nota: int, tipo: str):
-    hoy = pd.Timestamp.today().normalize()
-    eventos = df_cal[
-        (df_cal["tipo_evento"] == tipo)
-        & (df_cal["nota"] == nota)
-        & (df_cal["fecha"].notna())
-        & (df_cal["fecha"] >= hoy)
-    ].sort_values("fecha")
-    return None if eventos.empty else eventos.iloc[0]["fecha"]
-
-
-def mostrar_metricas(titulo, valores):
-    st.subheader(titulo)
-    cols = st.columns(len(valores))
-    for col, (label, value) in zip(cols, valores):
-        col.metric(label, value)
-
-
-def preparar_tabla_monetaria(df: pd.DataFrame, columnas_monetarias) -> pd.DataFrame:
-    if df.empty:
-        return df
-    out = df.copy()
-    for col in out.columns:
-        if "fecha" in col:
-            out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%d/%m/%Y")
-    for col in columnas_monetarias:
-        if col in out.columns:
-            out[col] = out[col].map(fmt)
-    return out
-
-
-def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incluir_ingresado_desde_inicio: bool = False):
-    df_inv, _, _ = cargar_excel_completo()
-    st.header(f"📌 Consultas {nombre_visible}")
-
-    consulta = st.selectbox(
-        "Elige una pregunta",
-        [
-            f"¿Cuánto ingresará {nombre_visible} en un mes?",
-            "¿Cuánto cobrará cada inversor ese mes?",
-            "¿Cuánto cobrará un inversor concreto ese mes?",
-            "¿Cuál será el beneficio de la empresa ese mes?",
-            "¿Cuál es el total pagado a inversores desde el inicio?",
-            f"¿Cuánto capital hay actualmente activo en {nombre_visible} hoy?",
-            f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?",
-        ] + (["¿Cuánto ha ingresado la compañía desde el inicio?", "¿Cuál es el beneficio total acumulado desde el inicio?"] if incluir_ingresado_desde_inicio else []),
-    )
-
-    necesita_mes = consulta in [
-        f"¿Cuánto ingresará {nombre_visible} en un mes?",
-        "¿Cuánto cobrará cada inversor ese mes?",
-        "¿Cuánto cobrará un inversor concreto ese mes?",
-        "¿Cuál será el beneficio de la empresa ese mes?",
-        f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?",
-    ]
-
-    anio = mes = None
-    if necesita_mes:
-        c1, c2 = st.columns(2)
-        anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year, key=f"{activo_key}_anio"))
-        mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month, key=f"{activo_key}_mes"))
-
-    nombre_inversor = None
-    if consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
-        inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
-        nombre_inversor = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
-
-    if st.button("Calcular", key=f"calc_{activo_key}_{consulta}"):
-        if consulta == f"¿Cuánto ingresará {nombre_visible} en un mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
-            total = detalle["ingreso_bruto"].sum() if not detalle.empty else 0
-            mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Ingreso bruto", fmt(total))])
-            if not detalle.empty:
-                st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
-
-        elif consulta == "¿Cuánto cobrará cada inversor ese mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
-            if detalle.empty:
-                st.info("No hay cobros de inversores para ese mes.")
-            else:
-                resumen = detalle.groupby("inversor", as_index=False)["pago_inversor_mes"].sum().rename(columns={"pago_inversor_mes": "cobro_mes"}).sort_values("cobro_mes", ascending=False)
-                st.dataframe(preparar_tabla_monetaria(resumen, ["cobro_mes"]), use_container_width=True)
-
-        elif consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
-            if detalle.empty:
-                total = 0
-            else:
-                filtrado = detalle[detalle["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()]
-                total = filtrado["pago_inversor_mes"].sum() if not filtrado.empty else 0
-            mostrar_metricas("Resultado", [(f"Cobro de {nombre_inversor}", fmt(total))])
-
-        elif consulta == "¿Cuál será el beneficio de la empresa ese mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
-            total = detalle["beneficio_empresa_mes"].sum() if not detalle.empty else 0
-            mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Beneficio empresa", fmt(total))])
-            if not detalle.empty:
-                st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
-
-        elif consulta == "¿Cuál es el total pagado a inversores desde el inicio?":
-            total = total_pagado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
-            mostrar_metricas("Resultado", [("Total pagado", fmt(total))])
-
-        elif consulta == f"¿Cuánto capital hay actualmente activo en {nombre_visible} hoy?":
-            bruto = capital_activo_en_fecha(df_inv, pd.Timestamp.today(), activo_key, solo_real=False)
-            real = capital_activo_en_fecha(df_inv, pd.Timestamp.today(), activo_key, solo_real=True)
-            mostrar_metricas("Resultado", [("Capital activo", fmt(bruto)), ("Capital activo real", fmt(real))])
-
-        elif consulta == f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?":
-            fecha = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
-            bruto = capital_activo_en_fecha(df_inv, fecha, activo_key, solo_real=False)
-            real = capital_activo_en_fecha(df_inv, fecha, activo_key, solo_real=True)
-            mostrar_metricas(f"Cierre {nombre_mes_es(mes)} {anio}", [("Capital activo", fmt(bruto)), ("Capital activo real", fmt(real))])
-
-        elif consulta == "¿Cuánto ha ingresado la compañía desde el inicio?":
-            total = total_ingresado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
-            mostrar_metricas("Resultado", [("Total ingresado", fmt(total))])
-
-        elif consulta == "¿Cuál es el beneficio total acumulado desde el inicio?":
-            ingreso = total_ingresado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
-            pagado = total_pagado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
-            mostrar_metricas("Resultado", [("Beneficio acumulado", fmt(ingreso - pagado))])
-
-
-def seccion_notas():
-    df_inv, df_cal, df_control = cargar_excel_completo()
-    st.header("🧾 Consultas Notas")
-
-    consulta = st.selectbox(
-        "Elige una pregunta",
-        [
-            "¿Cuánto cobrará la compañía en un mes de notas?",
-            "¿Cuánto se pagará a inversores en un mes de notas?",
-            "¿Cuál será el beneficio de la empresa en un mes de notas?",
-            "¿Cuánto cobrará cada inversor ese mes?",
-            "¿Cuánto cobrará un inversor concreto ese mes?",
-            "¿Cuánto ha cobrado la compañía desde el inicio?",
-            "¿Cuánto se ha pagado a inversores desde el inicio?",
-            "¿Cuál es el beneficio total desde el inicio?",
-            "¿Cuál es el próximo pago de una nota?",
-            "¿Cuál es la próxima observación de una nota?",
-            "¿Cuánto capital hay invertido en total?",
-            "¿Cuánto capital hay actualmente activo?",
-            "¿Cuánto capital tiene un inversor?",
-            "¿Cuánto capital activo tiene un inversor?",
-            "Ver ranking de capital por inversor",
-            "Ver ranking de capital activo",
-        ],
-    )
-
-    consultas_mes = [
-        "¿Cuánto cobrará la compañía en un mes de notas?",
-        "¿Cuánto se pagará a inversores en un mes de notas?",
-        "¿Cuál será el beneficio de la empresa en un mes de notas?",
-        "¿Cuánto cobrará cada inversor ese mes?",
-        "¿Cuánto cobrará un inversor concreto ese mes?",
-    ]
-
-    anio = mes = None
-    if consulta in consultas_mes:
-        c1, c2 = st.columns(2)
-        anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year, key="notas_anio"))
-        mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month, key="notas_mes"))
-
-    inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
-    nombre_inversor = None
-    if consulta in ["¿Cuánto cobrará un inversor concreto ese mes?", "¿Cuánto capital tiene un inversor?", "¿Cuánto capital activo tiene un inversor?"]:
-        nombre_inversor = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
-
-    nota = None
-    if consulta in ["¿Cuál es el próximo pago de una nota?", "¿Cuál es la próxima observación de una nota?"]:
-        notas_disponibles = sorted([int(x) for x in df_cal.get("nota", pd.Series(dtype="Int64")).dropna().unique()])
-        nota = st.selectbox("Número de nota", notas_disponibles) if notas_disponibles else int(st.number_input("Número de nota", min_value=1, value=1))
-
-    if st.button("Calcular", key=f"calc_notas_{consulta}"):
-        if consulta in consultas_mes:
-            total_cobrado, total_pagado, total_beneficio, detalle, pagos = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
-            if consulta == "¿Cuánto cobrará la compañía en un mes de notas?":
-                mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Cobra compañía", fmt(total_cobrado))])
-                resumen_cuentas = resumen_por_cuenta_cobro(detalle)
-                if not resumen_cuentas.empty:
-                    st.write("Separado por cuenta de cobro")
-                    st.dataframe(preparar_tabla_monetaria(resumen_cuentas, ["cobro_compania"]), use_container_width=True)
-            elif consulta == "¿Cuánto se pagará a inversores en un mes de notas?":
-                mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Pago inversores", fmt(total_pagado))])
-            elif consulta == "¿Cuál será el beneficio de la empresa en un mes de notas?":
-                mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Beneficio empresa", fmt(total_beneficio))])
-            elif consulta == "¿Cuánto cobrará cada inversor ese mes?":
-                if detalle.empty:
-                    st.info("No hay cobros de inversores para ese mes.")
-                else:
-                    resumen = detalle.groupby("inversor", as_index=False)["pago_inversor"].sum().rename(columns={"pago_inversor": "cobro_mes"}).sort_values("cobro_mes", ascending=False)
-                    st.dataframe(preparar_tabla_monetaria(resumen, ["cobro_mes"]), use_container_width=True)
-            elif consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
-                if detalle.empty:
-                    total = 0
-                else:
-                    filtrado = detalle[detalle["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()]
-                    total = filtrado["pago_inversor"].sum() if not filtrado.empty else 0
-                mostrar_metricas("Resultado", [(f"Cobro de {nombre_inversor}", fmt(total))])
-
-            if not pagos.empty:
-                with st.expander("Ver pagos detectados"):
-                    st.dataframe(preparar_tabla_monetaria(pagos, []), use_container_width=True)
-            if not detalle.empty:
-                with st.expander("Ver detalle por nota e inversión"):
-                    st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]), use_container_width=True)
-
-        elif consulta == "¿Cuánto ha cobrado la compañía desde el inicio?":
-            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
-            total = detalle["cobro_compania"].sum() if not detalle.empty else 0
-            mostrar_metricas("Resultado", [("Total cobrado compañía", fmt(total))])
-            resumen = resumen_por_cuenta_cobro(detalle)
-            if not resumen.empty:
-                st.dataframe(preparar_tabla_monetaria(resumen, ["cobro_compania"]), use_container_width=True)
-
-        elif consulta == "¿Cuánto se ha pagado a inversores desde el inicio?":
-            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
-            total = detalle["pago_inversor"].sum() if not detalle.empty else 0
-            mostrar_metricas("Resultado", [("Total pagado inversores", fmt(total))])
-
-        elif consulta == "¿Cuál es el beneficio total desde el inicio?":
-            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
-            total = detalle["beneficio_empresa"].sum() if not detalle.empty else 0
-            mostrar_metricas("Resultado", [("Beneficio total", fmt(total))])
-
-        elif consulta == "¿Cuál es el próximo pago de una nota?":
-            fecha = proximo_evento_nota(df_cal, int(nota), "PAGO")
-            if fecha is not None:
-                st.success(f"El próximo pago de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}")
-            else:
-                st.info("No hay pagos futuros para esa nota.")
-
-        elif consulta == "¿Cuál es la próxima observación de una nota?":
-            fecha = proximo_evento_nota(df_cal, int(nota), "OBSERVACION")
-            if fecha is not None:
-                st.success(f"La próxima observación de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}")
-            else:
-                st.info("No hay observaciones futuras para esa nota.")
-
-        elif consulta == "¿Cuánto capital hay invertido en total?":
-            total = filtrar_notas(df_inv)["capital_invertido"].sum()
-            mostrar_metricas("Resultado", [("Capital total invertido", fmt(total))])
-
-        elif consulta == "¿Cuánto capital hay actualmente activo?":
-            trabajo = filtrar_notas(df_inv)
-            hoy = pd.Timestamp.today().normalize()
-            activas = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= hoy) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))]
-            mostrar_metricas("Resultado", [("Capital activo hoy", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))])
-
-        elif consulta == "¿Cuánto capital tiene un inversor?":
-            trabajo = filtrar_notas(df_inv)
-            filtrado = trabajo[trabajo["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()]
-            mostrar_metricas("Resultado", [(f"Capital total de {nombre_inversor}", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
-
-        elif consulta == "¿Cuánto capital activo tiene un inversor?":
-            trabajo = filtrar_notas(df_inv)
-            hoy = pd.Timestamp.today().normalize()
-            filtrado = trabajo[(trabajo["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()) & (trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= hoy) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))]
-            mostrar_metricas("Resultado", [(f"Capital activo de {nombre_inversor}", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
-
-        elif consulta == "Ver ranking de capital por inversor":
-            resumen = resumen_capital_por_inversor_notas(df_inv, solo_activo=False)
-            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
-
-        elif consulta == "Ver ranking de capital activo":
-            resumen = resumen_capital_por_inversor_notas(df_inv, solo_activo=True)
-            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
-
-
-
-# =========================
-# SECCIONES EXTRA: ALERTAS, CALENDARIO, SISTEMA GLOBAL Y EXTRACTOS
-# =========================
-from io import BytesIO
-import zipfile
-from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from openpyxl.utils import get_column_letter
-
-
-def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
-    try:
-        df = pd.read_excel(ARCHIVO, sheet_name=nombre_hoja)
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        return df
-    except Exception:
-        return pd.DataFrame()
 
 
 def normalizar_barrera(valor):
@@ -847,19 +470,6 @@ def normalizar_barrera(valor):
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def obtener_ultimo_precio(ticker: str):
-    if yf is None:
-        return None
-    try:
-        hist = yf.Ticker(str(ticker).strip().upper()).history(period="5d")
-        if hist.empty or "Close" not in hist.columns:
-            return None
-        return float(hist["Close"].dropna().iloc[-1])
-    except Exception:
-        return None
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
 def obtener_cierre_ticker_fecha(ticker: str, fecha_objetivo):
     if yf is None:
         return None
@@ -867,13 +477,7 @@ def obtener_cierre_ticker_fecha(ticker: str, fecha_objetivo):
         fecha_objetivo = pd.Timestamp(fecha_objetivo).normalize()
         inicio = fecha_objetivo - pd.Timedelta(days=10)
         fin = fecha_objetivo + pd.Timedelta(days=2)
-        data = yf.download(
-            str(ticker).strip().upper(),
-            start=inicio.strftime("%Y-%m-%d"),
-            end=fin.strftime("%Y-%m-%d"),
-            progress=False,
-            auto_adjust=False,
-        )
+        data = yf.download(str(ticker).strip().upper(), start=inicio.strftime("%Y-%m-%d"), end=fin.strftime("%Y-%m-%d"), progress=False, auto_adjust=False)
         if data.empty:
             return None
         if isinstance(data.columns, pd.MultiIndex):
@@ -923,273 +527,103 @@ def evaluar_nota_en_fecha(df_control: pd.DataFrame, nota: int, fecha_obs, prefer
         precio_barrera = float(compra) * float(barrera_pct)
         cierre = obtener_cierre_ticker_fecha(ticker, fecha_obs)
         if cierre is None:
-            filas.append({"ticker": ticker, "precio_compra": compra, "barrera": precio_barrera, "cierre": None, "estado": "SIN DATO"})
+            filas.append({"ticker": ticker, "precio_compra": compra, "precio_barrera": precio_barrera, "cierre_usado": None, "estado": "SIN DATO"})
             todo_ok = False
             continue
         estado = "OK" if cierre >= precio_barrera else "NO OK"
         if estado != "OK":
             todo_ok = False
-        filas.append({
-            "ticker": ticker,
-            "precio_compra": float(compra),
-            "barrera_%": barrera_pct,
-            "precio_barrera": precio_barrera,
-            "cierre_usado": cierre,
-            "estado": estado,
-        })
+        filas.append({"ticker": ticker, "precio_compra": float(compra), "barrera_%": barrera_pct, "precio_barrera": precio_barrera, "cierre_usado": cierre, "estado": estado})
     return ("POSITIVA" if todo_ok else "NEGATIVA"), pd.DataFrame(filas)
 
 
-
-def seccion_notas_archivo():
-    """Equivalente web de notas.py: resumen de CONTROL_NOTAS con precios actuales."""
-    _, _, df_control = cargar_excel_completo()
-    st.header("🧾 Notas")
-    st.caption("Resumen tipo notas.py: precio actual, variación, barrera de contingencia y alertas por nota.")
-
-    if yf is None:
-        st.error("Falta yfinance. Añade yfinance a requirements.txt.")
-        return None
-
-    control = df_control.copy()
-    if control.empty:
-        st.warning("La hoja CONTROL_NOTAS está vacía o no existe.")
-        return None
-
-    # Compatibilidad con nombres usados en tus archivos: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.
-    barrera_col = None
-    for candidato in ["contingency", "barrera_capital", "barrera_cupon"]:
-        if candidato in control.columns:
-            barrera_col = candidato
-            break
-
-    columnas_minimas = ["nota", "ticker", "precio_compra"]
-    faltan = [c for c in columnas_minimas if c not in control.columns]
-    if faltan:
-        st.error(f"En CONTROL_NOTAS faltan columnas: {', '.join(faltan)}")
-        return None
-    if barrera_col is None:
-        st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
-        return None
-
-    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
-    control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
-    control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
-    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce")
-    control[barrera_col] = control[barrera_col].apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
-    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
-
-    if control.empty:
-        st.warning("No hay filas válidas en CONTROL_NOTAS.")
-        return None
-
-    if st.button("Actualizar precios actuales"):
-        st.cache_data.clear()
-
-    filas = []
-    with st.spinner("Descargando precios actuales..."):
-        for _, row in control.iterrows():
-            ticker = row["ticker"]
-            precio_actual = None
-            try:
-                hist = yf.Ticker(ticker).history(period="5d")
-                if not hist.empty:
-                    precio_actual = float(hist["Close"].dropna().iloc[-1])
-            except Exception:
-                precio_actual = None
-
-            precio_compra = float(row["precio_compra"])
-            barrera = float(row[barrera_col])
-            precio_contingencia = precio_compra * barrera
-            variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
-            estado = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
-
-            filas.append({
-                "nota": int(row["nota"]),
-                "ticker": ticker,
-                "precio_compra": precio_compra,
-                "precio_actual": precio_actual,
-                "variacion_%": variacion,
-                "precio_contingencia": precio_contingencia,
-                "estado": estado,
-            })
-
-    resumen = pd.DataFrame(filas)
-    if resumen.empty:
-        st.warning("No se pudo generar el resumen.")
-        return None
-
-    notas_riesgo = resumen[resumen["estado"].eq("RIESGO")]["nota"].nunique()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Notas analizadas", resumen["nota"].nunique())
-    c2.metric("Tickers", len(resumen))
-    c3.metric("Notas en riesgo", int(notas_riesgo))
-
-    st.subheader("Resumen por ticker")
-    st.dataframe(preparar_tabla_monetaria(resumen, ["precio_compra", "precio_actual", "precio_contingencia"]), use_container_width=True)
-
-    alertas = []
-    for nota, grupo in resumen.groupby("nota"):
-        riesgo = grupo[grupo["estado"].eq("RIESGO")]
-        if not riesgo.empty:
-            alertas.append({"nota": int(nota), "tickers_en_riesgo": ", ".join(riesgo["ticker"].astype(str))})
-    if alertas:
-        st.error("Hay notas en riesgo.")
-        st.dataframe(pd.DataFrame(alertas), use_container_width=True)
-    else:
-        st.success("Ninguna nota en riesgo.")
-
-    peor = resumen.dropna(subset=["variacion_%"]).sort_values("variacion_%").head(1)
-    mejor = resumen.dropna(subset=["variacion_%"]).sort_values("variacion_%", ascending=False).head(1)
-    if not peor.empty and not mejor.empty:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Peor ticker", f"{peor.iloc[0]['ticker']} ({peor.iloc[0]['variacion_%']:.2f}%)")
-        c2.metric("Mejor ticker", f"{mejor.iloc[0]['ticker']} ({mejor.iloc[0]['variacion_%']:.2f}%)")
-        c3.metric("Variación media", f"{resumen['variacion_%'].mean():.2f}%")
-
-    return None
-
-def seccion_alertas_notas():
-    df_inv, df_cal, df_control = cargar_excel_completo()
-    st.header("🚨 Alertas Notas")
-    fecha = st.date_input("Fecha de consulta", value=pd.Timestamp.today().date())
-    fecha = pd.Timestamp(fecha).normalize()
-
-    if df_cal.empty:
-        st.warning("No existe la hoja CALENDARIO_NOTAS o está vacía.")
-        return
-
-    eventos = df_cal[df_cal["fecha"] == fecha].copy()
-    st.subheader(f"Eventos del {fecha.strftime('%d/%m/%Y')}")
-
-    if eventos.empty:
-        st.info("No hay observaciones ni pagos para esta fecha.")
-    else:
-        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
-
-    observaciones = eventos[eventos["tipo_evento"] == "OBSERVACION"].copy() if not eventos.empty else pd.DataFrame()
-    pagos = eventos[eventos["tipo_evento"] == "PAGO"].copy() if not eventos.empty else pd.DataFrame()
-
-    if not observaciones.empty:
-        st.subheader("Evaluación de observaciones")
-        for _, row in observaciones.iterrows():
-            nota = int(row["nota"])
-            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, fecha, preferida="contingency")
-            if resultado == "POSITIVA":
-                st.success(f"NOTA {nota}: observación POSITIVA")
-            elif resultado == "NEGATIVA":
-                st.error(f"NOTA {nota}: observación NEGATIVA")
-            else:
-                st.warning(f"NOTA {nota}: {resultado}")
-            if not detalle.empty:
-                st.dataframe(preparar_tabla_monetaria(detalle, ["precio_compra", "precio_barrera", "cierre_usado"]), use_container_width=True)
-
-    if not pagos.empty:
-        st.subheader("Pagos del día")
-        for _, row in pagos.iterrows():
-            nota = int(row["nota"])
-            previas = df_cal[(df_cal["nota"] == nota) & (df_cal["tipo_evento"] == "OBSERVACION") & (df_cal["fecha"] < fecha)].sort_values("fecha")
-            if previas.empty:
-                st.warning(f"NOTA {nota}: pago hoy, pero no he encontrado observación previa.")
-                continue
-            fecha_obs = previas.iloc[-1]["fecha"]
-            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, fecha_obs, preferida="contingency")
-            if resultado == "POSITIVA":
-                st.success(f"NOTA {nota}: pago hoy. La observación previa del {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y')} fue positiva.")
-            elif resultado == "NEGATIVA":
-                st.error(f"NOTA {nota}: pago hoy. La observación previa del {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y')} fue negativa.")
-            else:
-                st.warning(f"NOTA {nota}: pago hoy. Resultado observación previa: {resultado}")
-            if not detalle.empty:
-                with st.expander(f"Detalle NOTA {nota}"):
-                    st.dataframe(preparar_tabla_monetaria(detalle, ["precio_compra", "precio_barrera", "cierre_usado"]), use_container_width=True)
-
-
-def seccion_alertas_semana():
-    _, df_cal, _ = cargar_excel_completo()
-    st.header("📆 Alertas Semana")
-    fecha_inicio = st.date_input("Fecha de inicio", value=pd.Timestamp.today().date())
-    fecha_inicio = pd.Timestamp(fecha_inicio).normalize()
-    fecha_fin = fecha_inicio + pd.Timedelta(days=6)
-    st.caption(f"Del {fecha_inicio.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}")
-
-    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= fecha_inicio) & (df_cal["fecha"] <= fecha_fin)].copy().sort_values(["fecha", "tipo_evento", "nota"])
-    if eventos.empty:
-        st.info("No hay observaciones ni pagos esta semana.")
-        return
-    observaciones = eventos[eventos["tipo_evento"] == "OBSERVACION"]
-    pagos = eventos[eventos["tipo_evento"] == "PAGO"]
-    c1, c2 = st.columns(2)
-    c1.metric("Observaciones", len(observaciones))
-    c2.metric("Pagos", len(pagos))
-    st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
-
-
-def eventos_calendario_mes(df_cal: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
-    inicio = pd.Timestamp(anio, mes, 1)
-    fin = inicio + pd.offsets.MonthEnd(0)
-    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= inicio) & (df_cal["fecha"] <= fin)].copy()
-    if eventos.empty:
-        return eventos
-    eventos["semana_mes"] = ((eventos["fecha"].dt.day - 1) // 7) + 1
-    return eventos.sort_values(["fecha", "nota", "tipo_evento"])
-
-
-def seccion_calendario_notas():
-    _, df_cal, _ = cargar_excel_completo()
-    st.header("🗓️ Calendario Notas")
-    consulta = st.selectbox("Consulta", ["Esta semana", "Mes completo", "Semana concreta de un mes", "Exportar calendario de un mes"])
-
-    if consulta == "Esta semana":
-        hoy = pd.Timestamp.today().normalize()
-        inicio = hoy - pd.Timedelta(days=hoy.weekday())
-        fin = inicio + pd.Timedelta(days=6)
-        eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= inicio) & (df_cal["fecha"] <= fin)].copy().sort_values(["fecha", "nota", "tipo_evento"])
-        st.caption(f"Del {inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}")
-        if not eventos.empty:
-            st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+def resumen_detalle_observacion(detalle_obs: pd.DataFrame) -> str:
+    if detalle_obs is None or detalle_obs.empty:
+        return ""
+    partes = []
+    for _, row in detalle_obs.iterrows():
+        ticker = row.get("ticker", "")
+        estado = row.get("estado", "")
+        cierre = row.get("cierre_usado", None)
+        barrera = row.get("precio_barrera", None)
+        if pd.notna(cierre) and pd.notna(barrera):
+            partes.append(f"{ticker}: {estado} cierre {float(cierre):.2f} / barrera {float(barrera):.2f}")
         else:
-            st.info("No hay eventos esta semana.")
-
-    else:
-        c1, c2 = st.columns(2)
-        anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year, key=f"cal_{consulta}_anio"))
-        mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month, key=f"cal_{consulta}_mes"))
-        eventos = eventos_calendario_mes(df_cal, anio, mes)
-
-        if consulta == "Mes completo":
-            st.subheader(f"Calendario de {nombre_mes_es(mes)} {anio}")
-            if not eventos.empty:
-                st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
-            else:
-                st.info("No hay eventos ese mes.")
-
-        elif consulta == "Semana concreta de un mes":
-            semana = int(st.number_input("Semana del mes", min_value=1, max_value=5, value=1))
-            filtrado = eventos[eventos["semana_mes"] == semana].copy() if not eventos.empty else pd.DataFrame()
-            if not filtrado.empty:
-                st.dataframe(preparar_tabla_monetaria(filtrado, []), use_container_width=True)
-            else:
-                st.info("No hay eventos en esa semana.")
-
-        elif consulta == "Exportar calendario de un mes":
-            if eventos.empty:
-                st.info("No hay eventos para exportar en ese mes.")
-            else:
-                salida = BytesIO()
-                exportar = eventos.copy()
-                exportar["fecha"] = exportar["fecha"].dt.strftime("%d/%m/%Y")
-                with pd.ExcelWriter(salida, engine="openpyxl") as writer:
-                    exportar.to_excel(writer, index=False, sheet_name="CALENDARIO")
-                st.download_button(
-                    "Descargar Excel",
-                    data=salida.getvalue(),
-                    file_name=f"calendario_notas_{mes}_{anio}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-    return None
+            partes.append(f"{ticker}: {estado}")
+    return " | ".join(partes)
 
 
+def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal: pd.DataFrame | None = None, df_control: pd.DataFrame | None = None) -> pd.DataFrame:
+    filas = []
+    cache_observaciones = {}
+    for _, evento in df_pagos.iterrows():
+        nota = evento.get("nota")
+        fecha_pago = evento.get("fecha")
+        if pd.isna(nota) or pd.isna(fecha_pago):
+            continue
+        nota_int = int(nota)
+        fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, fecha_pago) if df_cal is not None else None
+        resultado_obs = "NO_EVALUADA"
+        detalle_obs = pd.DataFrame()
+        ingreso_habilitado = True
+        if fecha_obs is not None and df_control is not None and not df_control.empty:
+            clave = (nota_int, pd.Timestamp(fecha_obs).normalize())
+            if clave not in cache_observaciones:
+                cache_observaciones[clave] = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency")
+            resultado_obs, detalle_obs = cache_observaciones[clave]
+            if resultado_obs == "NEGATIVA":
+                ingreso_habilitado = False
+        activas = inversiones_activas_para_nota(df_inv, nota_int, fecha_pago)
+        for _, fila in activas.iterrows():
+            capital = float(fila.get("capital_invertido", 0))
+            cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12
+            cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
+            pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12
+            filas.append({
+                "fecha_pago": fecha_pago, "nota": nota_int, "fecha_observacion_usada": fecha_obs,
+                "resultado_observacion": resultado_obs, "detalle_observacion": resumen_detalle_observacion(detalle_obs),
+                "ingreso_habilitado": "SI" if ingreso_habilitado else "NO", "id_inversion": fila.get("id_inversion", ""),
+                "inversor": fila.get("inversor", ""), "cuenta_cobro": fila.get("cuenta_cobro", "SIN CLASIFICAR"),
+                "capital_invertido": capital, "interes_nota_anual": fila.get("interes_nota_anual", 0),
+                "interes_inversor_anual": fila.get("interes_inversor_anual", 0), "cobro_teorico_compania": cobro_teorico,
+                "cobro_compania": cobro_compania, "pago_inversor": pago_inversor, "beneficio_empresa": cobro_compania - pago_inversor,
+            })
+    return pd.DataFrame(filas)
+
+
+def resumen_notas_mes(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
+    pagos = pagos_notas_mes(df_cal, anio, mes)
+    detalle = preparar_detalle_notas(df_inv, pagos, df_cal=df_cal, df_control=df_control)
+    if detalle.empty:
+        return 0.0, 0.0, 0.0, detalle, pagos
+    return float(detalle["cobro_compania"].sum()), float(detalle["pago_inversor"].sum()), float(detalle["beneficio_empresa"].sum()), detalle, pagos
+
+
+def resumen_por_cuenta_cobro(detalle: pd.DataFrame) -> pd.DataFrame:
+    if detalle.empty:
+        return pd.DataFrame(columns=["cuenta_cobro", "cobro_compania"])
+    return detalle.groupby("cuenta_cobro", as_index=False)["cobro_compania"].sum().sort_values("cobro_compania", ascending=False)
+
+
+def resumen_capital_por_inversor_notas(df_inv: pd.DataFrame, solo_activo: bool = False) -> pd.DataFrame:
+    trabajo = filtrar_notas(df_inv)
+    hoy = pd.Timestamp.today().normalize()
+    if solo_activo:
+        trabajo = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= hoy) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))]
+    if trabajo.empty:
+        return pd.DataFrame(columns=["inversor", "capital"])
+    return trabajo.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
+
+
+def proximo_evento_nota(df_cal: pd.DataFrame, nota: int, tipo: str):
+    hoy = pd.Timestamp.today().normalize()
+    eventos = df_cal[(df_cal["tipo_evento"] == tipo) & (df_cal["nota"] == nota) & (df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy)].sort_values("fecha")
+    return None if eventos.empty else eventos.iloc[0]["fecha"]
+
+
+# =========================
+# GLOBAL Y DASHBOARD
+# =========================
 def detectar_activo(row):
     tipo = limpiar_texto(row.get("tipo_inversion", ""))
     subtipo = limpiar_texto(row.get("subtipo_inversion", ""))
@@ -1216,6 +650,557 @@ def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame
     return trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))].copy()
 
 
+def tarjeta_kpi(titulo, valor, subtitulo="", estado="normal"):
+    colores = {"normal": ("#ffffff", "#0e2338"), "positivo": ("#edf7ed", "#166534"), "riesgo": ("#fff4e5", "#b45309"), "negativo": ("#fee2e2", "#991b1b")}
+    fondo, color = colores.get(estado, colores["normal"])
+    st.markdown(
+        f"""
+        <div style="background:{fondo};padding:22px 24px;border-radius:22px;border:1px solid rgba(191,154,95,0.24);box-shadow:0 12px 32px rgba(15,35,55,0.08);min-height:130px;">
+            <div style="font-size:13px;color:#667085;font-weight:700;text-transform:uppercase;">{titulo}</div>
+            <div style="font-size:32px;color:{color};font-weight:850;margin-top:8px;">{valor}</div>
+            <div style="font-size:13px;color:#667085;margin-top:8px;">{subtitulo}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def validar_base_datos(df_inv, df_cal, df_control):
+    resultados = []
+    def add(nombre, cantidad, gravedad):
+        resultados.append({"Validación": nombre, "Incidencias": int(cantidad), "Estado": gravedad if cantidad > 0 else "OK"})
+    add("Inversiones sin fecha de inversión", df_inv["fecha_inversion"].isna().sum() if "fecha_inversion" in df_inv.columns else len(df_inv), "ALTA")
+    add("Inversiones sin capital invertido", (df_inv["capital_invertido"].fillna(0) <= 0).sum() if "capital_invertido" in df_inv.columns else len(df_inv), "ALTA")
+    add("Inversiones sin inversor", (df_inv["inversor"].fillna("").astype(str).str.strip() == "").sum() if "inversor" in df_inv.columns else len(df_inv), "MEDIA")
+    notas_filtradas = filtrar_notas(df_inv) if not df_inv.empty else pd.DataFrame()
+    add("Notas sin número detectado", notas_filtradas["nota_num"].isna().sum() if not notas_filtradas.empty and "nota_num" in notas_filtradas.columns else 0, "ALTA")
+    add("Eventos de calendario sin fecha", df_cal["fecha"].isna().sum() if "fecha" in df_cal.columns else 0, "MEDIA")
+    add("Control de notas sin ticker", (df_control["ticker"].fillna("").astype(str).str.strip() == "").sum() if "ticker" in df_control.columns else 0, "ALTA")
+    add("Control de notas sin precio de compra", df_control["precio_compra"].isna().sum() if "precio_compra" in df_control.columns else 0, "ALTA")
+    return pd.DataFrame(resultados)
+
+
+def detectar_alertas_financieras(df_inv, df_cal, df_control):
+    hoy = pd.Timestamp.today().normalize()
+    alertas = []
+    eventos_7 = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy) & (df_cal["fecha"] <= hoy + pd.Timedelta(days=7))].copy() if not df_cal.empty and "fecha" in df_cal.columns else pd.DataFrame()
+    for _, row in eventos_7.iterrows():
+        alertas.append({"Tipo": "Evento próximo", "Detalle": f"{row.get('tipo_evento', '')} de NOTA {row.get('nota', '')}", "Fecha": pd.Timestamp(row.get("fecha")).strftime("%d/%m/%Y"), "Prioridad": "MEDIA"})
+    if not df_control.empty and "nota" in df_control.columns:
+        notas = sorted([int(x) for x in df_control["nota"].dropna().unique()])
+        for nota in notas:
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, hoy, preferida="contingency")
+            if resultado == "NEGATIVA":
+                tickers = ", ".join(detalle[detalle["estado"] != "OK"]["ticker"].astype(str)) if not detalle.empty and "estado" in detalle.columns else ""
+                alertas.append({"Tipo": "Nota en riesgo", "Detalle": f"NOTA {nota} con tickers en riesgo: {tickers}", "Fecha": hoy.strftime("%d/%m/%Y"), "Prioridad": "ALTA"})
+    validaciones = validar_base_datos(df_inv, df_cal, df_control)
+    errores_altos = validaciones[(validaciones["Incidencias"] > 0) & (validaciones["Estado"] == "ALTA")]
+    for _, row in errores_altos.iterrows():
+        alertas.append({"Tipo": "Validación crítica", "Detalle": f"{row['Validación']}: {row['Incidencias']} incidencias", "Fecha": hoy.strftime("%d/%m/%Y"), "Prioridad": "ALTA"})
+    return pd.DataFrame(alertas)
+
+
+def obtener_resumen_dashboard(df_inv, df_cal, df_control):
+    hoy = pd.Timestamp.today().normalize()
+    activas = inversiones_activas_global(df_inv, hoy)
+    if not activas.empty:
+        activas["activo"] = activas.apply(detectar_activo, axis=1)
+    capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
+    c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, hoy.year, hoy.month)
+    detalles_fijos = []
+    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        det = detalle_activo_mes(df_inv, activo, tasa, hoy.year, hoy.month)
+        if not det.empty:
+            det["activo"] = activo
+            detalles_fijos.append(det)
+    d_fijos = pd.concat(detalles_fijos, ignore_index=True) if detalles_fijos else pd.DataFrame()
+    cobro_fijos = d_fijos["ingreso_bruto"].sum() if not d_fijos.empty else 0
+    pago_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
+    beneficio_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
+    eventos_futuros = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy)].copy().sort_values("fecha") if not df_cal.empty else pd.DataFrame()
+    return {"activas": activas, "capital_total": capital_total, "cobro_total_mes": c_notas + cobro_fijos, "pago_total_mes": p_notas + pago_fijos, "beneficio_total_mes": b_notas + beneficio_fijos, "eventos_futuros": eventos_futuros, "detalle_notas": detalle_notas, "detalle_fijos": d_fijos}
+
+
+def grafico_capital_por_activo(activas):
+    if px is None:
+        st.warning("Falta plotly. Añade plotly a requirements.txt.")
+        return
+    if activas.empty:
+        st.info("No hay inversiones activas para graficar.")
+        return
+    resumen = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
+    fig = px.pie(resumen, names="activo", values="capital", hole=0.45, title="Distribución del capital activo por activo")
+    fig.update_layout(height=420, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter", size=13), title_font=dict(size=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def grafico_capital_por_inversor(activas):
+    if px is None:
+        st.warning("Falta plotly. Añade plotly a requirements.txt.")
+        return
+    if activas.empty:
+        st.info("No hay inversiones activas para graficar.")
+        return
+    resumen = activas.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False).head(10)
+    fig = px.bar(resumen, x="inversor", y="capital", title="Top inversores por capital activo", text_auto=".2s")
+    fig.update_layout(height=420, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter", size=13), title_font=dict(size=20), xaxis_title="Inversor", yaxis_title="Capital activo")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def grafico_beneficio_mensual(df_inv, df_cal, df_control):
+    if px is None:
+        st.warning("Falta plotly. Añade plotly a requirements.txt.")
+        return
+    hoy = pd.Timestamp.today().normalize()
+    filas = []
+    for i in range(11, -1, -1):
+        fecha = hoy - pd.DateOffset(months=i)
+        anio, mes = fecha.year, fecha.month
+        _, _, b_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
+        detalles_fijos = []
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+            det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
+            if not det.empty:
+                detalles_fijos.append(det)
+        d_fijos = pd.concat(detalles_fijos, ignore_index=True) if detalles_fijos else pd.DataFrame()
+        b_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
+        filas.append({"mes": f"{mes:02d}/{anio}", "beneficio": b_notas + b_fijos})
+    data = pd.DataFrame(filas)
+    fig = px.line(data, x="mes", y="beneficio", markers=True, title="Evolución del beneficio mensual estimado")
+    fig.update_layout(height=420, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter", size=13), title_font=dict(size=20), xaxis_title="Mes", yaxis_title="Beneficio")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def dashboard_financiero():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control)
+    alertas = detectar_alertas_financieras(df_inv, df_cal, df_control)
+    st.markdown("## Dashboard financiero")
+    st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio, riesgos y próximos eventos.")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        tarjeta_kpi("Capital activo total", fmt(resumen["capital_total"]), "Capital actualmente vivo", "normal")
+    with c2:
+        tarjeta_kpi("Cobro estimado mes", fmt(resumen["cobro_total_mes"]), "Ingresos brutos esperados", "positivo")
+    with c3:
+        tarjeta_kpi("Pago inversores mes", fmt(resumen["pago_total_mes"]), "Obligaciones estimadas", "riesgo")
+    with c4:
+        estado = "positivo" if resumen["beneficio_total_mes"] >= 0 else "negativo"
+        tarjeta_kpi("Beneficio estimado mes", fmt(resumen["beneficio_total_mes"]), "Margen neto estimado", estado)
+    st.markdown("---")
+    if not alertas.empty:
+        altas = alertas[alertas["Prioridad"] == "ALTA"]
+        if not altas.empty:
+            st.error(f"Hay {len(altas)} alertas críticas que requieren revisión.")
+        else:
+            st.warning(f"Hay {len(alertas)} alertas próximas o de seguimiento.")
+        with st.expander("Ver alertas del sistema", expanded=True):
+            st.dataframe(alertas, use_container_width=True)
+    else:
+        st.success("No hay alertas activas. Sistema estable.")
+    tab1, tab2, tab3 = st.tabs(["Capital por activo", "Capital por inversor", "Beneficio mensual"])
+    with tab1:
+        grafico_capital_por_activo(resumen["activas"])
+    with tab2:
+        grafico_capital_por_inversor(resumen["activas"])
+    with tab3:
+        grafico_beneficio_mensual(df_inv, df_cal, df_control)
+    st.markdown("### Próximos eventos")
+    eventos = resumen["eventos_futuros"].head(12)
+    if eventos.empty:
+        st.info("No hay próximos eventos registrados.")
+    else:
+        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+    st.markdown("### Estado de calidad de datos")
+    st.dataframe(validar_base_datos(df_inv, df_cal, df_control), use_container_width=True)
+
+
+def centro_control_inversiones():
+    df_inv, _, _ = cargar_excel_completo()
+    st.markdown("## Centro de control de inversiones")
+    st.caption("Consulta profesional por filtros.")
+    c1, c2, c3 = st.columns(3)
+    activo = c1.selectbox("Activo", ["Todos", "notas", "paraguay", "motoclick", "futbol", "otros"])
+    inversores = ["Todos"] + sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
+    inversor = c2.selectbox("Inversor", inversores)
+    fecha = pd.Timestamp(c3.date_input("Fecha de análisis", value=pd.Timestamp.today().date())).normalize()
+    activas = inversiones_activas_global(df_inv, fecha)
+    if not activas.empty:
+        activas["activo"] = activas.apply(detectar_activo, axis=1)
+    if activo != "Todos":
+        activas = activas[activas["activo"] == activo]
+    if inversor != "Todos":
+        activas = activas[activas["inversor"].astype(str).str.lower() == inversor.lower()]
+    capital = activas["capital_invertido"].sum() if not activas.empty else 0
+    num_inversiones = len(activas)
+    ticket_medio = capital / num_inversiones if num_inversiones else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Capital activo", fmt(capital))
+    c2.metric("Inversiones activas", num_inversiones)
+    c3.metric("Ticket medio", fmt(ticket_medio))
+    if activas.empty:
+        st.info("No hay inversiones activas con estos filtros.")
+        return
+    tab1, tab2, tab3 = st.tabs(["Detalle", "Por activo", "Por inversor"])
+    with tab1:
+        st.dataframe(preparar_tabla_monetaria(activas, ["capital_invertido", "interes_inversor_anual", "interes_nota_anual"]), use_container_width=True)
+    with tab2:
+        resumen_activo = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
+        st.dataframe(preparar_tabla_monetaria(resumen_activo, ["capital"]), use_container_width=True)
+    with tab3:
+        resumen_inv = activas.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
+        st.dataframe(preparar_tabla_monetaria(resumen_inv, ["capital"]), use_container_width=True)
+
+
+# =========================
+# SECCIONES ORIGINALES MEJORADAS
+# =========================
+def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incluir_ingresado_desde_inicio: bool = False):
+    df_inv, _, _ = cargar_excel_completo()
+    st.header(f"📌 Consultas {nombre_visible}")
+    opciones = [
+        f"¿Cuánto ingresará {nombre_visible} en un mes?", "¿Cuánto cobrará cada inversor ese mes?", "¿Cuánto cobrará un inversor concreto ese mes?",
+        "¿Cuál será el beneficio de la empresa ese mes?", "¿Cuál es el total pagado a inversores desde el inicio?",
+        f"¿Cuánto capital hay actualmente activo en {nombre_visible} hoy?", f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?",
+    ]
+    if incluir_ingresado_desde_inicio:
+        opciones += ["¿Cuánto ha ingresado la compañía desde el inicio?", "¿Cuál es el beneficio total acumulado desde el inicio?"]
+    consulta = st.selectbox("Elige una pregunta", opciones)
+    necesita_mes = consulta in opciones[:4] or consulta == f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?"
+    anio = mes = None
+    if necesita_mes:
+        c1, c2 = st.columns(2)
+        anio = int(c1.number_input("Año", 2020, 2100, pd.Timestamp.today().year, key=f"{activo_key}_anio"))
+        mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month, key=f"{activo_key}_mes"))
+    nombre_inversor = None
+    if consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
+        inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
+        nombre_inversor = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
+    if st.button("Calcular", key=f"calc_{activo_key}_{consulta}"):
+        if consulta == f"¿Cuánto ingresará {nombre_visible} en un mes?":
+            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Ingreso bruto", fmt(detalle["ingreso_bruto"].sum() if not detalle.empty else 0))])
+            if not detalle.empty:
+                st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
+        elif consulta == "¿Cuánto cobrará cada inversor ese mes?":
+            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            if detalle.empty:
+                st.info("No hay cobros de inversores para ese mes.")
+            else:
+                resumen = detalle.groupby("inversor", as_index=False)["pago_inversor_mes"].sum().rename(columns={"pago_inversor_mes": "cobro_mes"}).sort_values("cobro_mes", ascending=False)
+                st.dataframe(preparar_tabla_monetaria(resumen, ["cobro_mes"]), use_container_width=True)
+        elif consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
+            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            filtrado = detalle[detalle["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()] if not detalle.empty else pd.DataFrame()
+            mostrar_metricas("Resultado", [(f"Cobro de {nombre_inversor}", fmt(filtrado["pago_inversor_mes"].sum() if not filtrado.empty else 0))])
+        elif consulta == "¿Cuál será el beneficio de la empresa ese mes?":
+            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Beneficio empresa", fmt(detalle["beneficio_empresa_mes"].sum() if not detalle.empty else 0))])
+            if not detalle.empty:
+                st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
+        elif consulta == "¿Cuál es el total pagado a inversores desde el inicio?":
+            mostrar_metricas("Resultado", [("Total pagado", fmt(total_pagado_activo_desde_inicio(df_inv, activo_key, tasa_anual)))])
+        elif consulta == f"¿Cuánto capital hay actualmente activo en {nombre_visible} hoy?":
+            bruto = capital_activo_en_fecha(df_inv, pd.Timestamp.today(), activo_key, False)
+            real = capital_activo_en_fecha(df_inv, pd.Timestamp.today(), activo_key, True)
+            mostrar_metricas("Resultado", [("Capital activo", fmt(bruto)), ("Capital activo real", fmt(real))])
+        elif consulta == f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?":
+            fecha = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
+            bruto = capital_activo_en_fecha(df_inv, fecha, activo_key, False)
+            real = capital_activo_en_fecha(df_inv, fecha, activo_key, True)
+            mostrar_metricas(f"Cierre {nombre_mes_es(mes)} {anio}", [("Capital activo", fmt(bruto)), ("Capital activo real", fmt(real))])
+        elif consulta == "¿Cuánto ha ingresado la compañía desde el inicio?":
+            mostrar_metricas("Resultado", [("Total ingresado", fmt(total_ingresado_activo_desde_inicio(df_inv, activo_key, tasa_anual)))])
+        elif consulta == "¿Cuál es el beneficio total acumulado desde el inicio?":
+            ingreso = total_ingresado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
+            pagado = total_pagado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
+            mostrar_metricas("Resultado", [("Beneficio acumulado", fmt(ingreso - pagado))])
+
+
+def seccion_notas():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.header("🧾 Consultas Notas")
+    consulta = st.selectbox("Elige una pregunta", [
+        "¿Cuánto cobrará la compañía en un mes de notas?", "¿Cuánto se pagará a inversores en un mes de notas?", "¿Cuál será el beneficio de la empresa en un mes de notas?",
+        "¿Cuánto cobrará cada inversor ese mes?", "¿Cuánto cobrará un inversor concreto ese mes?", "¿Cuánto ha cobrado la compañía desde el inicio?",
+        "¿Cuánto se ha pagado a inversores desde el inicio?", "¿Cuál es el beneficio total desde el inicio?", "¿Cuál es el próximo pago de una nota?",
+        "¿Cuál es la próxima observación de una nota?", "¿Cuánto capital hay invertido en total?", "¿Cuánto capital hay actualmente activo?",
+        "¿Cuánto capital tiene un inversor?", "¿Cuánto capital activo tiene un inversor?", "Ver ranking de capital por inversor", "Ver ranking de capital activo",
+    ])
+    consultas_mes = ["¿Cuánto cobrará la compañía en un mes de notas?", "¿Cuánto se pagará a inversores en un mes de notas?", "¿Cuál será el beneficio de la empresa en un mes de notas?", "¿Cuánto cobrará cada inversor ese mes?", "¿Cuánto cobrará un inversor concreto ese mes?"]
+    anio = mes = None
+    if consulta in consultas_mes:
+        c1, c2 = st.columns(2)
+        anio = int(c1.number_input("Año", 2020, 2100, pd.Timestamp.today().year, key="notas_anio"))
+        mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month, key="notas_mes"))
+    inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
+    nombre_inversor = None
+    if consulta in ["¿Cuánto cobrará un inversor concreto ese mes?", "¿Cuánto capital tiene un inversor?", "¿Cuánto capital activo tiene un inversor?"]:
+        nombre_inversor = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
+    nota = None
+    if consulta in ["¿Cuál es el próximo pago de una nota?", "¿Cuál es la próxima observación de una nota?"]:
+        notas_disponibles = sorted([int(x) for x in df_cal.get("nota", pd.Series(dtype="Int64")).dropna().unique()])
+        nota = st.selectbox("Número de nota", notas_disponibles) if notas_disponibles else int(st.number_input("Número de nota", min_value=1, value=1))
+    if st.button("Calcular", key=f"calc_notas_{consulta}"):
+        if consulta in consultas_mes:
+            total_cobrado, total_pagado, total_beneficio, detalle, pagos = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
+            if consulta == "¿Cuánto cobrará la compañía en un mes de notas?":
+                mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Cobra compañía", fmt(total_cobrado))])
+                resumen_cuentas = resumen_por_cuenta_cobro(detalle)
+                if not resumen_cuentas.empty:
+                    st.dataframe(preparar_tabla_monetaria(resumen_cuentas, ["cobro_compania"]), use_container_width=True)
+            elif consulta == "¿Cuánto se pagará a inversores en un mes de notas?":
+                mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Pago inversores", fmt(total_pagado))])
+            elif consulta == "¿Cuál será el beneficio de la empresa en un mes de notas?":
+                mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Beneficio empresa", fmt(total_beneficio))])
+            elif consulta == "¿Cuánto cobrará cada inversor ese mes?":
+                resumen = detalle.groupby("inversor", as_index=False)["pago_inversor"].sum().rename(columns={"pago_inversor": "cobro_mes"}).sort_values("cobro_mes", ascending=False) if not detalle.empty else pd.DataFrame()
+                st.dataframe(preparar_tabla_monetaria(resumen, ["cobro_mes"]), use_container_width=True) if not resumen.empty else st.info("No hay cobros de inversores para ese mes.")
+            elif consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
+                filtrado = detalle[detalle["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()] if not detalle.empty else pd.DataFrame()
+                mostrar_metricas("Resultado", [(f"Cobro de {nombre_inversor}", fmt(filtrado["pago_inversor"].sum() if not filtrado.empty else 0))])
+            if not pagos.empty:
+                with st.expander("Ver pagos detectados"):
+                    st.dataframe(preparar_tabla_monetaria(pagos, []), use_container_width=True)
+            if not detalle.empty:
+                with st.expander("Ver detalle por nota e inversión"):
+                    st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]), use_container_width=True)
+        elif consulta == "¿Cuánto ha cobrado la compañía desde el inicio?":
+            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
+            mostrar_metricas("Resultado", [("Total cobrado compañía", fmt(detalle["cobro_compania"].sum() if not detalle.empty else 0))])
+        elif consulta == "¿Cuánto se ha pagado a inversores desde el inicio?":
+            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
+            mostrar_metricas("Resultado", [("Total pagado inversores", fmt(detalle["pago_inversor"].sum() if not detalle.empty else 0))])
+        elif consulta == "¿Cuál es el beneficio total desde el inicio?":
+            detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
+            mostrar_metricas("Resultado", [("Beneficio total", fmt(detalle["beneficio_empresa"].sum() if not detalle.empty else 0))])
+        elif consulta == "¿Cuál es el próximo pago de una nota?":
+            fecha = proximo_evento_nota(df_cal, int(nota), "PAGO")
+            st.success(f"El próximo pago de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}") if fecha is not None else st.info("No hay pagos futuros para esa nota.")
+        elif consulta == "¿Cuál es la próxima observación de una nota?":
+            fecha = proximo_evento_nota(df_cal, int(nota), "OBSERVACION")
+            st.success(f"La próxima observación de la nota {nota} es el {pd.Timestamp(fecha).strftime('%d/%m/%Y')}") if fecha is not None else st.info("No hay observaciones futuras para esa nota.")
+        elif consulta == "¿Cuánto capital hay invertido en total?":
+            mostrar_metricas("Resultado", [("Capital total invertido", fmt(filtrar_notas(df_inv)["capital_invertido"].sum()))])
+        elif consulta == "¿Cuánto capital hay actualmente activo?":
+            trabajo = filtrar_notas(df_inv); hoy = pd.Timestamp.today().normalize()
+            activas = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= hoy) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))]
+            mostrar_metricas("Resultado", [("Capital activo hoy", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))])
+        elif consulta == "¿Cuánto capital tiene un inversor?":
+            trabajo = filtrar_notas(df_inv); filtrado = trabajo[trabajo["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()]
+            mostrar_metricas("Resultado", [(f"Capital total de {nombre_inversor}", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
+        elif consulta == "¿Cuánto capital activo tiene un inversor?":
+            trabajo = filtrar_notas(df_inv); hoy = pd.Timestamp.today().normalize()
+            filtrado = trabajo[(trabajo["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()) & (trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= hoy) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))]
+            mostrar_metricas("Resultado", [(f"Capital activo de {nombre_inversor}", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
+        elif consulta == "Ver ranking de capital por inversor":
+            st.dataframe(preparar_tabla_monetaria(resumen_capital_por_inversor_notas(df_inv, False), ["capital"]), use_container_width=True)
+        elif consulta == "Ver ranking de capital activo":
+            st.dataframe(preparar_tabla_monetaria(resumen_capital_por_inversor_notas(df_inv, True), ["capital"]), use_container_width=True)
+
+
+def seccion_notas_archivo():
+    _, _, df_control = cargar_excel_completo()
+    st.header("🧾 Notas")
+    st.caption("Resumen tipo notas.py: precio actual, variación, barrera de contingencia y alertas por nota.")
+    if yf is None:
+        st.error("Falta yfinance. Añade yfinance a requirements.txt.")
+        return
+    control = df_control.copy()
+    if control.empty:
+        st.warning("La hoja CONTROL_NOTAS está vacía o no existe.")
+        return
+    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in control.columns), None)
+    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in control.columns]
+    if faltan:
+        st.error(f"En CONTROL_NOTAS faltan columnas: {', '.join(faltan)}")
+        return
+    if barrera_col is None:
+        st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
+        return
+    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
+    control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
+    control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
+    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
+    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
+    if st.button("Actualizar precios actuales"):
+        st.cache_data.clear()
+    filas = []
+    with st.spinner("Descargando precios actuales..."):
+        for _, row in control.iterrows():
+            ticker = row["ticker"]
+            precio_actual = None
+            try:
+                hist = yf.Ticker(ticker).history(period="5d")
+                if not hist.empty:
+                    precio_actual = float(hist["Close"].dropna().iloc[-1])
+            except Exception:
+                precio_actual = None
+            precio_compra = float(row["precio_compra"])
+            barrera = float(row[barrera_col])
+            precio_contingencia = precio_compra * barrera
+            variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
+            estado = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
+            filas.append({"nota": int(row["nota"]), "ticker": ticker, "precio_compra": precio_compra, "precio_actual": precio_actual, "variacion_%": variacion, "precio_contingencia": precio_contingencia, "estado": estado})
+    resumen = pd.DataFrame(filas)
+    if resumen.empty:
+        st.warning("No se pudo generar el resumen.")
+        return
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Notas analizadas", resumen["nota"].nunique())
+    c2.metric("Tickers", len(resumen))
+    c3.metric("Notas en riesgo", int(resumen[resumen["estado"].eq("RIESGO")]["nota"].nunique()))
+    st.dataframe(preparar_tabla_monetaria(resumen, ["precio_compra", "precio_actual", "precio_contingencia"]), use_container_width=True)
+    alertas = [{"nota": int(nota), "tickers_en_riesgo": ", ".join(grupo[grupo["estado"].eq("RIESGO")]["ticker"].astype(str))} for nota, grupo in resumen.groupby("nota") if not grupo[grupo["estado"].eq("RIESGO")].empty]
+    if alertas:
+        st.error("Hay notas en riesgo.")
+        st.dataframe(pd.DataFrame(alertas), use_container_width=True)
+    else:
+        st.success("Ninguna nota en riesgo.")
+
+
+def seccion_alertas_notas():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.header("🚨 Alertas Notas")
+    fecha = pd.Timestamp(st.date_input("Fecha de consulta", value=pd.Timestamp.today().date())).normalize()
+    if df_cal.empty:
+        st.warning("No existe la hoja CALENDARIO_NOTAS o está vacía.")
+        return
+    eventos = df_cal[df_cal["fecha"] == fecha].copy()
+    st.subheader(f"Eventos del {fecha.strftime('%d/%m/%Y')}")
+    st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True) if not eventos.empty else st.info("No hay observaciones ni pagos para esta fecha.")
+    observaciones = eventos[eventos["tipo_evento"] == "OBSERVACION"].copy() if not eventos.empty else pd.DataFrame()
+    pagos = eventos[eventos["tipo_evento"] == "PAGO"].copy() if not eventos.empty else pd.DataFrame()
+    if not observaciones.empty:
+        st.subheader("Evaluación de observaciones")
+        for _, row in observaciones.iterrows():
+            nota = int(row["nota"])
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, fecha, preferida="contingency")
+            (st.success if resultado == "POSITIVA" else st.error if resultado == "NEGATIVA" else st.warning)(f"NOTA {nota}: {resultado}")
+            if not detalle.empty:
+                st.dataframe(preparar_tabla_monetaria(detalle, ["precio_compra", "precio_barrera", "cierre_usado"]), use_container_width=True)
+    if not pagos.empty:
+        st.subheader("Pagos del día")
+        for _, row in pagos.iterrows():
+            nota = int(row["nota"])
+            previas = df_cal[(df_cal["nota"] == nota) & (df_cal["tipo_evento"] == "OBSERVACION") & (df_cal["fecha"] < fecha)].sort_values("fecha")
+            if previas.empty:
+                st.warning(f"NOTA {nota}: pago hoy, pero no he encontrado observación previa.")
+                continue
+            fecha_obs = previas.iloc[-1]["fecha"]
+            resultado, detalle = evaluar_nota_en_fecha(df_control, nota, fecha_obs, preferida="contingency")
+            (st.success if resultado == "POSITIVA" else st.error if resultado == "NEGATIVA" else st.warning)(f"NOTA {nota}: pago hoy. Observación previa {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y')}: {resultado}")
+            if not detalle.empty:
+                with st.expander(f"Detalle NOTA {nota}"):
+                    st.dataframe(preparar_tabla_monetaria(detalle, ["precio_compra", "precio_barrera", "cierre_usado"]), use_container_width=True)
+
+
+def seccion_alertas_semana():
+    _, df_cal, _ = cargar_excel_completo()
+    st.header("📆 Alertas Semana")
+    fecha_inicio = pd.Timestamp(st.date_input("Fecha de inicio", value=pd.Timestamp.today().date())).normalize()
+    fecha_fin = fecha_inicio + pd.Timedelta(days=6)
+    st.caption(f"Del {fecha_inicio.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}")
+    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= fecha_inicio) & (df_cal["fecha"] <= fecha_fin)].copy().sort_values(["fecha", "tipo_evento", "nota"])
+    if eventos.empty:
+        st.info("No hay observaciones ni pagos esta semana.")
+        return
+    c1, c2 = st.columns(2)
+    c1.metric("Observaciones", len(eventos[eventos["tipo_evento"] == "OBSERVACION"]))
+    c2.metric("Pagos", len(eventos[eventos["tipo_evento"] == "PAGO"]))
+    st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+
+
+def eventos_calendario_mes(df_cal: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
+    inicio = pd.Timestamp(anio, mes, 1)
+    fin = inicio + pd.offsets.MonthEnd(0)
+    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= inicio) & (df_cal["fecha"] <= fin)].copy()
+    if eventos.empty:
+        return eventos
+    eventos["semana_mes"] = ((eventos["fecha"].dt.day - 1) // 7) + 1
+    return eventos.sort_values(["fecha", "nota", "tipo_evento"])
+
+
+def seccion_calendario_notas():
+    _, df_cal, _ = cargar_excel_completo()
+    st.header("🗓️ Calendario Notas")
+    consulta = st.selectbox("Consulta", ["Esta semana", "Mes completo", "Semana concreta de un mes", "Exportar calendario de un mes"])
+    if consulta == "Esta semana":
+        hoy = pd.Timestamp.today().normalize()
+        inicio = hoy - pd.Timedelta(days=hoy.weekday())
+        fin = inicio + pd.Timedelta(days=6)
+        eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= inicio) & (df_cal["fecha"] <= fin)].copy().sort_values(["fecha", "nota", "tipo_evento"])
+        st.caption(f"Del {inicio.strftime('%d/%m/%Y')} al {fin.strftime('%d/%m/%Y')}")
+        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True) if not eventos.empty else st.info("No hay eventos esta semana.")
+        return
+    c1, c2 = st.columns(2)
+    anio = int(c1.number_input("Año", 2020, 2100, pd.Timestamp.today().year, key=f"cal_{consulta}_anio"))
+    mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month, key=f"cal_{consulta}_mes"))
+    eventos = eventos_calendario_mes(df_cal, anio, mes)
+    if consulta == "Mes completo":
+        st.subheader(f"Calendario de {nombre_mes_es(mes)} {anio}")
+        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True) if not eventos.empty else st.info("No hay eventos ese mes.")
+    elif consulta == "Semana concreta de un mes":
+        semana = int(st.number_input("Semana del mes", min_value=1, max_value=5, value=1))
+        filtrado = eventos[eventos["semana_mes"] == semana].copy() if not eventos.empty else pd.DataFrame()
+        st.dataframe(preparar_tabla_monetaria(filtrado, []), use_container_width=True) if not filtrado.empty else st.info("No hay eventos en esa semana.")
+    else:
+        if eventos.empty:
+            st.info("No hay eventos para exportar en ese mes.")
+        else:
+            salida = BytesIO()
+            exportar = eventos.copy(); exportar["fecha"] = exportar["fecha"].dt.strftime("%d/%m/%Y")
+            with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+                exportar.to_excel(writer, index=False, sheet_name="CALENDARIO")
+            st.download_button("Descargar Excel", data=salida.getvalue(), file_name=f"calendario_notas_{mes}_{anio}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def panel_alertas_y_calendario():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.markdown("## Alertas y calendario")
+    alertas = detectar_alertas_financieras(df_inv, df_cal, df_control)
+    if alertas.empty:
+        st.success("No hay alertas activas.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Alertas totales", len(alertas))
+        c2.metric("Críticas", len(alertas[alertas["Prioridad"] == "ALTA"]))
+        c3.metric("Seguimiento", len(alertas[alertas["Prioridad"] == "MEDIA"]))
+        st.dataframe(alertas, use_container_width=True)
+    st.markdown("### Calendario próximo")
+    hoy = pd.Timestamp.today().normalize()
+    horizonte = st.slider("Días hacia adelante", 7, 90, 30)
+    eventos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= hoy) & (df_cal["fecha"] <= hoy + pd.Timedelta(days=horizonte))].copy().sort_values(["fecha", "tipo_evento", "nota"]) if not df_cal.empty else pd.DataFrame()
+    if eventos.empty:
+        st.info("No hay eventos en el horizonte seleccionado.")
+    else:
+        st.dataframe(preparar_tabla_monetaria(eventos, []), use_container_width=True)
+        if px is not None:
+            resumen_eventos = eventos.groupby("tipo_evento", as_index=False).size()
+            fig = px.bar(resumen_eventos, x="tipo_evento", y="size", title="Eventos por tipo")
+            fig.update_layout(height=360, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
+
+
+def panel_calidad_datos():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.markdown("## Calidad de datos")
+    validaciones = validar_base_datos(df_inv, df_cal, df_control)
+    total_inc = validaciones["Incidencias"].sum()
+    criticas = validaciones[(validaciones["Incidencias"] > 0) & (validaciones["Estado"] == "ALTA")]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Incidencias totales", int(total_inc))
+    c2.metric("Incidencias críticas", len(criticas))
+    c3.metric("Validaciones OK", len(validaciones[validaciones["Incidencias"] == 0]))
+    if len(criticas) > 0:
+        st.error("Hay incidencias críticas que pueden afectar a los cálculos.")
+    elif total_inc > 0:
+        st.warning("Hay incidencias menores a revisar.")
+    else:
+        st.success("Base de datos validada correctamente.")
+    st.dataframe(validaciones, use_container_width=True)
+
+
 def seccion_sistema_fondo():
     df_inv, df_cal, df_control = cargar_excel_completo()
     df_calls = leer_hoja_excel("CALENDARIO_CALLS")
@@ -1225,35 +1210,12 @@ def seccion_sistema_fondo():
         if "nota" in df_calls.columns:
             df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce").astype("Int64")
     st.header("🏦 Sistema Fondo")
-    consulta = st.selectbox("Consulta", [
-        "Panel global", "Capital activo total", "Capital activo por activo", "Capital activo por inversor",
-        "Capital activo de un inversor concreto", "Resumen mensual global", "Validaciones", "Calls de esta semana",
-        "Calls de este mes", "Próximos calls", "Calls vencidos", "Capital desglosado por inversor"
-    ])
-
+    consulta = st.selectbox("Consulta", ["Panel global", "Capital activo total", "Capital activo por activo", "Capital activo por inversor", "Capital activo de un inversor concreto", "Resumen mensual global", "Validaciones", "Calls de esta semana", "Calls de este mes", "Próximos calls", "Calls vencidos", "Capital desglosado por inversor"])
     if consulta == "Panel global":
-        activas = inversiones_activas_global(df_inv)
-        activas["activo"] = activas.apply(detectar_activo, axis=1) if not activas.empty else []
-        c_global, p_global, b_global, _detalle_dummy, _ = resumen_notas_mes(df_inv, df_cal, df_control, pd.Timestamp.today().year, pd.Timestamp.today().month)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Capital activo total", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))
-        c2.metric("Cobro notas mes actual", fmt(c_global))
-        c3.metric("Beneficio notas mes actual", fmt(b_global))
-        if not activas.empty:
-            resumen = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
-            st.subheader("Capital activo por activo")
-            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
-        proximos = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= pd.Timestamp.today().normalize())].sort_values("fecha").head(10)
-        st.subheader("Próximos eventos")
-        if not proximos.empty:
-            st.dataframe(preparar_tabla_monetaria(proximos, []), use_container_width=True)
-        else:
-            st.info("No hay próximos eventos.")
-
+        dashboard_financiero()
     elif consulta == "Capital activo total":
         activas = inversiones_activas_global(df_inv)
         mostrar_metricas("Resultado", [("Capital activo total", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))])
-
     elif consulta == "Capital activo por activo":
         activas = inversiones_activas_global(df_inv)
         if activas.empty:
@@ -1262,22 +1224,17 @@ def seccion_sistema_fondo():
             activas["activo"] = activas.apply(detectar_activo, axis=1)
             resumen = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
             st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
-
     elif consulta == "Capital activo por inversor":
         activas = inversiones_activas_global(df_inv)
-        if activas.empty:
-            st.info("No hay inversiones activas.")
-        else:
-            resumen = activas.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
-            st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
-
+        resumen = activas.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False) if not activas.empty else pd.DataFrame()
+        st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True) if not resumen.empty else st.info("No hay inversiones activas.")
     elif consulta in ["Capital activo de un inversor concreto", "Capital desglosado por inversor"]:
         inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
         nombre = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
         if consulta == "Capital desglosado por inversor":
             c1, c2 = st.columns(2)
-            anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year))
-            mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month))
+            anio = int(c1.number_input("Año", 2020, 2100, pd.Timestamp.today().year))
+            mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month))
             fecha = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
         else:
             fecha = pd.Timestamp.today().normalize()
@@ -1288,18 +1245,16 @@ def seccion_sistema_fondo():
             filtrado["activo"] = filtrado.apply(detectar_activo, axis=1)
             resumen = filtrado.groupby(["activo", "nombre_activo"], as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"})
             st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
-
     elif consulta == "Resumen mensual global":
         c1, c2 = st.columns(2)
-        anio = int(c1.number_input("Año", min_value=2020, max_value=2100, value=pd.Timestamp.today().year))
-        mes = int(c2.number_input("Mes", min_value=1, max_value=12, value=pd.Timestamp.today().month))
+        anio = int(c1.number_input("Año", 2020, 2100, pd.Timestamp.today().year))
+        mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month))
         c_notas, p_notas, b_notas, d_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
         detalles = []
         for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if not det.empty:
-                det["activo"] = activo
-                detalles.append(det)
+                det["activo"] = activo; detalles.append(det)
         d_fijos = pd.concat(detalles, ignore_index=True) if detalles else pd.DataFrame()
         c_fijos = d_fijos["ingreso_bruto"].sum() if not d_fijos.empty else 0
         p_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
@@ -1311,27 +1266,15 @@ def seccion_sistema_fondo():
         if not d_fijos.empty:
             with st.expander("Detalle activos fijos"):
                 st.dataframe(preparar_tabla_monetaria(d_fijos, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
-
     elif consulta == "Validaciones":
-        resultados = []
-        if "motivo" in df_inv.columns:
-            call_sin_fecha = df_inv[(df_inv["motivo"].apply(limpiar_texto) == "call") & (df_inv["fecha_final_inversion"].isna())]
-            resultados.append({"validacion": "Inversiones con motivo CALL y sin fecha final", "cantidad": len(call_sin_fecha)})
-        notas = filtrar_notas(df_inv)
-        resultados.append({"validacion": "Inversiones de notas sin número detectado", "cantidad": int(notas[notas["nota_num"].isna()].shape[0])})
-        resultados.append({"validacion": "Inversiones sin fecha de inversión", "cantidad": int(df_inv[df_inv["fecha_inversion"].isna()].shape[0])})
-        if not df_calls.empty and "fecha_call" in df_calls.columns:
-            resultados.append({"validacion": "Calls sin fecha válida", "cantidad": int(df_calls[df_calls["fecha_call"].isna()].shape[0])})
-        st.dataframe(pd.DataFrame(resultados), use_container_width=True)
-
+        st.dataframe(validar_base_datos(df_inv, df_cal, df_control), use_container_width=True)
     else:
         if df_calls.empty or "fecha_call" not in df_calls.columns:
             st.warning("No existe la hoja CALENDARIO_CALLS o no tiene la columna fecha_call.")
             return
         hoy = pd.Timestamp.today().normalize()
         if consulta == "Calls de esta semana":
-            inicio = hoy - pd.Timedelta(days=hoy.weekday())
-            fin = inicio + pd.Timedelta(days=6)
+            inicio = hoy - pd.Timedelta(days=hoy.weekday()); fin = inicio + pd.Timedelta(days=6)
             res = df_calls[(df_calls["fecha_call"] >= inicio) & (df_calls["fecha_call"] <= fin)].copy()
         elif consulta == "Calls de este mes":
             res = df_calls[(df_calls["fecha_call"].dt.year == hoy.year) & (df_calls["fecha_call"].dt.month == hoy.month)].copy()
@@ -1341,25 +1284,18 @@ def seccion_sistema_fondo():
             res = df_calls[df_calls["fecha_call"] < hoy].copy()
             if "estado" in res.columns:
                 res = res[~res["estado"].apply(limpiar_texto).isin(["hecho", "realizado", "ejecutado", "call ejecutado"])]
-        if not res.empty:
-            st.dataframe(preparar_tabla_monetaria(res, []), use_container_width=True)
-        else:
-            st.info("No hay calls para esta consulta.")
+        st.dataframe(preparar_tabla_monetaria(res, []), use_container_width=True) if not res.empty else st.info("No hay calls para esta consulta.")
 
 
-
+# =========================
+# EXTRACTOS
+# =========================
 def formatear_extracto_excel_bytes(contenido: bytes, inversor: str, fecha_corte: datetime) -> bytes:
-    """Aplica el formato bonito del generador de terminal, pero en memoria para descarga web."""
     bio = BytesIO(contenido)
     wb = load_workbook(bio)
-
-    azul = "1F4E78"
-    azul_claro = "D9EAF7"
-    verde = "E2F0D9"
-    blanco = "FFFFFF"
+    azul = "1F4E78"; azul_claro = "D9EAF7"; verde = "E2F0D9"; blanco = "FFFFFF"
     borde_fino = Side(style="thin", color="D9D9D9")
     borde = Border(left=borde_fino, right=borde_fino, top=borde_fino, bottom=borde_fino)
-
     for ws in wb.worksheets:
         ws.sheet_view.showGridLines = False
         for row in ws.iter_rows():
@@ -1371,83 +1307,27 @@ def formatear_extracto_excel_bytes(contenido: bytes, inversor: str, fecha_corte:
             ws.column_dimensions[get_column_letter(col)].width = 18
         for row_num in range(1, ws.max_row + 1):
             ws.row_dimensions[row_num].height = 22
-
     if "RESUMEN" in wb.sheetnames:
         ws = wb["RESUMEN"]
         ws.insert_rows(1, 5)
-        ws["A1"] = "EXTRACTO DE INVERSIÓN"
-        ws["A1"].font = Font(name="Calibri", size=20, bold=True, color=blanco)
-        ws["A1"].fill = PatternFill("solid", fgColor=azul)
-        ws["A1"].alignment = Alignment(horizontal="center")
+        ws["A1"] = "EXTRACTO DE INVERSIÓN"; ws["A1"].font = Font(name="Calibri", size=20, bold=True, color=blanco); ws["A1"].fill = PatternFill("solid", fgColor=azul); ws["A1"].alignment = Alignment(horizontal="center")
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(4, ws.max_column))
-        ws["A3"] = "Inversor"
-        ws["B3"] = inversor
-        ws["A4"] = "Fecha de corte"
-        ws["B4"] = fecha_corte.strftime("%d/%m/%Y")
+        ws["A3"] = "Inversor"; ws["B3"] = inversor; ws["A4"] = "Fecha de corte"; ws["B4"] = fecha_corte.strftime("%d/%m/%Y")
         for cell in ["A3", "A4"]:
-            ws[cell].font = Font(bold=True)
-            ws[cell].fill = PatternFill("solid", fgColor=azul_claro)
+            ws[cell].font = Font(bold=True); ws[cell].fill = PatternFill("solid", fgColor=azul_claro)
         header_row = 6
         for cell in ws[header_row]:
-            cell.font = Font(bold=True, color=blanco)
-            cell.fill = PatternFill("solid", fgColor=azul)
-            cell.alignment = Alignment(horizontal="center")
-        for row_num in range(header_row + 1, ws.max_row + 1):
-            for col_num in range(1, ws.max_column + 1):
-                ws.cell(row_num, col_num).fill = PatternFill("solid", fgColor=verde)
-                ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
-        ws.column_dimensions["A"].width = 24
-        ws.column_dimensions["B"].width = 20
-        ws.column_dimensions["C"].width = 22
-        ws.column_dimensions["D"].width = 26
-
+            cell.font = Font(bold=True, color=blanco); cell.fill = PatternFill("solid", fgColor=azul); cell.alignment = Alignment(horizontal="center")
     if "TOTALES_MES" in wb.sheetnames:
         ws = wb["TOTALES_MES"]
-        ws.insert_rows(1, 3)
-        ws["A1"] = "RESUMEN MENSUAL"
-        ws["A1"].font = Font(size=18, bold=True, color=blanco)
-        ws["A1"].fill = PatternFill("solid", fgColor=azul)
+        ws.insert_rows(1, 3); ws["A1"] = "RESUMEN MENSUAL"; ws["A1"].font = Font(size=18, bold=True, color=blanco); ws["A1"].fill = PatternFill("solid", fgColor=azul); ws["A1"].alignment = Alignment(horizontal="center")
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(2, ws.max_column))
-        ws["A1"].alignment = Alignment(horizontal="center")
-        for cell in ws[4]:
-            cell.font = Font(bold=True, color=blanco)
-            cell.fill = PatternFill("solid", fgColor=azul)
-            cell.alignment = Alignment(horizontal="center")
-        for row_num in range(5, ws.max_row + 1):
-            if ws.max_column >= 2:
-                ws.cell(row_num, 2).number_format = '$#,##0.00'
-            for col_num in range(1, ws.max_column + 1):
-                ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
-        ws.column_dimensions["A"].width = 18
-        ws.column_dimensions["B"].width = 18
-
     if "DETALLE" in wb.sheetnames:
         ws = wb["DETALLE"]
-        ws.insert_rows(1, 3)
-        ws["A1"] = "DETALLE DEL EXTRACTO"
-        ws["A1"].font = Font(size=18, bold=True, color=blanco)
-        ws["A1"].fill = PatternFill("solid", fgColor=azul)
+        ws.insert_rows(1, 3); ws["A1"] = "DETALLE DEL EXTRACTO"; ws["A1"].font = Font(size=18, bold=True, color=blanco); ws["A1"].fill = PatternFill("solid", fgColor=azul); ws["A1"].alignment = Alignment(horizontal="center")
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ws.max_column)
-        ws["A1"].alignment = Alignment(horizontal="center")
-        for cell in ws[4]:
-            cell.font = Font(bold=True, color=blanco)
-            cell.fill = PatternFill("solid", fgColor=azul)
-            cell.alignment = Alignment(horizontal="center")
-        for row_num in range(5, ws.max_row + 1):
-            fill = azul_claro if row_num % 2 == 0 else blanco
-            for col_num in range(1, ws.max_column + 1):
-                ws.cell(row_num, col_num).fill = PatternFill("solid", fgColor=fill)
-                ws.cell(row_num, col_num).alignment = Alignment(horizontal="center")
-            for col_num in [8, 11]:
-                if ws.max_column >= col_num:
-                    ws.cell(row_num, col_num).number_format = '$#,##0.00'
-        anchos = {"A": 24, "B": 16, "C": 18, "D": 18, "E": 20, "F": 14, "G": 18, "H": 18, "I": 16, "J": 12, "K": 18}
-        for col, ancho in anchos.items():
-            ws.column_dimensions[col].width = ancho
+    out = BytesIO(); wb.save(out); return out.getvalue()
 
-    out = BytesIO()
-    wb.save(out)
-    return out.getvalue()
 
 def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int):
     df = df_inv.copy()
@@ -1481,19 +1361,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
                 capital = float(row.get("capital_invertido", 0))
                 interes = float(row.get("interes_inversor_anual", 0))
                 interes_mes = round((capital * interes / 12) * dias / dias_mes, 2)
-                filas.append({
-                    "inversor": row.get("inversor", ""),
-                    "id_inversion": row.get("id_inversion", ""),
-                    "tipo_inversion": row.get("tipo_inversion", ""),
-                    "subtipo_inversion": row.get("subtipo_inversion", ""),
-                    "nombre_activo": row.get("nombre_activo", ""),
-                    "mes": f"{actual.month:02d}/{actual.year}",
-                    "fecha_inversion": pd.Timestamp(fecha_inicio).strftime("%d/%m/%Y"),
-                    "capital_invertido": capital,
-                    "dias_devengados": dias,
-                    "dias_mes": dias_mes,
-                    "interes_mes": interes_mes,
-                })
+                filas.append({"inversor": row.get("inversor", ""), "id_inversion": row.get("id_inversion", ""), "tipo_inversion": row.get("tipo_inversion", ""), "subtipo_inversion": row.get("subtipo_inversion", ""), "nombre_activo": row.get("nombre_activo", ""), "mes": f"{actual.month:02d}/{actual.year}", "fecha_inversion": pd.Timestamp(fecha_inicio).strftime("%d/%m/%Y"), "capital_invertido": capital, "dias_devengados": dias, "dias_mes": dias_mes, "interes_mes": interes_mes})
             actual = datetime(actual.year + 1, 1, 1) if actual.month == 12 else datetime(actual.year, actual.month + 1, 1)
     resultado = pd.DataFrame(filas)
     if resultado.empty:
@@ -1510,8 +1378,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
             totales_mes.to_excel(writer, sheet_name="TOTALES_MES", index=False)
             detalle.to_excel(writer, sheet_name="DETALLE", index=False)
         nombre_archivo = f"extracto_{str(inversor).upper().replace(' ', '_')}_{fecha_corte.strftime('%d%m%Y')}.xlsx"
-        contenido_formateado = formatear_extracto_excel_bytes(salida.getvalue(), str(inversor), fecha_corte)
-        archivos.append((nombre_archivo, contenido_formateado))
+        archivos.append((nombre_archivo, formatear_extracto_excel_bytes(salida.getvalue(), str(inversor), fecha_corte)))
     return archivos
 
 
@@ -1520,12 +1387,10 @@ def seccion_extractos():
     st.header("📤 Extractos")
     modo = st.radio("¿Qué quieres generar?", ["Todos", "Un inversor"], horizontal=True)
     inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
-    inversor = None
-    if modo == "Un inversor":
-        inversor = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
+    inversor = st.selectbox("Inversor", inversores) if modo == "Un inversor" and inversores else None
     c1, c2 = st.columns(2)
-    anio = int(c1.number_input("Año de corte", min_value=2020, max_value=2100, value=pd.Timestamp.today().year))
-    mes = int(c2.number_input("Mes de corte", min_value=1, max_value=12, value=pd.Timestamp.today().month))
+    anio = int(c1.number_input("Año de corte", 2020, 2100, pd.Timestamp.today().year))
+    mes = int(c2.number_input("Mes de corte", 1, 12, pd.Timestamp.today().month))
     if st.button("Generar extractos"):
         archivos = generar_extractos(df_inv, modo, inversor, anio, mes)
         if not archivos:
@@ -1543,63 +1408,57 @@ def seccion_extractos():
             st.download_button("Descargar todos en ZIP", zip_buffer.getvalue(), file_name=f"extractos_{mes}_{anio}.zip", mime="application/zip")
 
 
-st.title("📊 Sistema Fondo")
-st.caption("Aplicación conectada al Excel inversiones.xlsx")
+# =========================
+# APP FINAL
+# =========================
+mostrar_hero(st.session_state.usuario)
 
 try:
     df_inv, df_cal, df_control = cargar_excel_completo()
 except Exception as e:
     st.error("No se ha podido cargar inversiones.xlsx. Revisa que el archivo esté subido a GitHub y que las hojas existan.")
-    st.exception(e)
+    with st.expander("Ver detalle técnico"):
+        st.exception(e)
     st.stop()
 
 menu = st.sidebar.selectbox(
-    "Selecciona una sección",
-    ["Inicio", "Ver Excel", "Gestión de Datos", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick", "Notas", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos"],
+    "Menú principal",
+    [
+        "Dashboard financiero", "Centro de control", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick",
+        "Notas estructuradas", "Alertas y calendario", "Alertas Notas", "Alertas Semana", "Calendario Notas", "Sistema Fondo", "Extractos", "Calidad de datos", "Base de datos",
+    ],
 )
 
-if menu == "Inicio":
-    st.subheader("Panel inicial")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Filas inversiones", len(df_inv))
-    c2.metric("Eventos calendario", len(df_cal))
-    c3.metric("Filas control notas", len(df_control))
-    st.success("Sistema cargado correctamente.")
-
-elif menu == "Ver Excel":
+if menu == "Dashboard financiero":
+    dashboard_financiero()
+elif menu == "Centro de control":
+    centro_control_inversiones()
+elif menu == "Consultas Fútbol":
+    seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
+elif menu == "Consultas Notas":
+    seccion_notas()
+elif menu == "Consultas Paraguay":
+    seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
+elif menu == "Consultas MotoClick":
+    seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
+elif menu == "Notas estructuradas":
+    seccion_notas_archivo()
+elif menu == "Alertas y calendario":
+    panel_alertas_y_calendario()
+elif menu == "Alertas Notas":
+    seccion_alertas_notas()
+elif menu == "Alertas Semana":
+    seccion_alertas_semana()
+elif menu == "Calendario Notas":
+    seccion_calendario_notas()
+elif menu == "Sistema Fondo":
+    seccion_sistema_fondo()
+elif menu == "Extractos":
+    seccion_extractos()
+elif menu == "Calidad de datos":
+    panel_calidad_datos()
+elif menu == "Base de datos":
+    st.markdown("## Base de datos")
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
-
-elif menu == "Gestión de Datos":
-    seccion_gestion_datos()
-
-elif menu == "Consultas Fútbol":
-    seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
-
-elif menu == "Consultas Notas":
-    seccion_notas()
-
-elif menu == "Consultas Paraguay":
-    seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
-
-elif menu == "Consultas MotoClick":
-    seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
-
-elif menu == "Notas":
-    seccion_notas_archivo()
-
-elif menu == "Alertas Notas":
-    seccion_alertas_notas()
-
-elif menu == "Alertas Semana":
-    seccion_alertas_semana()
-
-elif menu == "Calendario Notas":
-    seccion_calendario_notas()
-
-elif menu == "Sistema Fondo":
-    seccion_sistema_fondo()
-
-elif menu == "Extractos":
-    seccion_extractos()
