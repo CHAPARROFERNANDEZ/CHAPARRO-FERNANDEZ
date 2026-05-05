@@ -22,7 +22,11 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="Sistema Fondo", layout="wide")
+st.set_page_config(
+    page_title="Sistema Fondo",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 ARCHIVO = "inversiones.xlsx"
 HOJA_INVERSIONES = "INVERSIONES"
@@ -190,6 +194,7 @@ if not st.session_state.autenticado:
     st.stop()
 
 st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá automáticamente.")
 if st.sidebar.button("Cerrar sesión"):
     st.session_state.autenticado = False
     st.session_state.usuario = None
