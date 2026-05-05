@@ -1032,7 +1032,7 @@ def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = out[col].map(fmt_pct)
     return out
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False)
 def obtener_precio_bitcoin_usd():
     """Devuelve el último precio disponible de Bitcoin en USD usando yfinance."""
     if yf is None:
@@ -1086,19 +1086,26 @@ def resumen_cobros_semanales_mes_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
 
 def mostrar_bitcoin_y_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
     st.markdown("### Bitcoin y cobros semanales del mes")
-    st.caption("Precio de BTC-USD actualizado desde yfinance y cobros previstos por semana natural del mes seleccionado.")
+    st.caption("El precio de BTC-USD queda guardado hasta que pulses el botón manual de actualización.")
+
+    col_btc, col_boton, col_filtros = st.columns([1.4, 0.9, 2.7])
+
+    with col_boton:
+        st.write("")
+        if st.button("Actualizar BTC", key="btn_actualizar_btc_dashboard"):
+            st.cache_data.clear()
+            st.rerun()
 
     precio_btc, fecha_btc = obtener_precio_bitcoin_usd()
-    c1, c2 = st.columns([1, 3])
-    with c1:
+    with col_btc:
         if precio_btc is None:
-            tarjeta_kpi("Bitcoin BTC-USD", "Sin dato", "Revisa conexión o yfinance", "riesgo")
+            tarjeta_kpi("Bitcoin BTC-USD", "Sin dato", "Pulsa actualizar o revisa yfinance", "riesgo")
         else:
             fecha_txt = pd.Timestamp(fecha_btc).strftime("%d/%m/%Y %H:%M") if fecha_btc is not None else "último dato disponible"
-            tarjeta_kpi("Bitcoin BTC-USD", fmt(precio_btc), f"Último dato: {fecha_txt}", "normal")
+            tarjeta_kpi("Bitcoin BTC-USD", fmt(precio_btc), f"Última actualización: {fecha_txt}", "normal")
 
     hoy = pd.Timestamp.today().normalize()
-    with c2:
+    with col_filtros:
         col_anio, col_mes = st.columns(2)
         anio = int(col_anio.number_input("Año para cobros semanales", 2020, 2100, hoy.year, key="dashboard_cobros_sem_anio"))
         mes = int(col_mes.number_input("Mes para cobros semanales", 1, 12, hoy.month, key="dashboard_cobros_sem_mes"))
@@ -2374,3 +2381,21 @@ elif menu == "Consultas Paraguay":
     seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
 elif menu == "Consultas MotoClick":
     seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
+elif menu == "Notas estructuradas":
+    seccion_notas_archivo()
+elif menu == "Alertas y calendario":
+    panel_alertas_y_calendario()
+elif menu == "Sistema Fondo":
+    seccion_sistema_fondo()
+elif menu == "Extractos":
+    seccion_extractos()
+elif menu == "Gestión de Excel":
+    seccion_gestion_excel()
+elif menu == "Calidad de datos":
+    panel_calidad_datos()
+elif menu == "Base de datos":
+    st.markdown("## Base de datos")
+    hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
+    hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
+    st.dataframe(hojas[hoja], use_container_width=True)
+
