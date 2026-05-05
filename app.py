@@ -2373,3 +2373,4 @@ elif menu == "Consultas Notas":
 elif menu == "Consultas Paraguay":
     seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
 elif menu == "Consultas MotoClick":
+    seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
