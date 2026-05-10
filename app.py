@@ -1032,6 +1032,108 @@ def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = out[col].map(fmt_pct)
     return out
 
+
+def clasificar_alerta_variacion(variacion):
+    """Clasifica la alerta de una nota según su variación porcentual."""
+    if pd.isna(variacion):
+        return "SIN DATO"
+    try:
+        variacion = float(variacion)
+    except Exception:
+        return "SIN DATO"
+    if variacion <= -35:
+        return "ROJO"
+    if variacion <= -25:
+        return "AMARILLO"
+    return "OK"
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataFrame:
+    """Calcula precios actuales, variación y alerta por ticker/nota para la sección Notas y el dashboard."""
+    if yf is None or df_control is None or df_control.empty:
+        return pd.DataFrame()
+
+    control = df_control.copy()
+    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in control.columns), None)
+    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in control.columns]
+    if faltan or barrera_col is None:
+        return pd.DataFrame()
+
+    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
+    control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
+    control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
+    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
+    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
+
+    filas = []
+    for _, row in control.iterrows():
+        ticker = row["ticker"]
+        precio_actual = None
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if hist is not None and not hist.empty:
+                cierre = hist["Close"].dropna()
+                if not cierre.empty:
+                    precio_actual = float(cierre.iloc[-1])
+        except Exception:
+            precio_actual = None
+
+        precio_compra = float(row["precio_compra"])
+        barrera = float(row[barrera_col])
+        precio_contingencia = precio_compra * barrera
+        variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
+        alerta_variacion = clasificar_alerta_variacion(variacion)
+        estado_barrera = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
+
+        filas.append({
+            "nota": int(row["nota"]),
+            "ticker": ticker,
+            "precio_compra": precio_compra,
+            "precio_actual": precio_actual,
+            "variacion_%": variacion,
+            "precio_contingencia": precio_contingencia,
+            "estado_barrera": estado_barrera,
+            "alerta_variacion": alerta_variacion,
+        })
+
+    return pd.DataFrame(filas)
+
+
+def resumen_alertas_por_nota(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame:
+    """Resume alertas amarillas/rojas por nota, tomando la peor variación de cada nota."""
+    if resumen_notas_actual is None or resumen_notas_actual.empty:
+        return pd.DataFrame(columns=["nota", "alerta", "peor_variacion_%", "tickers"])
+    alertas = resumen_notas_actual[resumen_notas_actual["alerta_variacion"].isin(["AMARILLO", "ROJO"])].copy()
+    if alertas.empty:
+        return pd.DataFrame(columns=["nota", "alerta", "peor_variacion_%", "tickers"])
+
+    orden_alerta = {"ROJO": 0, "AMARILLO": 1}
+    filas = []
+    for nota, grupo in alertas.groupby("nota"):
+        grupo = grupo.copy()
+        grupo["orden_alerta"] = grupo["alerta_variacion"].map(orden_alerta).fillna(9)
+        peor = grupo.sort_values(["orden_alerta", "variacion_%"], ascending=[True, True]).iloc[0]
+        filas.append({
+            "nota": int(nota),
+            "alerta": peor["alerta_variacion"],
+            "peor_variacion_%": peor.get("variacion_%", None),
+            "tickers": ", ".join(grupo["ticker"].astype(str).unique()),
+        })
+    out = pd.DataFrame(filas)
+    out["orden"] = out["alerta"].map(orden_alerta).fillna(9)
+    return out.sort_values(["orden", "peor_variacion_%"]).drop(columns=["orden"])
+
+
+def colorear_filas_alerta_notas(row):
+    alerta = row.get("alerta_variacion", "")
+    if alerta == "ROJO":
+        return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
+    if alerta == "AMARILLO":
+        return ["background-color: #fef3c7; color: #78350f; font-weight: 700"] * len(row)
+    return [""] * len(row)
+
+
 def inicio_semana_lunes(fecha):
     fecha = pd.Timestamp(fecha).normalize()
     return fecha - pd.Timedelta(days=fecha.weekday())
@@ -1061,21 +1163,38 @@ def resumen_cobros_semanales_mes_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
 
 def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
     st.markdown("### Cobros semanales del mes")
-    st.caption("Resumen semanal de cobros previstos por notas. Se muestra solo el total por semana, sin desglose por nota.")
+    st.caption("Cada semana muestra el total previsto y un desplegable con el desglose por nota.")
 
     tabla_semanal = resumen_cobros_semanales_mes_notas(df_inv, df_cal, df_control, anio, mes)
     if tabla_semanal.empty:
         st.info("No hay cobros de notas previstos para ese mes.")
         return
 
-    resumen_semana = tabla_semanal.groupby("semana", as_index=False)["cobro_compania"].sum()
-    resumen_semana = resumen_semana.rename(columns={"cobro_compania": "total_semana"})
+    resumen_semana = (
+        tabla_semanal
+        .groupby("semana", as_index=False)["cobro_compania"]
+        .sum()
+        .rename(columns={"cobro_compania": "total_semana"})
+    )
 
     st.dataframe(preparar_tabla_monetaria(resumen_semana, ["total_semana"]), use_container_width=True)
 
+    for _, fila_semana in resumen_semana.iterrows():
+        semana = fila_semana["semana"]
+        total = float(fila_semana["total_semana"] or 0)
+        detalle = tabla_semanal[tabla_semanal["semana"] == semana].copy()
+        detalle = (
+            detalle.groupby(["nota", "fecha_pago"], as_index=False)["cobro_compania"]
+            .sum()
+            .sort_values(["fecha_pago", "nota"])
+        )
+        detalle["nota"] = detalle["nota"].apply(lambda x: f"NOTA {int(x)}" if pd.notna(x) else "NOTA")
+        with st.expander(f"{semana} · Total {fmt(total)}", expanded=False):
+            st.dataframe(preparar_tabla_monetaria(detalle, ["cobro_compania"]), use_container_width=True)
 
 
-def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None):
+
+def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General"):
     hoy_real = pd.Timestamp.today().normalize()
     if anio is None:
         anio = hoy_real.year
@@ -1122,6 +1241,42 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
         rentabilidad_por_activo["rentabilidad_pagada_inversor_anualizada"] = rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] * 12
     else:
         rentabilidad_por_activo = pd.DataFrame()
+
+    # Si el dashboard se filtra por activo, recalculamos los KPIs sobre ese bloque concreto.
+    mapa_vista_activo = {
+        "Notas": "notas",
+        "Fútbol": "futbol",
+        "MotoClick": "motoclick",
+        "Paraguay": "paraguay",
+    }
+    activo_filtrado = mapa_vista_activo.get(str(vista_activo), None)
+    if activo_filtrado:
+        activas = activas[activas["activo"] == activo_filtrado].copy() if not activas.empty and "activo" in activas.columns else pd.DataFrame()
+        capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
+
+        rentabilidad_inversiones = rentabilidad_inversiones[rentabilidad_inversiones["activo"] == activo_filtrado].copy() if not rentabilidad_inversiones.empty and "activo" in rentabilidad_inversiones.columns else pd.DataFrame()
+        cobro_total_mes = float(rentabilidad_inversiones["cobro_compania_mes"].sum()) if not rentabilidad_inversiones.empty else 0.0
+        pago_total_mes = float(rentabilidad_inversiones["pago_inversor_mes"].sum()) if not rentabilidad_inversiones.empty else 0.0
+        beneficio_total_mes = float(rentabilidad_inversiones["beneficio_empresa_mes"].sum()) if not rentabilidad_inversiones.empty else 0.0
+
+        rentabilidad_beneficio_mes = beneficio_total_mes / capital_total if capital_total else 0
+        rentabilidad_beneficio_anualizada = rentabilidad_beneficio_mes * 12
+        rentabilidad_pagada_inversor_mes = pago_total_mes / capital_total if capital_total else 0
+        rentabilidad_pagada_inversor_anualizada = rentabilidad_pagada_inversor_mes * 12
+
+        if not rentabilidad_inversiones.empty:
+            rentabilidad_por_activo = rentabilidad_inversiones.groupby("activo", as_index=False).agg(
+                capital=("capital", "sum"),
+                cobro_compania_mes=("cobro_compania_mes", "sum"),
+                pago_inversor_mes=("pago_inversor_mes", "sum"),
+                beneficio_empresa_mes=("beneficio_empresa_mes", "sum"),
+            )
+            rentabilidad_por_activo["rentabilidad_beneficio_mes"] = rentabilidad_por_activo.apply(lambda r: r["beneficio_empresa_mes"] / r["capital"] if r["capital"] else 0, axis=1)
+            rentabilidad_por_activo["rentabilidad_beneficio_anualizada"] = rentabilidad_por_activo["rentabilidad_beneficio_mes"] * 12
+            rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] = rentabilidad_por_activo.apply(lambda r: r["pago_inversor_mes"] / r["capital"] if r["capital"] else 0, axis=1)
+            rentabilidad_por_activo["rentabilidad_pagada_inversor_anualizada"] = rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] * 12
+        else:
+            rentabilidad_por_activo = pd.DataFrame()
 
     eventos_futuros = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= fecha_analisis)].copy().sort_values("fecha") if not df_cal.empty else pd.DataFrame()
     return {
@@ -1248,7 +1403,12 @@ def dashboard_financiero():
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
 
     hoy = pd.Timestamp.today().normalize()
-    col_periodo_1, col_periodo_2 = st.columns(2)
+    col_activo, col_periodo_1, col_periodo_2 = st.columns([1.4, 1, 1])
+    vista_dashboard = col_activo.selectbox(
+        "Dashboard",
+        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay"],
+        key="dashboard_vista_activo",
+    )
     anio_dashboard = int(col_periodo_1.number_input(
         "Año del dashboard",
         min_value=2020,
@@ -1263,9 +1423,23 @@ def dashboard_financiero():
         value=hoy.month,
         key="dashboard_mes_general",
     ))
-    st.caption(f"Periodo seleccionado: {nombre_mes_es(mes_dashboard)} {anio_dashboard}")
+    st.caption(f"Vista seleccionada: {vista_dashboard} · Periodo: {nombre_mes_es(mes_dashboard)} {anio_dashboard}")
 
-    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
+    resumen_notas_actual = construir_resumen_actual_notas_alertas(df_control)
+    alertas_notas = resumen_alertas_por_nota(resumen_notas_actual)
+    if not alertas_notas.empty:
+        rojas = int((alertas_notas["alerta"] == "ROJO").sum())
+        amarillas = int((alertas_notas["alerta"] == "AMARILLO").sum())
+        if rojas > 0:
+            st.error(f"Alertas de notas: {rojas} en rojo y {amarillas} en amarillo por variación negativa.")
+        else:
+            st.warning(f"Alertas de notas: {amarillas} en amarillo por variación negativa.")
+        with st.expander("Ver alertas de notas por variación", expanded=False):
+            tabla_alertas = alertas_notas.copy()
+            tabla_alertas["peor_variacion_%"] = tabla_alertas["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+            st.dataframe(tabla_alertas, use_container_width=True)
+
+    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard, vista_dashboard)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1289,7 +1463,8 @@ def dashboard_financiero():
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
-    mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
+    if vista_dashboard in ["General", "Notas"]:
+        mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
@@ -1519,61 +1694,65 @@ def seccion_notas():
 def seccion_notas_archivo():
     _, _, df_control = cargar_excel_completo()
     st.header("🧾 Notas")
-    st.caption("Resumen tipo notas.py: precio actual, variación, barrera de contingencia y alertas por nota.")
+    st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
+
     if yf is None:
         st.error("Falta yfinance. Añade yfinance a requirements.txt.")
         return
-    control = df_control.copy()
-    if control.empty:
+    if df_control is None or df_control.empty:
         st.warning("La hoja CONTROL_NOTAS está vacía o no existe.")
         return
-    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in control.columns), None)
-    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in control.columns]
+
+    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in df_control.columns]
+    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in df_control.columns), None)
     if faltan:
         st.error(f"En CONTROL_NOTAS faltan columnas: {', '.join(faltan)}")
         return
     if barrera_col is None:
         st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
         return
-    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
-    control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
-    control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
-    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
-    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
+
     if st.button("Actualizar precios actuales"):
         st.cache_data.clear()
-    filas = []
+        st.rerun()
+
     with st.spinner("Descargando precios actuales..."):
-        for _, row in control.iterrows():
-            ticker = row["ticker"]
-            precio_actual = None
-            try:
-                hist = yf.Ticker(ticker).history(period="5d")
-                if not hist.empty:
-                    precio_actual = float(hist["Close"].dropna().iloc[-1])
-            except Exception:
-                precio_actual = None
-            precio_compra = float(row["precio_compra"])
-            barrera = float(row[barrera_col])
-            precio_contingencia = precio_compra * barrera
-            variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
-            estado = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
-            filas.append({"nota": int(row["nota"]), "ticker": ticker, "precio_compra": precio_compra, "precio_actual": precio_actual, "variacion_%": variacion, "precio_contingencia": precio_contingencia, "estado": estado})
-    resumen = pd.DataFrame(filas)
+        resumen = construir_resumen_actual_notas_alertas(df_control)
+
     if resumen.empty:
         st.warning("No se pudo generar el resumen.")
         return
-    c1, c2, c3 = st.columns(3)
+
+    alertas_resumen = resumen_alertas_por_nota(resumen)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Notas analizadas", resumen["nota"].nunique())
     c2.metric("Tickers", len(resumen))
-    c3.metric("Notas en riesgo", int(resumen[resumen["estado"].eq("RIESGO")]["nota"].nunique()))
-    st.dataframe(preparar_tabla_monetaria(resumen, ["precio_compra", "precio_actual", "precio_contingencia"]), use_container_width=True)
-    alertas = [{"nota": int(nota), "tickers_en_riesgo": ", ".join(grupo[grupo["estado"].eq("RIESGO")]["ticker"].astype(str))} for nota, grupo in resumen.groupby("nota") if not grupo[grupo["estado"].eq("RIESGO")].empty]
-    if alertas:
-        st.error("Hay notas en riesgo.")
-        st.dataframe(pd.DataFrame(alertas), use_container_width=True)
+    c3.metric("Notas en amarillo", int((alertas_resumen["alerta"] == "AMARILLO").sum()) if not alertas_resumen.empty else 0)
+    c4.metric("Notas en rojo", int((alertas_resumen["alerta"] == "ROJO").sum()) if not alertas_resumen.empty else 0)
+
+    tabla = resumen.copy()
+    tabla["variacion_%"] = pd.to_numeric(tabla["variacion_%"], errors="coerce")
+    columnas_dinero = ["precio_compra", "precio_actual", "precio_contingencia"]
+    tabla_mostrar = preparar_tabla_monetaria(tabla, columnas_dinero)
+    if "variacion_%" in tabla_mostrar.columns:
+        tabla_mostrar["variacion_%"] = tabla["variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+
+    st.dataframe(tabla_mostrar.style.apply(colorear_filas_alerta_notas, axis=1), use_container_width=True)
+
+    st.markdown("### Alertas por variación")
+    st.caption("Amarillo: variación igual o inferior a -25%. Rojo: variación igual o inferior a -35%.")
+    if alertas_resumen.empty:
+        st.success("No hay notas en amarillo ni en rojo por variación.")
     else:
-        st.success("Ninguna nota en riesgo.")
+        rojas = int((alertas_resumen["alerta"] == "ROJO").sum())
+        amarillas = int((alertas_resumen["alerta"] == "AMARILLO").sum())
+        if rojas > 0:
+            st.error(f"Hay {rojas} notas en rojo y {amarillas} notas en amarillo.")
+        else:
+            st.warning(f"Hay {amarillas} notas en amarillo.")
+        alertas_mostrar = alertas_resumen.copy()
+        alertas_mostrar["peor_variacion_%"] = alertas_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+        st.dataframe(alertas_mostrar, use_container_width=True)
 
 
 def seccion_alertas_notas():
@@ -2369,5 +2548,4 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
-
 
