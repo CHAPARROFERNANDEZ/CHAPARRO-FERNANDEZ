@@ -754,11 +754,18 @@ def excluir_call(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["motivo"].apply(limpiar_texto) != "call"].copy()
 
 
-def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame:
+def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None, solo_real: bool = False) -> pd.DataFrame:
+    """Devuelve inversiones activas en una fecha.
+
+    solo_real=True excluye reinversiones marcadas como capital_nuevo_real = NO.
+    Esto evita duplicar capital cuando una inversión vencida se reinvierte en otra nota/activo.
+    """
     if fecha is None:
         fecha = pd.Timestamp.today().normalize()
     fecha = pd.Timestamp(fecha).normalize()
     trabajo = excluir_call(df_inv)
+    if solo_real and "capital_nuevo_real" in trabajo.columns:
+        trabajo = trabajo[trabajo["capital_nuevo_real"].astype(str).str.strip().str.lower() == "si"].copy()
     return trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))].copy()
 
 
@@ -1201,7 +1208,8 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     if mes is None:
         mes = hoy_real.month
     fecha_analisis = pd.Timestamp(int(anio), int(mes), ultimo_dia_mes(int(anio), int(mes))).normalize()
-    activas = inversiones_activas_global(df_inv, fecha_analisis)
+    # Para el capital activo del dashboard usamos solo capital real para no duplicar reinversiones.
+    activas = inversiones_activas_global(df_inv, fecha_analisis, solo_real=True)
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
@@ -1235,6 +1243,11 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
             pago_inversor_mes=("pago_inversor_mes", "sum"),
             beneficio_empresa_mes=("beneficio_empresa_mes", "sum"),
         )
+        # Sustituimos el capital por el capital real activo del periodo para no duplicar reinversiones.
+        capital_real_por_activo = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital_real"}) if not activas.empty else pd.DataFrame(columns=["activo", "capital_real"])
+        rentabilidad_por_activo = rentabilidad_por_activo.merge(capital_real_por_activo, on="activo", how="left")
+        rentabilidad_por_activo["capital"] = rentabilidad_por_activo["capital_real"].fillna(0)
+        rentabilidad_por_activo = rentabilidad_por_activo.drop(columns=["capital_real"])
         rentabilidad_por_activo["rentabilidad_beneficio_mes"] = rentabilidad_por_activo.apply(lambda r: r["beneficio_empresa_mes"] / r["capital"] if r["capital"] else 0, axis=1)
         rentabilidad_por_activo["rentabilidad_beneficio_anualizada"] = rentabilidad_por_activo["rentabilidad_beneficio_mes"] * 12
         rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] = rentabilidad_por_activo.apply(lambda r: r["pago_inversor_mes"] / r["capital"] if r["capital"] else 0, axis=1)
@@ -1516,7 +1529,7 @@ def centro_control_inversiones():
     inversores = ["Todos"] + sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
     inversor = c2.selectbox("Inversor", inversores)
     fecha = pd.Timestamp(c3.date_input("Fecha de análisis", value=pd.Timestamp.today().date())).normalize()
-    activas = inversiones_activas_global(df_inv, fecha)
+    activas = inversiones_activas_global(df_inv, fecha, solo_real=True)
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
     if activo != "Todos":
@@ -2102,10 +2115,10 @@ def seccion_sistema_fondo():
     if consulta == "Panel global":
         dashboard_financiero()
     elif consulta == "Capital activo total":
-        activas = inversiones_activas_global(df_inv)
+        activas = inversiones_activas_global(df_inv, solo_real=True)
         mostrar_metricas("Resultado", [("Capital activo total", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))])
     elif consulta == "Capital activo por activo":
-        activas = inversiones_activas_global(df_inv)
+        activas = inversiones_activas_global(df_inv, solo_real=True)
         if activas.empty:
             st.info("No hay inversiones activas.")
         else:
@@ -2113,7 +2126,7 @@ def seccion_sistema_fondo():
             resumen = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
             st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True)
     elif consulta == "Capital activo por inversor":
-        activas = inversiones_activas_global(df_inv)
+        activas = inversiones_activas_global(df_inv, solo_real=True)
         resumen = activas.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False) if not activas.empty else pd.DataFrame()
         st.dataframe(preparar_tabla_monetaria(resumen, ["capital"]), use_container_width=True) if not resumen.empty else st.info("No hay inversiones activas.")
     elif consulta in ["Capital activo de un inversor concreto", "Capital desglosado por inversor"]:
@@ -2126,7 +2139,7 @@ def seccion_sistema_fondo():
             fecha = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
         else:
             fecha = pd.Timestamp.today().normalize()
-        activas = inversiones_activas_global(df_inv, fecha=fecha)
+        activas = inversiones_activas_global(df_inv, fecha=fecha, solo_real=True)
         filtrado = activas[activas["inversor"].astype(str).str.lower() == str(nombre).lower()].copy()
         mostrar_metricas("Resultado", [("Capital activo", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
         if not filtrado.empty:
