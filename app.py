@@ -769,6 +769,42 @@ def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None, solo_real: bool
     return trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))].copy()
 
 
+
+
+def capital_excel_base(df_inv: pd.DataFrame, modo_capital: str = "Capital Excel: tipo_operacion = nueva") -> pd.DataFrame:
+    """Devuelve el capital que manda el Excel para el dashboard.
+
+    Por defecto usa tipo_operacion = nueva, porque es el criterio que cuadra con el total
+    manual del Excel. No filtra por fecha_final_inversion: incluye el capital histórico
+    marcado como nuevo aunque una nota haya hecho call o haya vencido.
+    """
+    trabajo = df_inv.copy()
+    modo = str(modo_capital).strip().lower()
+
+    if modo == "capital excel: capital_nuevo_real = si":
+        if "capital_nuevo_real" in trabajo.columns:
+            trabajo = trabajo[trabajo["capital_nuevo_real"].astype(str).str.strip().str.lower() == "si"].copy()
+    elif modo == "capital vivo por fecha":
+        return inversiones_activas_global(trabajo, pd.Timestamp.today().normalize(), solo_real=False)
+    else:
+        if "tipo_operacion" in trabajo.columns:
+            trabajo = trabajo[trabajo["tipo_operacion"].astype(str).str.strip().str.lower() == "nueva"].copy()
+
+    return trabajo.copy()
+
+
+def capital_excel_base_en_periodo(df_inv: pd.DataFrame, anio: int, mes: int, modo_capital: str = "Capital Excel: tipo_operacion = nueva") -> pd.DataFrame:
+    """Capital base del dashboard para el periodo seleccionado.
+
+    Si se usa capital vivo por fecha, aplica la fecha de cierre del mes seleccionado.
+    En los modos Excel no filtra por fecha, porque debe coincidir con los filtros manuales del Excel.
+    """
+    modo = str(modo_capital).strip().lower()
+    if modo == "capital vivo por fecha":
+        fecha_analisis = pd.Timestamp(int(anio), int(mes), ultimo_dia_mes(int(anio), int(mes))).normalize()
+        return inversiones_activas_global(df_inv, fecha_analisis, solo_real=False)
+    return capital_excel_base(df_inv, modo_capital)
+
 def tarjeta_kpi(titulo, valor, subtitulo="", estado="normal"):
     colores = {"normal": ("#ffffff", "#0e2338"), "positivo": ("#edf7ed", "#166534"), "riesgo": ("#fff4e5", "#b45309"), "negativo": ("#fee2e2", "#991b1b")}
     fondo, color = colores.get(estado, colores["normal"])
@@ -1201,15 +1237,20 @@ def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFram
 
 
 
-def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General"):
+def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General", modo_capital: str = "Capital Excel: tipo_operacion = nueva"):
+    """Calcula los KPIs del dashboard.
+
+    Por defecto el capital del dashboard sale del Excel con tipo_operacion = nueva.
+    Este es el criterio que debe mandar y no descuenta notas vencidas/calls.
+    Los cobros, pagos y beneficios se siguen calculando por el mes seleccionado.
+    """
     hoy_real = pd.Timestamp.today().normalize()
     if anio is None:
         anio = hoy_real.year
     if mes is None:
         mes = hoy_real.month
     fecha_analisis = pd.Timestamp(int(anio), int(mes), ultimo_dia_mes(int(anio), int(mes))).normalize()
-    # Para el capital activo del dashboard usamos solo capital real para no duplicar reinversiones.
-    activas = inversiones_activas_global(df_inv, fecha_analisis, solo_real=True)
+    activas = capital_excel_base_en_periodo(df_inv, int(anio), int(mes), modo_capital)
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
@@ -1284,6 +1325,11 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
                 pago_inversor_mes=("pago_inversor_mes", "sum"),
                 beneficio_empresa_mes=("beneficio_empresa_mes", "sum"),
             )
+            # En vistas filtradas, el capital de la tabla debe coincidir con el capital mostrado arriba.
+            capital_filtrado_por_activo = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital_filtrado"}) if not activas.empty else pd.DataFrame(columns=["activo", "capital_filtrado"])
+            rentabilidad_por_activo = rentabilidad_por_activo.merge(capital_filtrado_por_activo, on="activo", how="left")
+            rentabilidad_por_activo["capital"] = rentabilidad_por_activo["capital_filtrado"].fillna(0)
+            rentabilidad_por_activo = rentabilidad_por_activo.drop(columns=["capital_filtrado"])
             rentabilidad_por_activo["rentabilidad_beneficio_mes"] = rentabilidad_por_activo.apply(lambda r: r["beneficio_empresa_mes"] / r["capital"] if r["capital"] else 0, axis=1)
             rentabilidad_por_activo["rentabilidad_beneficio_anualizada"] = rentabilidad_por_activo["rentabilidad_beneficio_mes"] * 12
             rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] = rentabilidad_por_activo.apply(lambda r: r["pago_inversor_mes"] / r["capital"] if r["capital"] else 0, axis=1)
@@ -1410,17 +1456,78 @@ def mostrar_rentabilidad_por_activo_dashboard(tabla_activo: pd.DataFrame):
         columnas = [c for c in columnas if c in tabla.columns]
         st.dataframe(preparar_tabla_rentabilidad(tabla[columnas]), use_container_width=True)
 
+def resumen_capital_para_auditoria(df: pd.DataFrame, descripcion: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["criterio", "activo", "capital"])
+    trabajo = df.copy()
+    trabajo["activo"] = trabajo.apply(detectar_activo, axis=1)
+    resumen = trabajo.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"})
+    total = pd.DataFrame([{"activo": "TOTAL", "capital": float(resumen["capital"].sum()) if not resumen.empty else 0.0}])
+    out = pd.concat([total, resumen], ignore_index=True)
+    out.insert(0, "criterio", descripcion)
+    return out
+
+
+def mostrar_auditoria_capital_dashboard(df_inv: pd.DataFrame, anio: int, mes: int):
+    """Muestra por qué no coinciden los filtros de Excel con el capital activo del dashboard."""
+    fecha_analisis = pd.Timestamp(int(anio), int(mes), ultimo_dia_mes(int(anio), int(mes))).normalize()
+    tipo_nueva = df_inv[df_inv.get("tipo_operacion", pd.Series(index=df_inv.index, dtype=str)).astype(str).str.strip().str.lower() == "nueva"].copy()
+    capital_real_si = df_inv[df_inv.get("capital_nuevo_real", pd.Series(index=df_inv.index, dtype=str)).astype(str).str.strip().str.lower() == "si"].copy()
+    activo_vivo_total = inversiones_activas_global(df_inv, fecha_analisis, solo_real=False)
+    activo_vivo_real = inversiones_activas_global(df_inv, fecha_analisis, solo_real=True)
+
+    auditoria = pd.concat([
+        resumen_capital_para_auditoria(tipo_nueva, "Excel: tipo_operacion = nueva"),
+        resumen_capital_para_auditoria(capital_real_si, "Excel: capital_nuevo_real = si"),
+        resumen_capital_para_auditoria(activo_vivo_total, "Dashboard: capital operativo vivo por fecha"),
+        resumen_capital_para_auditoria(activo_vivo_real, "Dashboard: capital nuevo real vivo por fecha"),
+    ], ignore_index=True)
+
+    st.markdown("### Auditoría del capital")
+    st.caption("El capital que manda por defecto es Excel: tipo_operacion = nueva. El capital vivo por fecha queda como comprobación.")
+    st.dataframe(preparar_tabla_monetaria(auditoria, ["capital"]), use_container_width=True)
+
+    inconsistencias = df_inv[
+        (df_inv.get("tipo_operacion", pd.Series(index=df_inv.index, dtype=str)).astype(str).str.strip().str.lower() != "nueva")
+        & (df_inv.get("capital_nuevo_real", pd.Series(index=df_inv.index, dtype=str)).astype(str).str.strip().str.lower() == "si")
+    ].copy()
+    if not inconsistencias.empty:
+        st.warning("Hay operaciones marcadas como capital_nuevo_real = SI pero que no son tipo_operacion = nueva. Esto explica diferencias entre filtros.")
+        cols = [c for c in ["id_inversion", "inversor", "nombre_activo", "capital_invertido", "tipo_operacion", "capital_nuevo_real", "fecha_inversion", "fecha_final_inversion"] if c in inconsistencias.columns]
+        st.dataframe(preparar_tabla_monetaria(inconsistencias[cols], ["capital_invertido"]), use_container_width=True)
+
+    vencidas = df_inv[
+        (df_inv.get("fecha_final_inversion").notna())
+        & (df_inv.get("fecha_final_inversion") < fecha_analisis)
+        & (df_inv.get("motivo", pd.Series(index=df_inv.index, dtype=str)).astype(str).str.strip().str.lower() != "call")
+    ].copy() if "fecha_final_inversion" in df_inv.columns else pd.DataFrame()
+    if not vencidas.empty:
+        with st.expander("Ver inversiones históricas ya vencidas que Excel puede estar sumando pero el dashboard activo no", expanded=False):
+            cols = [c for c in ["id_inversion", "inversor", "nombre_activo", "capital_invertido", "tipo_operacion", "capital_nuevo_real", "fecha_inversion", "fecha_final_inversion"] if c in vencidas.columns]
+            st.dataframe(preparar_tabla_monetaria(vencidas[cols], ["capital_invertido"]), use_container_width=True)
+
+
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
     st.markdown("## Dashboard financiero")
-    st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
+    st.caption("Panel ejecutivo de capital según Excel, cobros, pagos, beneficio y rentabilidades.")
 
     hoy = pd.Timestamp.today().normalize()
-    col_activo, col_periodo_1, col_periodo_2 = st.columns([1.4, 1, 1])
+    col_activo, col_capital, col_periodo_1, col_periodo_2 = st.columns([1.25, 1.45, 1, 1])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
         ["General", "Notas", "Fútbol", "MotoClick", "Paraguay"],
         key="dashboard_vista_activo",
+    )
+    modo_capital_dashboard = col_capital.selectbox(
+        "Modo de capital",
+        [
+            "Capital Excel: tipo_operacion = nueva",
+            "Capital Excel: capital_nuevo_real = si",
+            "Capital vivo por fecha",
+        ],
+        key="dashboard_modo_capital_excel_manda",
+        help="Por defecto manda el Excel: tipo_operacion = nueva. Capital vivo por fecha queda solo como comprobación.",
     )
     anio_dashboard = int(col_periodo_1.number_input(
         "Año del dashboard",
@@ -1436,7 +1543,7 @@ def dashboard_financiero():
         value=hoy.month,
         key="dashboard_mes_general",
     ))
-    st.caption(f"Vista seleccionada: {vista_dashboard} · Periodo: {nombre_mes_es(mes_dashboard)} {anio_dashboard}")
+    st.caption(f"Vista seleccionada: {vista_dashboard} · Periodo: {nombre_mes_es(mes_dashboard)} {anio_dashboard} · Modo capital: {modo_capital_dashboard}")
 
     resumen_notas_actual = construir_resumen_actual_notas_alertas(df_control)
     alertas_notas = resumen_alertas_por_nota(resumen_notas_actual)
@@ -1452,11 +1559,11 @@ def dashboard_financiero():
             tabla_alertas["peor_variacion_%"] = tabla_alertas["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
             st.dataframe(tabla_alertas, use_container_width=True)
 
-    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard, vista_dashboard)
+    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard, vista_dashboard, modo_capital_dashboard)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        tarjeta_kpi("Capital activo total", fmt(resumen["capital_total"]), "Capital actualmente vivo", "normal")
+        tarjeta_kpi("Capital total", fmt(resumen["capital_total"]), modo_capital_dashboard, "normal")
     with c2:
         tarjeta_kpi("Cobro estimado mes", fmt(resumen["cobro_total_mes"]), "Ingresos brutos esperados", "positivo")
     with c3:
@@ -1465,14 +1572,17 @@ def dashboard_financiero():
         estado = "positivo" if resumen["beneficio_total_mes"] >= 0 else "negativo"
         tarjeta_kpi("Beneficio estimado mes", fmt(resumen["beneficio_total_mes"]), "Margen neto estimado", estado)
 
+    with st.expander("Auditar por qué el capital no coincide con filtros de Excel", expanded=False):
+        mostrar_auditoria_capital_dashboard(df_inv, anio_dashboard, mes_dashboard)
+
     st.markdown("### Rentabilidad del mes")
     r1, r2, r3, r4 = st.columns(4)
     with r1:
-        tarjeta_kpi("Rent. beneficio mensual", fmt_pct(resumen["rentabilidad_beneficio_mes"]), "Beneficio / capital activo", "positivo" if resumen["rentabilidad_beneficio_mes"] >= 0 else "negativo")
+        tarjeta_kpi("Rent. beneficio mensual", fmt_pct(resumen["rentabilidad_beneficio_mes"]), "Beneficio / capital Excel", "positivo" if resumen["rentabilidad_beneficio_mes"] >= 0 else "negativo")
     with r2:
         tarjeta_kpi("Rent. beneficio anualizada", fmt_pct(resumen["rentabilidad_beneficio_anualizada"]), "Mensual x 12", "positivo" if resumen["rentabilidad_beneficio_anualizada"] >= 0 else "negativo")
     with r3:
-        tarjeta_kpi("% pagado inversores mes", fmt_pct(resumen["rentabilidad_pagada_inversor_mes"]), "Pago inversores / capital", "riesgo")
+        tarjeta_kpi("% pagado inversores mes", fmt_pct(resumen["rentabilidad_pagada_inversor_mes"]), "Pago inversores / capital Excel", "riesgo")
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
