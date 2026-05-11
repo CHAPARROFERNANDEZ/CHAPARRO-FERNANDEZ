@@ -1033,222 +1033,106 @@ def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def clasificar_alerta_variacion(variacion):
+    """Clasifica la alerta de una nota según su variación porcentual."""
+    if pd.isna(variacion):
+        return "SIN DATO"
+    try:
+        variacion = float(variacion)
+    except Exception:
+        return "SIN DATO"
+    if variacion <= -35:
+        return "ROJO"
+    if variacion <= -25:
+        return "AMARILLO"
+    return "OK"
 
-# =========================
-# RENTABILIDAD REAL ACUMULADA GLOBAL
-# =========================
-def pagos_notas_hasta_fecha(df_cal: pd.DataFrame, fecha_corte) -> pd.DataFrame:
-    """Pagos de notas ocurridos hasta una fecha de corte."""
-    if df_cal is None or df_cal.empty:
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataFrame:
+    """Calcula precios actuales, variación y alerta por ticker/nota para la sección Notas y el dashboard."""
+    if yf is None or df_control is None or df_control.empty:
         return pd.DataFrame()
-    fecha_corte = pd.Timestamp(fecha_corte).normalize()
-    return df_cal[
-        (df_cal["tipo_evento"] == "PAGO")
-        & (df_cal["fecha"].notna())
-        & (df_cal["fecha"] <= fecha_corte)
-    ].copy().sort_values(["fecha", "nota"])
 
+    control = df_control.copy()
+    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in control.columns), None)
+    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in control.columns]
+    if faltan or barrera_col is None:
+        return pd.DataFrame()
 
-def capital_utilizado_hasta_fecha(df_inv: pd.DataFrame, fecha_corte, activo: str | None = None) -> float:
-    """Capital que ha estado invertido alguna vez hasta la fecha de corte, excluyendo calls."""
-    if df_inv is None or df_inv.empty:
-        return 0.0
-    fecha_corte = pd.Timestamp(fecha_corte).normalize()
-    trabajo = excluir_call(df_inv)
-    if activo is not None:
-        if activo == "notas":
-            trabajo = filtrar_notas(trabajo)
-        else:
-            trabajo = filtrar_activo(trabajo, activo)
-    trabajo = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha_corte)].copy()
-    return float(trabajo["capital_invertido"].sum()) if not trabajo.empty else 0.0
+    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
+    control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
+    control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
+    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
+    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
 
-
-def detalle_activo_acumulado_hasta(df_base: pd.DataFrame, activo: str, tasa_anual: float, fecha_corte) -> pd.DataFrame:
-    """Detalle acumulado real/devengado de un activo operativo hasta una fecha concreta."""
-    fecha_corte = pd.Timestamp(fecha_corte).normalize()
-    df_activo = filtrar_activo(excluir_call(df_base), activo)
     filas = []
-    for _, fila in df_activo.iterrows():
-        fecha_inicio = fila.get("fecha_inversion")
-        if pd.isna(fecha_inicio) or pd.Timestamp(fecha_inicio).normalize() > fecha_corte:
-            continue
-        fecha_fin_excel = fila.get("fecha_final_inversion")
-        fecha_fin = fecha_corte if pd.isna(fecha_fin_excel) else min(pd.Timestamp(fecha_fin_excel).normalize(), fecha_corte)
-        if fecha_fin < pd.Timestamp(fecha_inicio).normalize():
-            continue
+    for _, row in control.iterrows():
+        ticker = row["ticker"]
+        precio_actual = None
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if hist is not None and not hist.empty:
+                cierre = hist["Close"].dropna()
+                if not cierre.empty:
+                    precio_actual = float(cierre.iloc[-1])
+        except Exception:
+            precio_actual = None
 
-        capital = float(fila.get("capital_invertido", 0) or 0)
-        interes_inv = float(fila.get("interes_inversor_anual", 0) or 0)
-        cobro_total = 0.0
-        pago_total = 0.0
-
-        actual = pd.Timestamp(fecha_inicio).normalize().replace(day=1)
-        fin_iter = fecha_fin.replace(day=1)
-        while actual <= fin_iter:
-            anio, mes = int(actual.year), int(actual.month)
-            dias_mes = ultimo_dia_mes(anio, mes)
-            inicio_mes = pd.Timestamp(anio, mes, 1)
-            fin_mes = pd.Timestamp(anio, mes, dias_mes)
-            inicio_calc = max(pd.Timestamp(fecha_inicio).normalize(), inicio_mes)
-            fin_calc = min(fecha_fin, fin_mes)
-            if inicio_calc <= fin_calc:
-                dias = (fin_calc - inicio_calc).days + 1
-                proporcion = dias / dias_mes
-                cobro_total += capital * tasa_anual / 12 * proporcion
-                pago_total += capital * interes_inv / 12 * proporcion
-            actual = actual + pd.DateOffset(months=1)
+        precio_compra = float(row["precio_compra"])
+        barrera = float(row[barrera_col])
+        precio_contingencia = precio_compra * barrera
+        variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
+        alerta_variacion = clasificar_alerta_variacion(variacion)
+        estado_barrera = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
 
         filas.append({
-            "activo": activo,
-            "nombre_activo": fila.get("nombre_activo", activo),
-            "id_inversion": fila.get("id_inversion", ""),
-            "inversor": fila.get("inversor", ""),
-            "capital": capital,
-            "cobro_acumulado": cobro_total,
-            "pago_inversor_acumulado": pago_total,
-            "beneficio_acumulado": cobro_total - pago_total,
-            "rentabilidad_real_acumulada": (cobro_total - pago_total) / capital if capital else 0,
-            "rentabilidad_pagada_acumulada": pago_total / capital if capital else 0,
+            "nota": int(row["nota"]),
+            "ticker": ticker,
+            "precio_compra": precio_compra,
+            "precio_actual": precio_actual,
+            "variacion_%": variacion,
+            "precio_contingencia": precio_contingencia,
+            "estado_barrera": estado_barrera,
+            "alerta_variacion": alerta_variacion,
         })
+
     return pd.DataFrame(filas)
 
 
-def calcular_rentabilidad_real_acumulada(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, fecha_corte=None) -> dict:
-    """
-    Rentabilidad real acumulada del fondo hasta fecha_corte.
-    Fórmula: (cobros acumulados - pagos acumulados a inversores) / capital utilizado hasta la fecha.
-    """
-    hoy = pd.Timestamp.today().normalize()
-    if fecha_corte is None:
-        fecha_corte = hoy
-    fecha_corte = min(pd.Timestamp(fecha_corte).normalize(), hoy)
+def resumen_alertas_por_nota(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame:
+    """Resume alertas amarillas/rojas por nota, tomando la peor variación de cada nota."""
+    if resumen_notas_actual is None or resumen_notas_actual.empty:
+        return pd.DataFrame(columns=["nota", "alerta", "peor_variacion_%", "tickers"])
+    alertas = resumen_notas_actual[resumen_notas_actual["alerta_variacion"].isin(["AMARILLO", "ROJO"])].copy()
+    if alertas.empty:
+        return pd.DataFrame(columns=["nota", "alerta", "peor_variacion_%", "tickers"])
 
-    detalles = []
-
-    # 1) Notas: cuenta pagos reales/previstos ya vencidos en calendario hasta la fecha de corte.
-    pagos_notas = pagos_notas_hasta_fecha(df_cal, fecha_corte)
-    det_notas = preparar_detalle_notas(df_inv, pagos_notas, df_cal=df_cal, df_control=df_control)
-    if det_notas is not None and not det_notas.empty:
-        notas = det_notas.copy()
-        notas["activo"] = "notas"
-        notas["nombre_activo"] = notas["nota"].apply(lambda x: f"NOTA {x}")
-        notas = notas.rename(columns={
-            "capital_invertido": "capital",
-            "cobro_compania": "cobro_acumulado",
-            "pago_inversor": "pago_inversor_acumulado",
-            "beneficio_empresa": "beneficio_acumulado",
+    orden_alerta = {"ROJO": 0, "AMARILLO": 1}
+    filas = []
+    for nota, grupo in alertas.groupby("nota"):
+        grupo = grupo.copy()
+        grupo["orden_alerta"] = grupo["alerta_variacion"].map(orden_alerta).fillna(9)
+        peor = grupo.sort_values(["orden_alerta", "variacion_%"], ascending=[True, True]).iloc[0]
+        filas.append({
+            "nota": int(nota),
+            "alerta": peor["alerta_variacion"],
+            "peor_variacion_%": peor.get("variacion_%", None),
+            "tickers": ", ".join(grupo["ticker"].astype(str).unique()),
         })
-        notas = notas[[
-            "activo", "nombre_activo", "id_inversion", "inversor", "capital",
-            "cobro_acumulado", "pago_inversor_acumulado", "beneficio_acumulado",
-        ]]
-        detalles.append(notas)
-
-    # 2) Activos operativos con tasa de ingreso definida.
-    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
-        det = detalle_activo_acumulado_hasta(df_inv, activo, tasa, fecha_corte)
-        if det is not None and not det.empty:
-            detalles.append(det[[
-                "activo", "nombre_activo", "id_inversion", "inversor", "capital",
-                "cobro_acumulado", "pago_inversor_acumulado", "beneficio_acumulado",
-            ]])
-
-    detalle_global = pd.concat(detalles, ignore_index=True) if detalles else pd.DataFrame(columns=[
-        "activo", "nombre_activo", "id_inversion", "inversor", "capital",
-        "cobro_acumulado", "pago_inversor_acumulado", "beneficio_acumulado",
-    ])
-
-    if not detalle_global.empty:
-        detalle_global["rentabilidad_real_acumulada"] = detalle_global.apply(lambda r: r["beneficio_acumulado"] / r["capital"] if r["capital"] else 0, axis=1)
-        detalle_global["rentabilidad_pagada_acumulada"] = detalle_global.apply(lambda r: r["pago_inversor_acumulado"] / r["capital"] if r["capital"] else 0, axis=1)
-
-    capital_utilizado = capital_utilizado_hasta_fecha(df_inv, fecha_corte)
-    cobro_total = float(detalle_global["cobro_acumulado"].sum()) if not detalle_global.empty else 0.0
-    pago_total = float(detalle_global["pago_inversor_acumulado"].sum()) if not detalle_global.empty else 0.0
-    beneficio_total = cobro_total - pago_total
-    rentabilidad_real = beneficio_total / capital_utilizado if capital_utilizado else 0.0
-    rentabilidad_pagada = pago_total / capital_utilizado if capital_utilizado else 0.0
-
-    if not detalle_global.empty:
-        por_activo = detalle_global.groupby("activo", as_index=False).agg(
-            capital=("capital", "sum"),
-            cobro_acumulado=("cobro_acumulado", "sum"),
-            pago_inversor_acumulado=("pago_inversor_acumulado", "sum"),
-            beneficio_acumulado=("beneficio_acumulado", "sum"),
-        )
-        por_activo["capital_utilizado_activo"] = por_activo["activo"].apply(lambda a: capital_utilizado_hasta_fecha(df_inv, fecha_corte, a))
-        por_activo["rentabilidad_real_acumulada"] = por_activo.apply(lambda r: r["beneficio_acumulado"] / r["capital_utilizado_activo"] if r["capital_utilizado_activo"] else 0, axis=1)
-        por_activo["rentabilidad_pagada_acumulada"] = por_activo.apply(lambda r: r["pago_inversor_acumulado"] / r["capital_utilizado_activo"] if r["capital_utilizado_activo"] else 0, axis=1)
-    else:
-        por_activo = pd.DataFrame()
-
-    return {
-        "fecha_corte": fecha_corte,
-        "capital_utilizado": capital_utilizado,
-        "cobro_acumulado": cobro_total,
-        "pago_inversor_acumulado": pago_total,
-        "beneficio_acumulado": beneficio_total,
-        "rentabilidad_real_acumulada": rentabilidad_real,
-        "rentabilidad_pagada_acumulada": rentabilidad_pagada,
-        "detalle": detalle_global,
-        "por_activo": por_activo,
-    }
+    out = pd.DataFrame(filas)
+    out["orden"] = out["alerta"].map(orden_alerta).fillna(9)
+    return out.sort_values(["orden", "peor_variacion_%"]).drop(columns=["orden"])
 
 
-def preparar_tabla_rentabilidad_real(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    for col in ["capital", "capital_utilizado_activo", "cobro_acumulado", "pago_inversor_acumulado", "beneficio_acumulado"]:
-        if col in out.columns:
-            out[col] = out[col].map(fmt)
-    for col in ["rentabilidad_real_acumulada", "rentabilidad_pagada_acumulada"]:
-        if col in out.columns:
-            out[col] = out[col].map(fmt_pct)
-    return out
+def colorear_filas_alerta_notas(row):
+    alerta = row.get("alerta_variacion", "")
+    if alerta == "ROJO":
+        return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
+    if alerta == "AMARILLO":
+        return ["background-color: #fef3c7; color: #78350f; font-weight: 700"] * len(row)
+    return [""] * len(row)
 
-
-def mostrar_rentabilidad_real_acumulada_dashboard(rent_real: dict):
-    st.markdown("### Rentabilidad real acumulada del fondo")
-    st.caption("Mide lo ocurrido hasta la fecha de corte: cobros acumulados menos pagos acumulados a inversores, dividido entre el capital utilizado.")
-
-    rr = rent_real or {}
-    estado = "positivo" if float(rr.get("beneficio_acumulado", 0) or 0) >= 0 else "negativo"
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        tarjeta_kpi("Capital utilizado", fmt(rr.get("capital_utilizado", 0)), "Capital invertido hasta la fecha", "normal")
-    with c2:
-        tarjeta_kpi("Cobrado acumulado", fmt(rr.get("cobro_acumulado", 0)), "Ingresos generados hasta corte", "positivo")
-    with c3:
-        tarjeta_kpi("Pagado inversores", fmt(rr.get("pago_inversor_acumulado", 0)), "Pagos acumulados hasta corte", "riesgo")
-    with c4:
-        tarjeta_kpi("Rentabilidad real", fmt_pct(rr.get("rentabilidad_real_acumulada", 0)), "Beneficio acumulado / capital utilizado", estado)
-
-    with st.expander("Ver rentabilidad real acumulada por activo", expanded=True):
-        tabla = rr.get("por_activo", pd.DataFrame())
-        if tabla is None or tabla.empty:
-            st.info("No hay datos acumulados por activo.")
-        else:
-            columnas = [
-                "activo", "capital_utilizado_activo", "cobro_acumulado", "pago_inversor_acumulado",
-                "beneficio_acumulado", "rentabilidad_real_acumulada", "rentabilidad_pagada_acumulada",
-            ]
-            columnas = [c for c in columnas if c in tabla.columns]
-            st.dataframe(preparar_tabla_rentabilidad_real(tabla[columnas]), use_container_width=True)
-
-    with st.expander("Ver detalle acumulado por inversión", expanded=False):
-        detalle = rr.get("detalle", pd.DataFrame())
-        if detalle is None or detalle.empty:
-            st.info("No hay detalle acumulado por inversión.")
-        else:
-            columnas = [
-                "activo", "nombre_activo", "id_inversion", "inversor", "capital",
-                "cobro_acumulado", "pago_inversor_acumulado", "beneficio_acumulado",
-                "rentabilidad_real_acumulada", "rentabilidad_pagada_acumulada",
-            ]
-            columnas = [c for c in columnas if c in detalle.columns]
-            st.dataframe(preparar_tabla_rentabilidad_real(detalle[columnas]), use_container_width=True)
 
 def inicio_semana_lunes(fecha):
     fecha = pd.Timestamp(fecha).normalize()
@@ -1279,21 +1163,38 @@ def resumen_cobros_semanales_mes_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
 
 def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
     st.markdown("### Cobros semanales del mes")
-    st.caption("Resumen semanal de cobros previstos por notas. Se muestra solo el total por semana, sin desglose por nota.")
+    st.caption("Cada semana muestra el total previsto y un desplegable con el desglose por nota.")
 
     tabla_semanal = resumen_cobros_semanales_mes_notas(df_inv, df_cal, df_control, anio, mes)
     if tabla_semanal.empty:
         st.info("No hay cobros de notas previstos para ese mes.")
         return
 
-    resumen_semana = tabla_semanal.groupby("semana", as_index=False)["cobro_compania"].sum()
-    resumen_semana = resumen_semana.rename(columns={"cobro_compania": "total_semana"})
+    resumen_semana = (
+        tabla_semanal
+        .groupby("semana", as_index=False)["cobro_compania"]
+        .sum()
+        .rename(columns={"cobro_compania": "total_semana"})
+    )
 
     st.dataframe(preparar_tabla_monetaria(resumen_semana, ["total_semana"]), use_container_width=True)
 
+    for _, fila_semana in resumen_semana.iterrows():
+        semana = fila_semana["semana"]
+        total = float(fila_semana["total_semana"] or 0)
+        detalle = tabla_semanal[tabla_semanal["semana"] == semana].copy()
+        detalle = (
+            detalle.groupby(["nota", "fecha_pago"], as_index=False)["cobro_compania"]
+            .sum()
+            .sort_values(["fecha_pago", "nota"])
+        )
+        detalle["nota"] = detalle["nota"].apply(lambda x: f"NOTA {int(x)}" if pd.notna(x) else "NOTA")
+        with st.expander(f"{semana} · Total {fmt(total)}", expanded=False):
+            st.dataframe(preparar_tabla_monetaria(detalle, ["cobro_compania"]), use_container_width=True)
 
 
-def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None):
+
+def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General"):
     hoy_real = pd.Timestamp.today().normalize()
     if anio is None:
         anio = hoy_real.year
@@ -1327,11 +1228,6 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
 
     rentabilidad_inversiones = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, int(anio), int(mes))
 
-    # Rentabilidad real acumulada hasta la fecha de análisis.
-    # Si el mes seleccionado es el mes actual o futuro, se corta a hoy para no contar pagos futuros como reales.
-    fecha_corte_real = min(fecha_analisis, hoy_real)
-    rentabilidad_real_acumulada = calcular_rentabilidad_real_acumulada(df_inv, df_cal, df_control, fecha_corte_real)
-
     if not rentabilidad_inversiones.empty:
         rentabilidad_por_activo = rentabilidad_inversiones.groupby("activo", as_index=False).agg(
             capital=("capital", "sum"),
@@ -1346,6 +1242,42 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     else:
         rentabilidad_por_activo = pd.DataFrame()
 
+    # Si el dashboard se filtra por activo, recalculamos los KPIs sobre ese bloque concreto.
+    mapa_vista_activo = {
+        "Notas": "notas",
+        "Fútbol": "futbol",
+        "MotoClick": "motoclick",
+        "Paraguay": "paraguay",
+    }
+    activo_filtrado = mapa_vista_activo.get(str(vista_activo), None)
+    if activo_filtrado:
+        activas = activas[activas["activo"] == activo_filtrado].copy() if not activas.empty and "activo" in activas.columns else pd.DataFrame()
+        capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
+
+        rentabilidad_inversiones = rentabilidad_inversiones[rentabilidad_inversiones["activo"] == activo_filtrado].copy() if not rentabilidad_inversiones.empty and "activo" in rentabilidad_inversiones.columns else pd.DataFrame()
+        cobro_total_mes = float(rentabilidad_inversiones["cobro_compania_mes"].sum()) if not rentabilidad_inversiones.empty else 0.0
+        pago_total_mes = float(rentabilidad_inversiones["pago_inversor_mes"].sum()) if not rentabilidad_inversiones.empty else 0.0
+        beneficio_total_mes = float(rentabilidad_inversiones["beneficio_empresa_mes"].sum()) if not rentabilidad_inversiones.empty else 0.0
+
+        rentabilidad_beneficio_mes = beneficio_total_mes / capital_total if capital_total else 0
+        rentabilidad_beneficio_anualizada = rentabilidad_beneficio_mes * 12
+        rentabilidad_pagada_inversor_mes = pago_total_mes / capital_total if capital_total else 0
+        rentabilidad_pagada_inversor_anualizada = rentabilidad_pagada_inversor_mes * 12
+
+        if not rentabilidad_inversiones.empty:
+            rentabilidad_por_activo = rentabilidad_inversiones.groupby("activo", as_index=False).agg(
+                capital=("capital", "sum"),
+                cobro_compania_mes=("cobro_compania_mes", "sum"),
+                pago_inversor_mes=("pago_inversor_mes", "sum"),
+                beneficio_empresa_mes=("beneficio_empresa_mes", "sum"),
+            )
+            rentabilidad_por_activo["rentabilidad_beneficio_mes"] = rentabilidad_por_activo.apply(lambda r: r["beneficio_empresa_mes"] / r["capital"] if r["capital"] else 0, axis=1)
+            rentabilidad_por_activo["rentabilidad_beneficio_anualizada"] = rentabilidad_por_activo["rentabilidad_beneficio_mes"] * 12
+            rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] = rentabilidad_por_activo.apply(lambda r: r["pago_inversor_mes"] / r["capital"] if r["capital"] else 0, axis=1)
+            rentabilidad_por_activo["rentabilidad_pagada_inversor_anualizada"] = rentabilidad_por_activo["rentabilidad_pagada_inversor_mes"] * 12
+        else:
+            rentabilidad_por_activo = pd.DataFrame()
+
     eventos_futuros = df_cal[(df_cal["fecha"].notna()) & (df_cal["fecha"] >= fecha_analisis)].copy().sort_values("fecha") if not df_cal.empty else pd.DataFrame()
     return {
         "activas": activas,
@@ -1359,7 +1291,6 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
         "rentabilidad_pagada_inversor_anualizada": rentabilidad_pagada_inversor_anualizada,
         "rentabilidad_inversiones": rentabilidad_inversiones,
         "rentabilidad_por_activo": rentabilidad_por_activo,
-        "rentabilidad_real_acumulada": rentabilidad_real_acumulada,
         "eventos_futuros": eventos_futuros,
         "detalle_notas": detalle_notas,
         "detalle_fijos": d_fijos,
@@ -1472,7 +1403,12 @@ def dashboard_financiero():
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
 
     hoy = pd.Timestamp.today().normalize()
-    col_periodo_1, col_periodo_2 = st.columns(2)
+    col_activo, col_periodo_1, col_periodo_2 = st.columns([1.4, 1, 1])
+    vista_dashboard = col_activo.selectbox(
+        "Dashboard",
+        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay"],
+        key="dashboard_vista_activo",
+    )
     anio_dashboard = int(col_periodo_1.number_input(
         "Año del dashboard",
         min_value=2020,
@@ -1487,9 +1423,23 @@ def dashboard_financiero():
         value=hoy.month,
         key="dashboard_mes_general",
     ))
-    st.caption(f"Periodo seleccionado: {nombre_mes_es(mes_dashboard)} {anio_dashboard}")
+    st.caption(f"Vista seleccionada: {vista_dashboard} · Periodo: {nombre_mes_es(mes_dashboard)} {anio_dashboard}")
 
-    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
+    resumen_notas_actual = construir_resumen_actual_notas_alertas(df_control)
+    alertas_notas = resumen_alertas_por_nota(resumen_notas_actual)
+    if not alertas_notas.empty:
+        rojas = int((alertas_notas["alerta"] == "ROJO").sum())
+        amarillas = int((alertas_notas["alerta"] == "AMARILLO").sum())
+        if rojas > 0:
+            st.error(f"Alertas de notas: {rojas} en rojo y {amarillas} en amarillo por variación negativa.")
+        else:
+            st.warning(f"Alertas de notas: {amarillas} en amarillo por variación negativa.")
+        with st.expander("Ver alertas de notas por variación", expanded=False):
+            tabla_alertas = alertas_notas.copy()
+            tabla_alertas["peor_variacion_%"] = tabla_alertas["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+            st.dataframe(tabla_alertas, use_container_width=True)
+
+    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard, vista_dashboard)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1513,21 +1463,19 @@ def dashboard_financiero():
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
-    mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
-
-    mostrar_rentabilidad_real_acumulada_dashboard(resumen.get("rentabilidad_real_acumulada", {}))
+    if vista_dashboard in ["General", "Notas"]:
+        mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
     st.markdown("---")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Capital por activo",
         "Capital por inversor",
         "Beneficio mensual",
         "Rentabilidad por activo",
         "Rentabilidad por inversión",
-        "Rentabilidad real acumulada",
     ])
     with tab1:
         grafico_capital_por_activo(resumen["activas"])
@@ -1557,10 +1505,6 @@ def dashboard_financiero():
             ]
             columnas = [c for c in columnas if c in tabla_inv.columns]
             st.dataframe(preparar_tabla_rentabilidad(tabla_inv[columnas]), use_container_width=True)
-    with tab6:
-        st.caption("Rentabilidad real acumulada hasta la fecha de corte: cobros acumulados - pagos acumulados a inversores / capital utilizado.")
-        rent_real = resumen.get("rentabilidad_real_acumulada", {})
-        mostrar_rentabilidad_real_acumulada_dashboard(rent_real)
 
 
 def centro_control_inversiones():
@@ -1750,61 +1694,65 @@ def seccion_notas():
 def seccion_notas_archivo():
     _, _, df_control = cargar_excel_completo()
     st.header("🧾 Notas")
-    st.caption("Resumen tipo notas.py: precio actual, variación, barrera de contingencia y alertas por nota.")
+    st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
+
     if yf is None:
         st.error("Falta yfinance. Añade yfinance a requirements.txt.")
         return
-    control = df_control.copy()
-    if control.empty:
+    if df_control is None or df_control.empty:
         st.warning("La hoja CONTROL_NOTAS está vacía o no existe.")
         return
-    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in control.columns), None)
-    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in control.columns]
+
+    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in df_control.columns]
+    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in df_control.columns), None)
     if faltan:
         st.error(f"En CONTROL_NOTAS faltan columnas: {', '.join(faltan)}")
         return
     if barrera_col is None:
         st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
         return
-    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
-    control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
-    control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
-    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
-    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
+
     if st.button("Actualizar precios actuales"):
         st.cache_data.clear()
-    filas = []
+        st.rerun()
+
     with st.spinner("Descargando precios actuales..."):
-        for _, row in control.iterrows():
-            ticker = row["ticker"]
-            precio_actual = None
-            try:
-                hist = yf.Ticker(ticker).history(period="5d")
-                if not hist.empty:
-                    precio_actual = float(hist["Close"].dropna().iloc[-1])
-            except Exception:
-                precio_actual = None
-            precio_compra = float(row["precio_compra"])
-            barrera = float(row[barrera_col])
-            precio_contingencia = precio_compra * barrera
-            variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
-            estado = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
-            filas.append({"nota": int(row["nota"]), "ticker": ticker, "precio_compra": precio_compra, "precio_actual": precio_actual, "variacion_%": variacion, "precio_contingencia": precio_contingencia, "estado": estado})
-    resumen = pd.DataFrame(filas)
+        resumen = construir_resumen_actual_notas_alertas(df_control)
+
     if resumen.empty:
         st.warning("No se pudo generar el resumen.")
         return
-    c1, c2, c3 = st.columns(3)
+
+    alertas_resumen = resumen_alertas_por_nota(resumen)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Notas analizadas", resumen["nota"].nunique())
     c2.metric("Tickers", len(resumen))
-    c3.metric("Notas en riesgo", int(resumen[resumen["estado"].eq("RIESGO")]["nota"].nunique()))
-    st.dataframe(preparar_tabla_monetaria(resumen, ["precio_compra", "precio_actual", "precio_contingencia"]), use_container_width=True)
-    alertas = [{"nota": int(nota), "tickers_en_riesgo": ", ".join(grupo[grupo["estado"].eq("RIESGO")]["ticker"].astype(str))} for nota, grupo in resumen.groupby("nota") if not grupo[grupo["estado"].eq("RIESGO")].empty]
-    if alertas:
-        st.error("Hay notas en riesgo.")
-        st.dataframe(pd.DataFrame(alertas), use_container_width=True)
+    c3.metric("Notas en amarillo", int((alertas_resumen["alerta"] == "AMARILLO").sum()) if not alertas_resumen.empty else 0)
+    c4.metric("Notas en rojo", int((alertas_resumen["alerta"] == "ROJO").sum()) if not alertas_resumen.empty else 0)
+
+    tabla = resumen.copy()
+    tabla["variacion_%"] = pd.to_numeric(tabla["variacion_%"], errors="coerce")
+    columnas_dinero = ["precio_compra", "precio_actual", "precio_contingencia"]
+    tabla_mostrar = preparar_tabla_monetaria(tabla, columnas_dinero)
+    if "variacion_%" in tabla_mostrar.columns:
+        tabla_mostrar["variacion_%"] = tabla["variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+
+    st.dataframe(tabla_mostrar.style.apply(colorear_filas_alerta_notas, axis=1), use_container_width=True)
+
+    st.markdown("### Alertas por variación")
+    st.caption("Amarillo: variación igual o inferior a -25%. Rojo: variación igual o inferior a -35%.")
+    if alertas_resumen.empty:
+        st.success("No hay notas en amarillo ni en rojo por variación.")
     else:
-        st.success("Ninguna nota en riesgo.")
+        rojas = int((alertas_resumen["alerta"] == "ROJO").sum())
+        amarillas = int((alertas_resumen["alerta"] == "AMARILLO").sum())
+        if rojas > 0:
+            st.error(f"Hay {rojas} notas en rojo y {amarillas} notas en amarillo.")
+        else:
+            st.warning(f"Hay {amarillas} notas en amarillo.")
+        alertas_mostrar = alertas_resumen.copy()
+        alertas_mostrar["peor_variacion_%"] = alertas_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+        st.dataframe(alertas_mostrar, use_container_width=True)
 
 
 def seccion_alertas_notas():
@@ -2600,3 +2548,4 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
+
