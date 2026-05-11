@@ -1397,6 +1397,212 @@ def mostrar_rentabilidad_por_activo_dashboard(tabla_activo: pd.DataFrame):
         columnas = [c for c in columnas if c in tabla.columns]
         st.dataframe(preparar_tabla_rentabilidad(tabla[columnas]), use_container_width=True)
 
+
+# =========================
+# ACUMULADOS DESDE INICIO
+# =========================
+def pagos_notas_hasta_fecha(df_cal: pd.DataFrame, fecha_corte) -> pd.DataFrame:
+    """Pagos de notas realizados/previstos hasta una fecha de corte."""
+    if df_cal is None or df_cal.empty:
+        return pd.DataFrame()
+    fecha_corte = pd.Timestamp(fecha_corte).normalize()
+    return df_cal[
+        (df_cal["tipo_evento"] == "PAGO")
+        & (df_cal["fecha"].notna())
+        & (df_cal["fecha"] <= fecha_corte)
+    ].copy().sort_values(["fecha", "nota"])
+
+
+def detalle_activo_mes_hasta_fecha(df_base: pd.DataFrame, activo: str, tasa_anual: float, anio: int, mes: int, fecha_corte) -> pd.DataFrame:
+    """Detalle mensual de un activo fijo, recortando el último mes hasta fecha_corte."""
+    fecha_corte = pd.Timestamp(fecha_corte).normalize()
+    inicio_mes = pd.Timestamp(anio, mes, 1)
+    fin_mes = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes)).normalize()
+    fin_periodo = min(fin_mes, fecha_corte)
+    if fin_periodo < inicio_mes:
+        return pd.DataFrame()
+
+    df_activo = filtrar_activo(df_base, activo)
+    dias_mes = ultimo_dia_mes(anio, mes)
+    filas = []
+    for _, fila in df_activo.iterrows():
+        fecha_inicio = fila.get("fecha_inversion")
+        fecha_fin = fila.get("fecha_final_inversion")
+        if pd.isna(fecha_inicio) or pd.Timestamp(fecha_inicio).normalize() > fin_periodo:
+            continue
+        if pd.notna(fecha_fin) and pd.Timestamp(fecha_fin).normalize() < inicio_mes:
+            continue
+
+        inicio_real = max(pd.Timestamp(fecha_inicio).normalize(), inicio_mes)
+        fin_real = fin_periodo if pd.isna(fecha_fin) else min(pd.Timestamp(fecha_fin).normalize(), fin_periodo)
+        if inicio_real > fin_real:
+            continue
+
+        dias = (fin_real - inicio_real).days + 1
+        proporcion = dias / dias_mes
+        capital = float(fila.get("capital_invertido", 0) or 0)
+        ingreso_bruto = capital * tasa_anual / 12 * proporcion
+        pago_inversor = capital * float(fila.get("interes_inversor_anual", 0) or 0) / 12 * proporcion
+        filas.append({
+            "fecha": fin_real,
+            "mes": f"{anio}-{mes:02d}",
+            "activo": activo,
+            "nombre_activo": fila.get("nombre_activo", activo),
+            "id_inversion": fila.get("id_inversion", ""),
+            "inversor": fila.get("inversor", ""),
+            "capital": capital,
+            "cobro_compania": ingreso_bruto,
+            "pago_inversor": pago_inversor,
+            "beneficio_empresa": ingreso_bruto - pago_inversor,
+            "dias_devengados": dias,
+            "origen": "devengo_activo_fijo",
+        })
+    return pd.DataFrame(filas)
+
+
+def construir_detalle_acumulado_fondo(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, fecha_corte=None) -> pd.DataFrame:
+    """Construye un histórico acumulado de cobros, pagos y beneficio por mes e inversión.
+
+    Incluye:
+    - Notas: según CALENDARIO_NOTAS hasta fecha_corte.
+    - Paraguay, MotoClick y Fútbol: devengo mensual según fecha de inversión/final y tasa anual definida.
+    """
+    if fecha_corte is None:
+        fecha_corte = pd.Timestamp.today().normalize()
+    fecha_corte = pd.Timestamp(fecha_corte).normalize()
+    filas = []
+
+    # 1) Notas estructuradas: solo pagos con fecha <= fecha_corte.
+    pagos_notas = pagos_notas_hasta_fecha(df_cal, fecha_corte)
+    detalle_notas = preparar_detalle_notas(df_inv, pagos_notas, df_cal=df_cal, df_control=df_control)
+    if detalle_notas is not None and not detalle_notas.empty:
+        for _, row in detalle_notas.iterrows():
+            fecha = pd.Timestamp(row.get("fecha_pago")).normalize()
+            filas.append({
+                "fecha": fecha,
+                "mes": fecha.strftime("%Y-%m"),
+                "activo": "notas",
+                "nombre_activo": f"NOTA {row.get('nota', '')}",
+                "id_inversion": row.get("id_inversion", ""),
+                "inversor": row.get("inversor", ""),
+                "capital": float(row.get("capital_invertido", 0) or 0),
+                "cobro_compania": float(row.get("cobro_compania", 0) or 0),
+                "pago_inversor": float(row.get("pago_inversor", 0) or 0),
+                "beneficio_empresa": float(row.get("beneficio_empresa", 0) or 0),
+                "dias_devengados": "",
+                "origen": "calendario_notas",
+            })
+
+    # 2) Activos fijos / operativos: devengo mensual hasta fecha_corte.
+    fechas_inicio = pd.to_datetime(df_inv.get("fecha_inversion", pd.Series(dtype="datetime64[ns]")), errors="coerce").dropna()
+    if not fechas_inicio.empty:
+        fecha_inicio_global = fechas_inicio.min().normalize()
+        cursor = pd.Timestamp(fecha_inicio_global.year, fecha_inicio_global.month, 1)
+        fin_cursor = pd.Timestamp(fecha_corte.year, fecha_corte.month, 1)
+        while cursor <= fin_cursor:
+            for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+                det = detalle_activo_mes_hasta_fecha(df_inv, activo, tasa, cursor.year, cursor.month, fecha_corte)
+                if det is not None and not det.empty:
+                    filas.extend(det.to_dict("records"))
+            cursor = cursor + pd.DateOffset(months=1)
+
+    if not filas:
+        return pd.DataFrame(columns=["fecha", "mes", "activo", "nombre_activo", "id_inversion", "inversor", "capital", "cobro_compania", "pago_inversor", "beneficio_empresa", "dias_devengados", "origen"])
+
+    detalle = pd.DataFrame(filas)
+    detalle["fecha"] = pd.to_datetime(detalle["fecha"], errors="coerce")
+    for col in ["capital", "cobro_compania", "pago_inversor", "beneficio_empresa"]:
+        detalle[col] = pd.to_numeric(detalle[col], errors="coerce").fillna(0)
+    return detalle.sort_values(["fecha", "activo", "nombre_activo", "id_inversion"]).reset_index(drop=True)
+
+
+def resumir_acumulado_fondo(detalle: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Devuelve resumen general, por mes y por inversión."""
+    if detalle is None or detalle.empty:
+        vacio = pd.DataFrame()
+        return vacio, vacio, vacio
+
+    resumen_general = pd.DataFrame([{
+        "total_cobrado_desde_inicio": float(detalle["cobro_compania"].sum()),
+        "total_pagado_desde_inicio": float(detalle["pago_inversor"].sum()),
+        "beneficio_total_desde_inicio": float(detalle["beneficio_empresa"].sum()),
+    }])
+
+    por_mes = detalle.groupby(["mes", "activo"], as_index=False).agg(
+        cobro_compania=("cobro_compania", "sum"),
+        pago_inversor=("pago_inversor", "sum"),
+        beneficio_empresa=("beneficio_empresa", "sum"),
+    ).sort_values(["mes", "activo"])
+
+    por_inversion = detalle.groupby(["activo", "nombre_activo", "id_inversion", "inversor"], as_index=False).agg(
+        capital_referencia=("capital", "max"),
+        cobro_compania=("cobro_compania", "sum"),
+        pago_inversor=("pago_inversor", "sum"),
+        beneficio_empresa=("beneficio_empresa", "sum"),
+    ).sort_values(["activo", "nombre_activo", "inversor"])
+
+    return resumen_general, por_mes, por_inversion
+
+
+def preparar_tabla_acumulados(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        if "fecha" in col:
+            out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%d/%m/%Y")
+    for col in ["capital", "capital_referencia", "cobro_compania", "pago_inversor", "beneficio_empresa", "total_cobrado_desde_inicio", "total_pagado_desde_inicio", "beneficio_total_desde_inicio"]:
+        if col in out.columns:
+            out[col] = out[col].map(fmt)
+    return out
+
+
+def excel_acumulados_a_bytes(resumen_general: pd.DataFrame, por_mes: pd.DataFrame, por_inversion: pd.DataFrame, detalle: pd.DataFrame) -> bytes:
+    salida = BytesIO()
+    with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+        resumen_general.to_excel(writer, sheet_name="RESUMEN", index=False)
+        por_mes.to_excel(writer, sheet_name="POR_MES_ACTIVO", index=False)
+        por_inversion.to_excel(writer, sheet_name="POR_INVERSION", index=False)
+        detalle.to_excel(writer, sheet_name="DETALLE_COMPLETO", index=False)
+    return salida.getvalue()
+
+
+def mostrar_acumulado_desde_inicio_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, fecha_corte):
+    """Panel visual para acumulados desde inicio."""
+    st.markdown("### Acumulado desde inicio")
+    st.caption("Total cobrado, total pagado y beneficio acumulado, con desglose por mes, activo e inversión.")
+
+    detalle = construir_detalle_acumulado_fondo(df_inv, df_cal, df_control, fecha_corte=fecha_corte)
+    if detalle.empty:
+        st.info("No hay cobros ni pagos acumulados para el periodo seleccionado.")
+        return
+
+    resumen_general, por_mes, por_inversion = resumir_acumulado_fondo(detalle)
+
+    total_cobrado = float(resumen_general["total_cobrado_desde_inicio"].iloc[0])
+    total_pagado = float(resumen_general["total_pagado_desde_inicio"].iloc[0])
+    beneficio_total = float(resumen_general["beneficio_total_desde_inicio"].iloc[0])
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total cobrado desde inicio", fmt(total_cobrado))
+    c2.metric("Total pagado desde inicio", fmt(total_pagado))
+    c3.metric("Beneficio total desde inicio", fmt(beneficio_total))
+
+    tab_mes, tab_inv, tab_detalle = st.tabs(["Por meses y activo", "Por inversión", "Detalle completo"])
+    with tab_mes:
+        st.dataframe(preparar_tabla_acumulados(por_mes), use_container_width=True)
+    with tab_inv:
+        st.dataframe(preparar_tabla_acumulados(por_inversion), use_container_width=True)
+    with tab_detalle:
+        st.dataframe(preparar_tabla_acumulados(detalle), use_container_width=True)
+
+    st.download_button(
+        "Descargar acumulado desde inicio en Excel",
+        data=excel_acumulados_a_bytes(resumen_general, por_mes, por_inversion, detalle),
+        file_name=f"acumulado_desde_inicio_{pd.Timestamp(fecha_corte).strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
     st.markdown("## Dashboard financiero")
@@ -1462,6 +1668,12 @@ def dashboard_financiero():
         tarjeta_kpi("% pagado inversores mes", fmt_pct(resumen["rentabilidad_pagada_inversor_mes"]), "Pago inversores / capital", "riesgo")
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
+
+    fecha_corte_acumulado = min(
+        pd.Timestamp(anio_dashboard, mes_dashboard, ultimo_dia_mes(anio_dashboard, mes_dashboard)).normalize(),
+        hoy,
+    )
+    mostrar_acumulado_desde_inicio_dashboard(df_inv, df_cal, df_control, fecha_corte_acumulado)
 
     if vista_dashboard in ["General", "Notas"]:
         mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
