@@ -239,37 +239,34 @@ def limpiar_texto(x) -> str:
 
 
 def es_chaparro_fernandez_row(row) -> bool:
-    """Detecta inversiones internas de Chaparro Fernández de forma flexible.
+    """Detecta SOLO las inversiones internas de la sociedad Chaparro Fernández.
 
-    Revisa varias columnas habituales para que funcione aunque el Excel use
-    inversor, nombre_activo, cuenta_cobro, motivo, tipo_operacion, etc.
+    IMPORTANTE:
+    No se debe marcar como Chaparro Fernández a personas que se apellidan
+    Chaparro o Fernández, como JORDI CHAPARRO, YURI FERNANDEZ, EVA CHAPARRO
+    o PAOLA CHAPARRO. Por eso la detección se hace únicamente sobre la columna
+    inversor y exige el nombre completo de la sociedad.
     """
-    posibles_columnas = [
-        "inversor",
-        "nombre_activo",
-        "cuenta_cobro",
-        "motivo",
-        "tipo_operacion",
-        "subtipo_inversion",
-        "tipo_inversion",
-        "id_inversion",
-    ]
-    texto = " ".join(limpiar_texto(row.get(col, "")) for col in posibles_columnas)
-    texto_simple = (
-        texto.replace("á", "a")
+    inversor = limpiar_texto(row.get("inversor", ""))
+    inversor = (
+        inversor.replace("á", "a")
         .replace("é", "e")
         .replace("í", "i")
         .replace("ó", "o")
         .replace("ú", "u")
         .replace("ñ", "n")
+        .replace("-", " ")
     )
-    return (
-        "chaparro" in texto_simple
-        or "fernandez" in texto_simple and "chaparro" in texto_simple
-        or "chaparro fernandez" in texto_simple
-        or "chaparro-fernandez" in texto_simple
-        or "chaf" in texto_simple
-    )
+    inversor = " ".join(inversor.split())
+
+    nombres_sociedad = {
+        "chaparro fernandez",
+        "chaparro fernandez sl",
+        "chaparro fernandez s.l.",
+        "chaparro fernandez sociedad",
+        "chaparro fernandez wealth",
+    }
+    return inversor in nombres_sociedad
 
 
 def aplicar_filtro_chaparro_fernandez(df: pd.DataFrame, incluir_chaparro: bool) -> pd.DataFrame:
