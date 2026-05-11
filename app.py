@@ -1411,6 +1411,149 @@ def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control):
 
 
 
+
+
+def etiqueta_tipo_interes(valor) -> str:
+    """Convierte un interés decimal o porcentual en una etiqueta limpia."""
+    try:
+        v = float(valor)
+        pct = v * 100 if abs(v) <= 1 else v
+        if abs(pct - round(pct)) < 1e-9:
+            return f"{int(round(pct))}%"
+        return f"{pct:.2f}%".replace(".00%", "%")
+    except Exception:
+        return "SIN TIPO"
+
+
+def construir_desglose_notas_por_tipo_inversor(df_inv: pd.DataFrame, detalle_notas: pd.DataFrame, fecha_analisis) -> pd.DataFrame:
+    """Resume NOTAS por tipo pagado al inversor: capital activo, cobros, pagos y beneficio.
+
+    Capital invertido: capital activo vivo al cierre del periodo seleccionado.
+    Cobros/pagos/beneficio: importes del mes seleccionado construidos desde CALENDARIO_NOTAS.
+    """
+    fecha_analisis = pd.Timestamp(fecha_analisis).normalize()
+
+    notas = filtrar_notas(df_inv)
+    if notas is None or notas.empty:
+        return pd.DataFrame(columns=[
+            "tipo_inversor", "num_inversiones", "capital_invertido", "cobro_compania_mes",
+            "pago_inversor_mes", "beneficio_empresa_mes", "rentabilidad_bruta_mes",
+            "rentabilidad_bruta_anualizada", "coste_inversor_mes", "coste_inversor_anualizado",
+            "margen_beneficio_mes", "margen_beneficio_anualizado",
+        ])
+
+    notas_activas = notas[
+        (notas["fecha_inversion"].notna())
+        & (notas["fecha_inversion"] <= fecha_analisis)
+        & (notas["fecha_final_inversion"].isna() | (notas["fecha_final_inversion"] >= fecha_analisis))
+    ].copy()
+
+    if not notas_activas.empty:
+        notas_activas["interes_inversor_anual"] = pd.to_numeric(notas_activas["interes_inversor_anual"], errors="coerce").fillna(0)
+        capital_por_tipo = notas_activas.groupby("interes_inversor_anual", as_index=False).agg(
+            num_inversiones=("id_inversion", "count"),
+            capital_invertido=("capital_invertido", "sum"),
+        )
+    else:
+        capital_por_tipo = pd.DataFrame(columns=["interes_inversor_anual", "num_inversiones", "capital_invertido"])
+
+    if detalle_notas is not None and not detalle_notas.empty:
+        det = detalle_notas.copy()
+        det["interes_inversor_anual"] = pd.to_numeric(det["interes_inversor_anual"], errors="coerce").fillna(0)
+        flujo_por_tipo = det.groupby("interes_inversor_anual", as_index=False).agg(
+            cobro_compania_mes=("cobro_compania", "sum"),
+            pago_inversor_mes=("pago_inversor", "sum"),
+            beneficio_empresa_mes=("beneficio_empresa", "sum"),
+        )
+    else:
+        flujo_por_tipo = pd.DataFrame(columns=["interes_inversor_anual", "cobro_compania_mes", "pago_inversor_mes", "beneficio_empresa_mes"])
+
+    resumen = capital_por_tipo.merge(flujo_por_tipo, on="interes_inversor_anual", how="outer")
+    for col in ["num_inversiones", "capital_invertido", "cobro_compania_mes", "pago_inversor_mes", "beneficio_empresa_mes"]:
+        if col in resumen.columns:
+            resumen[col] = pd.to_numeric(resumen[col], errors="coerce").fillna(0)
+
+    if resumen.empty:
+        return resumen
+
+    resumen["tipo_inversor"] = resumen["interes_inversor_anual"].apply(etiqueta_tipo_interes)
+    resumen["rentabilidad_bruta_mes"] = resumen.apply(lambda r: r["cobro_compania_mes"] / r["capital_invertido"] if r["capital_invertido"] else 0, axis=1)
+    resumen["rentabilidad_bruta_anualizada"] = resumen["rentabilidad_bruta_mes"] * 12
+    resumen["coste_inversor_mes"] = resumen.apply(lambda r: r["pago_inversor_mes"] / r["capital_invertido"] if r["capital_invertido"] else 0, axis=1)
+    resumen["coste_inversor_anualizado"] = resumen["coste_inversor_mes"] * 12
+    resumen["margen_beneficio_mes"] = resumen.apply(lambda r: r["beneficio_empresa_mes"] / r["capital_invertido"] if r["capital_invertido"] else 0, axis=1)
+    resumen["margen_beneficio_anualizado"] = resumen["margen_beneficio_mes"] * 12
+
+    total = {
+        "interes_inversor_anual": 999,
+        "tipo_inversor": "TOTAL",
+        "num_inversiones": resumen["num_inversiones"].sum(),
+        "capital_invertido": resumen["capital_invertido"].sum(),
+        "cobro_compania_mes": resumen["cobro_compania_mes"].sum(),
+        "pago_inversor_mes": resumen["pago_inversor_mes"].sum(),
+        "beneficio_empresa_mes": resumen["beneficio_empresa_mes"].sum(),
+    }
+    total["rentabilidad_bruta_mes"] = total["cobro_compania_mes"] / total["capital_invertido"] if total["capital_invertido"] else 0
+    total["rentabilidad_bruta_anualizada"] = total["rentabilidad_bruta_mes"] * 12
+    total["coste_inversor_mes"] = total["pago_inversor_mes"] / total["capital_invertido"] if total["capital_invertido"] else 0
+    total["coste_inversor_anualizado"] = total["coste_inversor_mes"] * 12
+    total["margen_beneficio_mes"] = total["beneficio_empresa_mes"] / total["capital_invertido"] if total["capital_invertido"] else 0
+    total["margen_beneficio_anualizado"] = total["margen_beneficio_mes"] * 12
+
+    resumen = pd.concat([resumen, pd.DataFrame([total])], ignore_index=True)
+    resumen = resumen.sort_values("interes_inversor_anual").reset_index(drop=True)
+    columnas = [
+        "tipo_inversor", "num_inversiones", "capital_invertido", "cobro_compania_mes",
+        "pago_inversor_mes", "beneficio_empresa_mes", "rentabilidad_bruta_mes",
+        "rentabilidad_bruta_anualizada", "coste_inversor_mes", "coste_inversor_anualizado",
+        "margen_beneficio_mes", "margen_beneficio_anualizado",
+    ]
+    return resumen[columnas]
+
+
+def preparar_tabla_tipo_inversor_notas(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in ["capital_invertido", "cobro_compania_mes", "pago_inversor_mes", "beneficio_empresa_mes"]:
+        if col in out.columns:
+            out[col] = out[col].map(fmt)
+    for col in [
+        "rentabilidad_bruta_mes", "rentabilidad_bruta_anualizada",
+        "coste_inversor_mes", "coste_inversor_anualizado",
+        "margen_beneficio_mes", "margen_beneficio_anualizado",
+    ]:
+        if col in out.columns:
+            out[col] = out[col].map(fmt_pct)
+    return out
+
+
+def mostrar_desglose_notas_por_tipo_inversor(df_inv: pd.DataFrame, detalle_notas: pd.DataFrame, fecha_analisis, anio: int, mes: int):
+    """Pinta en el dashboard el desglose de notas por 7,5%, 10%, 15%, etc."""
+    st.markdown("### Notas por tipo pagado al inversor")
+    st.caption("Capital activo de notas y resultado mensual separado por el interés pactado con cada inversor.")
+    tabla = construir_desglose_notas_por_tipo_inversor(df_inv, detalle_notas, fecha_analisis)
+    if tabla is None or tabla.empty:
+        st.info("No hay notas activas o pagos de notas para mostrar en este periodo.")
+        return
+
+    columnas = [
+        "tipo_inversor", "num_inversiones", "capital_invertido", "cobro_compania_mes",
+        "pago_inversor_mes", "beneficio_empresa_mes", "rentabilidad_bruta_anualizada",
+        "coste_inversor_anualizado", "margen_beneficio_anualizado",
+    ]
+    st.dataframe(preparar_tabla_tipo_inversor_notas(tabla[columnas]), use_container_width=True)
+
+    excel_bytes = BytesIO()
+    with pd.ExcelWriter(excel_bytes, engine="openpyxl") as writer:
+        tabla.to_excel(writer, index=False, sheet_name="NOTAS_TIPO_INVERSOR")
+    st.download_button(
+        "Descargar desglose de notas por tipo inversor",
+        data=excel_bytes.getvalue(),
+        file_name=f"notas_por_tipo_inversor_{anio}_{mes:02d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 def mostrar_rentabilidad_por_activo_dashboard(tabla_activo: pd.DataFrame):
     """Muestra tarjetas y tabla de rentabilidad por activo directamente en el dashboard."""
     st.markdown("### Rentabilidad por activo")
@@ -1941,6 +2084,14 @@ def dashboard_financiero():
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
     if vista_dashboard in ["General", "Notas"]:
+        fecha_analisis_notas = pd.Timestamp(anio_dashboard, mes_dashboard, ultimo_dia_mes(anio_dashboard, mes_dashboard)).normalize()
+        mostrar_desglose_notas_por_tipo_inversor(
+            df_inv_calculo,
+            resumen.get("detalle_notas", pd.DataFrame()),
+            fecha_analisis_notas,
+            anio_dashboard,
+            mes_dashboard,
+        )
         mostrar_cobros_semanales_dashboard(df_inv_calculo, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
@@ -3027,4 +3178,3 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
-
