@@ -729,7 +729,20 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
             capital = float(fila.get("capital_invertido", 0))
             cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12
             cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
-            pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12
+
+            # Tratamiento especial Chaparro Fernández:
+            # - Si se excluye Chaparro, la fila ya no llega aquí porque se filtra antes.
+            # - Si se incluye Chaparro, se considera una operación interna: el pago al
+            #   inversionista debe ser igual al cobro de la nota y el beneficio debe ser 0.
+            es_chaparro = bool(fila.get("es_chaparro_fernandez", False)) or es_chaparro_fernandez_row(fila)
+            if es_chaparro:
+                pago_inversor = cobro_compania
+                beneficio_empresa = 0.0
+                tratamiento_chaparro = "INTERNO: pago = cobro nota"
+            else:
+                pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12
+                beneficio_empresa = cobro_compania - pago_inversor
+                tratamiento_chaparro = "NO"
 
             filas.append({
                 "fecha_pago": fecha_pago,
@@ -741,13 +754,15 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
                 "id_inversion": fila.get("id_inversion", ""),
                 "inversor": fila.get("inversor", ""),
                 "cuenta_cobro": fila.get("cuenta_cobro", "SIN CLASIFICAR"),
+                "es_chaparro_fernandez": es_chaparro,
+                "tratamiento_chaparro": tratamiento_chaparro,
                 "capital_invertido": capital,
                 "interes_nota_anual": fila.get("interes_nota_anual", 0),
                 "interes_inversor_anual": fila.get("interes_inversor_anual", 0),
                 "cobro_teorico_compania": cobro_teorico,
                 "cobro_compania": cobro_compania,
                 "pago_inversor": pago_inversor,
-                "beneficio_empresa": cobro_compania - pago_inversor,
+                "beneficio_empresa": beneficio_empresa,
             })
 
     return pd.DataFrame(filas)
@@ -1662,7 +1677,7 @@ def seccion_historico_y_proyecciones():
         "Incluir Chaparro Fernández",
         value=False,
         key="hist_proj_incluir_chaparro",
-        help="Si está desactivado, no se incluyen inversiones internas de Chaparro Fernández en histórico, proyección ni totales.",
+        help="Si está desactivado, Chaparro Fernández queda fuera de capital, cobros, pagos y beneficio. Si está activado, se incluye como interno: pago inversor = cobro de la nota y beneficio = 0.",
     )
 
     if fecha_fin < fecha_inicio:
@@ -1853,7 +1868,7 @@ def dashboard_financiero():
         "Incluir Chaparro Fernández",
         value=False,
         key="dashboard_incluir_chaparro",
-        help="Si está desactivado, las inversiones internas de Chaparro Fernández no entran en capital, pagos, cobros ni rentabilidad.",
+        help="Si está desactivado, Chaparro Fernández queda fuera de capital, cobros, pagos y rentabilidad. Si está activado, se incluye como interno: pago inversor = cobro de la nota y beneficio = 0.",
     )
     anio_dashboard = int(col_periodo_1.number_input(
         "Año del dashboard",
