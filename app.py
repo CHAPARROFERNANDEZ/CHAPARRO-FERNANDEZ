@@ -238,6 +238,56 @@ def limpiar_texto(x) -> str:
     return str(x).strip().lower()
 
 
+def es_chaparro_fernandez_row(row) -> bool:
+    """Detecta inversiones internas de Chaparro Fernández de forma flexible.
+
+    Revisa varias columnas habituales para que funcione aunque el Excel use
+    inversor, nombre_activo, cuenta_cobro, motivo, tipo_operacion, etc.
+    """
+    posibles_columnas = [
+        "inversor",
+        "nombre_activo",
+        "cuenta_cobro",
+        "motivo",
+        "tipo_operacion",
+        "subtipo_inversion",
+        "tipo_inversion",
+        "id_inversion",
+    ]
+    texto = " ".join(limpiar_texto(row.get(col, "")) for col in posibles_columnas)
+    texto_simple = (
+        texto.replace("á", "a")
+        .replace("é", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ú", "u")
+        .replace("ñ", "n")
+    )
+    return (
+        "chaparro" in texto_simple
+        or "fernandez" in texto_simple and "chaparro" in texto_simple
+        or "chaparro fernandez" in texto_simple
+        or "chaparro-fernandez" in texto_simple
+        or "chaf" in texto_simple
+    )
+
+
+def aplicar_filtro_chaparro_fernandez(df: pd.DataFrame, incluir_chaparro: bool) -> pd.DataFrame:
+    """Incluye o excluye las inversiones internas de Chaparro Fernández.
+
+    Si incluir_chaparro=True, no toca el dataframe.
+    Si incluir_chaparro=False, elimina filas detectadas como Chaparro Fernández.
+    Además añade una columna auxiliar es_chaparro_fernandez para poder auditarlo.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["es_chaparro_fernandez"] = out.apply(es_chaparro_fernandez_row, axis=1)
+    if incluir_chaparro:
+        return out
+    return out[~out["es_chaparro_fernandez"]].copy()
+
+
 @st.cache_data(show_spinner=False)
 def cargar_excel_completo():
     inv = pd.read_excel(ARCHIVO, sheet_name=HOJA_INVERSIONES)
@@ -1194,13 +1244,14 @@ def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFram
 
 
 
-def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General"):
+def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General", incluir_chaparro: bool = True):
     hoy_real = pd.Timestamp.today().normalize()
     if anio is None:
         anio = hoy_real.year
     if mes is None:
         mes = hoy_real.month
     fecha_analisis = pd.Timestamp(int(anio), int(mes), ultimo_dia_mes(int(anio), int(mes))).normalize()
+    df_inv = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
     activas = inversiones_activas_global(df_inv, fecha_analisis)
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
@@ -1323,7 +1374,7 @@ def grafico_capital_por_inversor(activas):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def grafico_beneficio_mensual(df_inv, df_cal, df_control):
+def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control):
     if px is None:
         st.warning("Falta plotly. Añade plotly a requirements.txt.")
         return
@@ -1437,7 +1488,7 @@ def fecha_minima_sistema(df_inv: pd.DataFrame, df_cal: pd.DataFrame):
     return pd.Timestamp.today().normalize()
 
 
-def construir_movimientos_historico_proyeccion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, fecha_inicio, fecha_fin) -> pd.DataFrame:
+def construir_movimientos_historico_proyeccion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, fecha_inicio, fecha_fin, incluir_chaparro: bool = True) -> pd.DataFrame:
     """Construye movimientos mensuales de cobros, pagos y beneficio desde inicio y hacia futuro.
 
     Reglas:
@@ -1445,6 +1496,7 @@ def construir_movimientos_historico_proyeccion(df_inv: pd.DataFrame, df_cal: pd.
     - Paraguay, MotoClick y Fútbol: devenga mes a mes según fecha_inversion / fecha_final_inversion.
     - Histórico/proyección se clasifica según si el mes es anterior o posterior al mes actual.
     """
+    df_inv = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
     filas = []
     hoy = pd.Timestamp.today().normalize()
 
@@ -1602,17 +1654,37 @@ def seccion_historico_y_proyecciones():
     fecha_inicio_default = fecha_minima_sistema(df_inv, df_cal)
     fecha_fin_default = hoy + pd.DateOffset(months=12)
 
-    c1, c2, c3 = st.columns([1, 1, 1])
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
     fecha_inicio = pd.Timestamp(c1.date_input("Desde", value=fecha_inicio_default.date(), key="hist_proj_desde")).normalize()
     fecha_fin = pd.Timestamp(c2.date_input("Hasta", value=fecha_fin_default.date(), key="hist_proj_hasta")).normalize()
     activo_filtro = c3.selectbox("Activo", ["Todos", "notas", "paraguay", "motoclick", "futbol"], key="hist_proj_activo")
+    incluir_chaparro = c4.checkbox(
+        "Incluir Chaparro Fernández",
+        value=False,
+        key="hist_proj_incluir_chaparro",
+        help="Si está desactivado, no se incluyen inversiones internas de Chaparro Fernández en histórico, proyección ni totales.",
+    )
 
     if fecha_fin < fecha_inicio:
         st.error("La fecha final no puede ser anterior a la fecha inicial.")
         return
 
+    df_inv_marcado = aplicar_filtro_chaparro_fernandez(df_inv, True)
+    inversiones_chaparro = df_inv_marcado[df_inv_marcado.get("es_chaparro_fernandez", False) == True].copy() if not df_inv_marcado.empty else pd.DataFrame()
+    if not inversiones_chaparro.empty:
+        with st.expander("Ver inversiones detectadas como Chaparro Fernández", expanded=False):
+            columnas_auditoria = [c for c in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "capital_invertido", "interes_inversor_anual", "fecha_inversion", "fecha_final_inversion"] if c in inversiones_chaparro.columns]
+            st.dataframe(preparar_tabla_monetaria(inversiones_chaparro[columnas_auditoria], ["capital_invertido"]), use_container_width=True)
+
     with st.spinner("Calculando histórico y proyecciones..."):
-        movimientos = construir_movimientos_historico_proyeccion(df_inv, df_cal, df_control, fecha_inicio, fecha_fin)
+        movimientos = construir_movimientos_historico_proyeccion(
+            df_inv,
+            df_cal,
+            df_control,
+            fecha_inicio,
+            fecha_fin,
+            incluir_chaparro=incluir_chaparro,
+        )
 
     if activo_filtro != "Todos" and not movimientos.empty:
         movimientos = movimientos[movimientos["activo"] == activo_filtro].copy()
@@ -1771,11 +1843,17 @@ def dashboard_financiero():
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
 
     hoy = pd.Timestamp.today().normalize()
-    col_activo, col_periodo_1, col_periodo_2 = st.columns([1.4, 1, 1])
+    col_activo, col_periodo_1, col_periodo_2, col_chaparro = st.columns([1.4, 1, 1, 1.2])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
         ["General", "Notas", "Fútbol", "MotoClick", "Paraguay"],
         key="dashboard_vista_activo",
+    )
+    incluir_chaparro = col_chaparro.checkbox(
+        "Incluir Chaparro Fernández",
+        value=False,
+        key="dashboard_incluir_chaparro",
+        help="Si está desactivado, las inversiones internas de Chaparro Fernández no entran en capital, pagos, cobros ni rentabilidad.",
     )
     anio_dashboard = int(col_periodo_1.number_input(
         "Año del dashboard",
@@ -1791,7 +1869,17 @@ def dashboard_financiero():
         value=hoy.month,
         key="dashboard_mes_general",
     ))
-    st.caption(f"Vista seleccionada: {vista_dashboard} · Periodo: {nombre_mes_es(mes_dashboard)} {anio_dashboard}")
+    st.caption(
+        f"Vista seleccionada: {vista_dashboard} · Periodo: {nombre_mes_es(mes_dashboard)} {anio_dashboard} · "
+        f"Chaparro Fernández: {'incluido' if incluir_chaparro else 'excluido'}"
+    )
+
+    df_inv_marcado = aplicar_filtro_chaparro_fernandez(df_inv, True)
+    inversiones_chaparro = df_inv_marcado[df_inv_marcado.get("es_chaparro_fernandez", False) == True].copy() if not df_inv_marcado.empty else pd.DataFrame()
+    if not inversiones_chaparro.empty:
+        with st.expander("Ver inversiones detectadas como Chaparro Fernández", expanded=False):
+            columnas_auditoria = [c for c in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "capital_invertido", "interes_inversor_anual", "fecha_inversion", "fecha_final_inversion"] if c in inversiones_chaparro.columns]
+            st.dataframe(preparar_tabla_monetaria(inversiones_chaparro[columnas_auditoria], ["capital_invertido"]), use_container_width=True)
 
     resumen_notas_actual = construir_resumen_actual_notas_alertas(df_control)
     alertas_notas = resumen_alertas_por_nota(resumen_notas_actual)
@@ -1807,7 +1895,16 @@ def dashboard_financiero():
             tabla_alertas["peor_variacion_%"] = tabla_alertas["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
             st.dataframe(tabla_alertas, use_container_width=True)
 
-    resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard, vista_dashboard)
+    resumen = obtener_resumen_dashboard(
+        df_inv,
+        df_cal,
+        df_control,
+        anio_dashboard,
+        mes_dashboard,
+        vista_dashboard,
+        incluir_chaparro=incluir_chaparro,
+    )
+    df_inv_calculo = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1832,7 +1929,7 @@ def dashboard_financiero():
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
     if vista_dashboard in ["General", "Notas"]:
-        mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
+        mostrar_cobros_semanales_dashboard(df_inv_calculo, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
@@ -1850,7 +1947,7 @@ def dashboard_financiero():
     with tab2:
         grafico_capital_por_inversor(resumen["activas"])
     with tab3:
-        grafico_beneficio_mensual(df_inv, df_cal, df_control)
+        grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control)
     with tab4:
         st.caption("Resumen del periodo seleccionado por tipo de activo. La rentabilidad anualizada es la rentabilidad mensual multiplicada por 12.")
         tabla_activo = resumen.get("rentabilidad_por_activo", pd.DataFrame())
