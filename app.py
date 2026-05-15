@@ -2854,45 +2854,109 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         df = df[df["capital_nuevo_real"].str.upper().isin(["SI", ""])].copy()
     if modo == "Un inversor" and inversor_elegido:
         df = df[df["inversor"].str.upper() == inversor_elegido.upper()].copy()
+
     fecha_corte = datetime(anio, mes, ultimo_dia_mes(anio, mes))
+
+    # Orden definitivo de extractos:
+    # el DETALLE debe salir por meses naturales, no por inversión.
+    # Primero todas las operaciones de septiembre 2025, luego octubre 2025,
+    # noviembre 2025, etc., hasta la fecha de corte seleccionada.
+    fecha_inicio_extracto = datetime(2025, 9, 1)
+
     filas = []
     for _, row in df.iterrows():
         fecha_inicio = row.get("fecha_inversion")
         if pd.isna(fecha_inicio):
             continue
+
+        fecha_inicio_dt = pd.Timestamp(fecha_inicio).to_pydatetime()
         fecha_final_excel = row.get("fecha_final_inversion")
         fecha_fin = fecha_corte if pd.isna(fecha_final_excel) else min(pd.Timestamp(fecha_final_excel).to_pydatetime(), fecha_corte)
-        if pd.Timestamp(fecha_inicio).to_pydatetime() > fecha_fin:
+
+        if fecha_inicio_dt > fecha_fin:
             continue
-        actual = datetime(fecha_inicio.year, fecha_inicio.month, 1)
+        if fecha_fin < fecha_inicio_extracto:
+            continue
+
+        # Si la inversión empezó antes de septiembre de 2025, el extracto empieza igualmente en septiembre de 2025.
+        primer_mes = max(datetime(fecha_inicio_dt.year, fecha_inicio_dt.month, 1), fecha_inicio_extracto)
+        actual = primer_mes
         fin_mes = datetime(fecha_fin.year, fecha_fin.month, 1)
+
         while actual <= fin_mes:
             dias_mes = calendar.monthrange(actual.year, actual.month)[1]
             inicio_mes = datetime(actual.year, actual.month, 1)
             fin_mes_real = datetime(actual.year, actual.month, dias_mes)
-            inicio_calc = max(pd.Timestamp(fecha_inicio).to_pydatetime(), inicio_mes)
+            inicio_calc = max(fecha_inicio_dt, inicio_mes, fecha_inicio_extracto)
             fin_calc = min(fecha_fin, fin_mes_real)
+
             if inicio_calc <= fin_calc:
                 dias = (fin_calc - inicio_calc).days + 1
                 capital = float(row.get("capital_invertido", 0))
                 interes = float(row.get("interes_inversor_anual", 0))
                 interes_mes = round((capital * interes / 12) * dias / dias_mes, 2)
-                filas.append({"inversor": row.get("inversor", ""), "id_inversion": row.get("id_inversion", ""), "tipo_inversion": row.get("tipo_inversion", ""), "subtipo_inversion": row.get("subtipo_inversion", ""), "nombre_activo": row.get("nombre_activo", ""), "mes": f"{actual.month:02d}/{actual.year}", "fecha_inversion": pd.Timestamp(fecha_inicio).strftime("%d/%m/%Y"), "capital_invertido": capital, "dias_devengados": dias, "dias_mes": dias_mes, "interes_mes": interes_mes})
+                mes_fecha = datetime(actual.year, actual.month, 1)
+                filas.append({
+                    "mes_fecha": mes_fecha,
+                    "fecha_inversion_orden": fecha_inicio_dt,
+                    "inversor": row.get("inversor", ""),
+                    "id_inversion": row.get("id_inversion", ""),
+                    "tipo_inversion": row.get("tipo_inversion", ""),
+                    "subtipo_inversion": row.get("subtipo_inversion", ""),
+                    "nombre_activo": row.get("nombre_activo", ""),
+                    "mes": f"{actual.month:02d}/{actual.year}",
+                    "fecha_inversion": pd.Timestamp(fecha_inicio).strftime("%d/%m/%Y"),
+                    "capital_invertido": capital,
+                    "dias_devengados": dias,
+                    "dias_mes": dias_mes,
+                    "interes_mes": interes_mes,
+                })
+
             actual = datetime(actual.year + 1, 1, 1) if actual.month == 12 else datetime(actual.year, actual.month + 1, 1)
+
     resultado = pd.DataFrame(filas)
     if resultado.empty:
         return []
+
+    # Orden global: mes ascendente y, dentro de cada mes, operaciones ordenadas de forma estable.
+    resultado = resultado.sort_values(
+        ["inversor", "mes_fecha", "fecha_inversion_orden", "id_inversion", "nombre_activo"],
+        ascending=[True, True, True, True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
     archivos = []
-    for inversor, grupo in resultado.groupby("inversor"):
-        detalle = grupo.copy()
-        totales_mes = detalle.groupby("mes", as_index=False)["interes_mes"].sum().rename(columns={"interes_mes": "total_mes"})
+    for inversor, grupo in resultado.groupby("inversor", sort=True):
+        detalle = grupo.copy().sort_values(
+            ["mes_fecha", "fecha_inversion_orden", "id_inversion", "nombre_activo"],
+            ascending=[True, True, True, True],
+            kind="mergesort",
+        )
+
+        totales_mes = (
+            detalle.groupby(["mes_fecha", "mes"], as_index=False)["interes_mes"]
+            .sum()
+            .sort_values("mes_fecha")
+            .rename(columns={"interes_mes": "total_mes"})
+        )
+        totales_mes = totales_mes[["mes", "total_mes"]]
+
         capital_total = detalle.groupby("id_inversion")["capital_invertido"].first().sum()
-        resumen = pd.DataFrame([{"inversor": inversor, "fecha_corte": fecha_corte.strftime("%d/%m/%Y"), "capital_total": round(capital_total, 2), "total_intereses_acumulados": round(detalle["interes_mes"].sum(), 2)}])
+        resumen = pd.DataFrame([{
+            "inversor": inversor,
+            "fecha_corte": fecha_corte.strftime("%d/%m/%Y"),
+            "capital_total": round(capital_total, 2),
+            "total_intereses_acumulados": round(detalle["interes_mes"].sum(), 2),
+        }])
+
+        # Quitamos columnas auxiliares antes de exportar para mantener exactamente el mismo formato visible.
+        detalle_exportar = detalle.drop(columns=["mes_fecha", "fecha_inversion_orden"], errors="ignore")
+
         salida = BytesIO()
         with pd.ExcelWriter(salida, engine="openpyxl") as writer:
             resumen.to_excel(writer, sheet_name="RESUMEN", index=False)
             totales_mes.to_excel(writer, sheet_name="TOTALES_MES", index=False)
-            detalle.to_excel(writer, sheet_name="DETALLE", index=False)
+            detalle_exportar.to_excel(writer, sheet_name="DETALLE", index=False)
         nombre_archivo = f"extracto_{str(inversor).upper().replace(' ', '_')}_{fecha_corte.strftime('%d%m%Y')}.xlsx"
         archivos.append((nombre_archivo, formatear_extracto_excel_bytes(salida.getvalue(), str(inversor), fecha_corte)))
     return archivos
