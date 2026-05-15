@@ -2850,8 +2850,10 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     for col in ["inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "tipo_operacion", "capital_nuevo_real"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
-    if "capital_nuevo_real" in df.columns:
-        df = df[df["capital_nuevo_real"].str.upper().isin(["SI", ""])].copy()
+    # IMPORTANTE: no filtramos por capital_nuevo_real.
+    # Las reinversiones marcadas como capital_nuevo_real = "no" también son capital vivo
+    # desde su fecha de inversión. Si las quitamos, el DETALLE mensual no cuadra
+    # con el capital activo que muestra la app.
     if modo == "Un inversor" and inversor_elegido:
         df = df[df["inversor"].str.upper() == inversor_elegido.upper()].copy()
 
@@ -2941,7 +2943,26 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         )
         totales_mes = totales_mes[["mes", "total_mes"]]
 
-        capital_total = detalle.groupby("id_inversion")["capital_invertido"].first().sum()
+        # El capital_total del RESUMEN debe representar el capital activo a fecha de corte,
+        # igual que en la app: inversiones con fecha_inversion <= fecha_corte y sin fecha final
+        # o con fecha_final_inversion >= fecha_corte.
+        # No debe calcularse sumando todas las inversiones que han aparecido en algún mes,
+        # porque eso puede incluir inversiones ya cerradas por call y excluir reinversiones vivas.
+        base_inversor = df[df["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
+        base_inversor["fecha_inversion"] = pd.to_datetime(base_inversor["fecha_inversion"], errors="coerce", dayfirst=True)
+        base_inversor["fecha_final_inversion"] = pd.to_datetime(base_inversor["fecha_final_inversion"], errors="coerce", dayfirst=True)
+        base_inversor["capital_invertido"] = pd.to_numeric(base_inversor["capital_invertido"], errors="coerce").fillna(0)
+        fecha_corte_ts = pd.Timestamp(fecha_corte).normalize()
+        activas_corte = base_inversor[
+            (base_inversor["fecha_inversion"].notna())
+            & (base_inversor["fecha_inversion"] <= fecha_corte_ts)
+            & (
+                base_inversor["fecha_final_inversion"].isna()
+                | (base_inversor["fecha_final_inversion"] >= fecha_corte_ts)
+            )
+        ].copy()
+        capital_total = float(activas_corte["capital_invertido"].sum()) if not activas_corte.empty else 0.0
+
         resumen = pd.DataFrame([{
             "inversor": inversor,
             "fecha_corte": fecha_corte.strftime("%d/%m/%Y"),
