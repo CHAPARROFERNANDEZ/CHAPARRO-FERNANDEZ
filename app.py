@@ -18,10 +18,7 @@ try:
 except Exception:
     yf = None
 
-try:
-    import gdown
-except Exception:
-    gdown = None
+import requests
 
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -292,16 +289,17 @@ def aplicar_filtro_chaparro_fernandez(df: pd.DataFrame, incluir_chaparro: bool) 
 
 
 def descargar_excel_desde_drive():
-    """Descarga el Excel desde Google Drive y lo guarda localmente.
-    Se llama al inicio y desde el botón de refresco en Gestión de Excel.
-    """
-    if gdown is None:
-        st.warning("gdown no está instalado. Añade 'gdown' a requirements.txt.")
-        return False
+    """Descarga el Excel desde Google Drive (Google Sheets export) y lo guarda localmente."""
     try:
-        url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
-        gdown.download(url, ARCHIVO, quiet=True)
-        return True
+        url = f"https://docs.google.com/spreadsheets/d/{GDRIVE_FILE_ID}/export?format=xlsx"
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            with open(ARCHIVO, "wb") as f:
+                f.write(response.content)
+            return True
+        else:
+            st.warning(f"No se pudo descargar el Excel desde Google Drive (status {response.status_code}).")
+            return False
     except Exception as e:
         st.warning(f"No se pudo descargar el Excel desde Google Drive: {e}")
         return False
