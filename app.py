@@ -18,6 +18,7 @@ try:
 except Exception:
     yf = None
 
+import requests
 
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -30,6 +31,7 @@ st.set_page_config(
 )
 
 ARCHIVO = "inversiones.xlsx"
+GDRIVE_FILE_ID = "1CImiIbg7kSLrYNpWgzPHEBCmI3KRVlBX"
 HOJA_INVERSIONES = "INVERSIONES"
 HOJA_CALENDARIO = "CALENDARIO_NOTAS"
 HOJA_CONTROL = "CONTROL_NOTAS"
@@ -285,6 +287,22 @@ def aplicar_filtro_chaparro_fernandez(df: pd.DataFrame, incluir_chaparro: bool) 
         return out
     return out[~out["es_chaparro_fernandez"]].copy()
 
+
+def descargar_excel_desde_drive():
+    """Descarga el Excel desde Google Sheets y lo guarda localmente."""
+    try:
+        url = f"https://docs.google.com/spreadsheets/d/{GDRIVE_FILE_ID}/export?format=xlsx"
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            with open(ARCHIVO, "wb") as f:
+                f.write(response.content)
+            return True
+        else:
+            st.warning(f"No se pudo descargar el Excel desde Google Drive (status {response.status_code}).")
+            return False
+    except Exception as e:
+        st.warning(f"No se pudo descargar el Excel desde Google Drive: {e}")
+        return False
 
 
 @st.cache_data(show_spinner=False)
@@ -2853,8 +2871,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     REGLA DEFINITIVA PARA EXTRACTOS:
     - SOLO se tienen en cuenta las filas cuya columna tipo_operacion sea exactamente NUEVA.
     - NO se tienen en cuenta reinversiones, canceladas, vacías ni cualquier otro valor.
-    - El extracto empieza desde la fecha de inversión más antigua de cada operación NUEVA,
-      sin ninguna fecha de inicio fija hardcodeada.
+    - Las reinversiones no modifican el extracto del inversor: el inversor cobra según su operación matriz NUEVA.
     """
     df = df_inv.copy()
 
@@ -2875,22 +2892,22 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     # ==========================================
     # FILTRO PRINCIPAL DE EXTRACTOS
     # ==========================================
-    # SOLO tipo_operacion = NUEVA. Reinversiones, canceladas y cualquier otro valor quedan fuera.
+    # Según la regla definida: para extractos SOLO cuenta columna O / tipo_operacion = NUEVA.
+    # Todo lo demás queda fuera: reinversion, cancelada, call, vacío, etc.
     if "tipo_operacion" not in df.columns:
         st.error("Falta la columna tipo_operacion en la hoja INVERSIONES. Para generar extractos debe existir y contener 'NUEVA'.")
         return []
 
     df["tipo_operacion_normalizada"] = df["tipo_operacion"].astype(str).str.strip().str.upper()
 
-    # NUEVA: se incluye, sin mirar fecha_final (se paga hasta fecha de corte)
-    # CANCELADA: se incluye, pero solo hasta su fecha_final_inversion
-    # REINVERSION y cualquier otro valor: no se incluye
+    # NUEVA: incluir, calcular hasta fecha de corte (ignorar fecha_final)
+    # CANCELADA: incluir, calcular hasta fecha_final_inversion
+    # REINVERSION y cualquier otro: excluir
     df = df[df["tipo_operacion_normalizada"].isin(["NUEVA", "CANCELADA"])].copy()
 
     if df.empty:
         return []
 
-    # Si se solicita un inversor concreto, filtramos.
     if modo == "Un inversor" and inversor_elegido:
         df = df[df["inversor"].str.upper() == inversor_elegido.upper()].copy()
 
@@ -2910,22 +2927,20 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         fecha_final_excel = row.get("fecha_final_inversion")
 
         if tipo_op == "CANCELADA":
-            # Cancelada: se paga hasta la fecha de cancelación, no más allá
             if pd.isna(fecha_final_excel):
-                continue  # cancelada sin fecha final: no se puede calcular, se omite
+                continue
             fecha_fin = min(pd.Timestamp(fecha_final_excel).to_pydatetime(), fecha_corte)
         else:
-            # NUEVA: se paga siempre hasta la fecha de corte
+            # NUEVA: siempre hasta fecha de corte
             fecha_fin = fecha_corte
 
         if fecha_inicio_dt > fecha_fin:
             continue
 
-        # Empezamos desde el primer día del mes de la inversión, sin fecha mínima fija.
         actual = datetime(fecha_inicio_dt.year, fecha_inicio_dt.month, 1)
-        fin_mes_loop = datetime(fecha_fin.year, fecha_fin.month, 1)
+        fin_mes = datetime(fecha_fin.year, fecha_fin.month, 1)
 
-        while actual <= fin_mes_loop:
+        while actual <= fin_mes:
             dias_mes = calendar.monthrange(actual.year, actual.month)[1]
             inicio_mes = datetime(actual.year, actual.month, 1)
             fin_mes_real = datetime(actual.year, actual.month, dias_mes)
@@ -2982,14 +2997,12 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         )
         totales_mes = totales_mes[["mes", "total_mes"]]
 
-        # Capital total del resumen: operaciones NUEVA activas a fecha de corte
-        # (CANCELADA no cuenta en el capital final porque ya no está activa)
+        # Capital total: solo NUEVA activas a fecha de corte (sin fecha_final o con fecha_final futura)
         base_inversor = df[df["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
         base_inversor["fecha_inversion"] = pd.to_datetime(base_inversor["fecha_inversion"], errors="coerce", dayfirst=True)
         base_inversor["fecha_final_inversion"] = pd.to_datetime(base_inversor["fecha_final_inversion"], errors="coerce", dayfirst=True)
         base_inversor["capital_invertido"] = pd.to_numeric(base_inversor["capital_invertido"], errors="coerce").fillna(0)
         fecha_corte_ts = pd.Timestamp(fecha_corte).normalize()
-        # Solo NUEVA sin fecha_final (siguen activas a fecha de corte)
         activas_corte = base_inversor[
             (base_inversor["tipo_operacion_normalizada"] == "NUEVA")
             & (base_inversor["fecha_inversion"].notna())
@@ -3144,8 +3157,8 @@ def seccion_gestion_excel():
     with tab_subir:
         st.subheader("Recargar Excel desde Google Drive")
         st.info(
-            "El Excel se lee automáticamente desde Google Drive cada vez que la app arranca. "
-            "Si has actualizado el archivo en Drive, pulsa el botón para forzar la recarga ahora."
+            "El Excel se lee desde Google Drive. "
+            "Si has actualizado el archivo en Drive, pulsa el botón para recargar."
         )
         if st.button("🔄 Recargar Excel desde Google Drive", type="primary"):
             st.cache_data.clear()
@@ -3159,7 +3172,7 @@ def seccion_gestion_excel():
 
         st.markdown("---")
         st.subheader("O sube un Excel manualmente")
-        st.caption("Si prefieres subir el archivo directamente desde tu ordenador, actualízalo también en Google Drive para que los cambios sean permanentes.")
+        st.caption("Si prefieres subir el archivo directamente, recuerda actualizarlo también en Google Drive para que sea permanente.")
         archivo_subido = st.file_uploader("Sube el archivo actualizado", type=["xlsx"])
         if archivo_subido is not None:
             nombre = archivo_subido.name.strip()
