@@ -2944,13 +2944,42 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
 
-    # IMPORTANTE:
-    # Las reinversiones NO deben aparecer como una inversión nueva en el extracto.
-    # Pero SÍ deben devengar intereses desde su propia fecha de reinversión.
-    # Por eso NO se eliminan: se calculan con sus fechas reales, pero se muestran
-    # bajo la operación matriz indicada en id_inversion_origen / id_operacion_matriz.
+    # REGLA DEFINITIVA DE EXTRACTOS:
+    # El extracto del inversor NO debe reconstruirse con reinversiones internas.
+    # Si el inversor puso 25.000 en septiembre, se le paga sobre esa operación matriz
+    # todos los meses, aunque internamente el dinero se haya reinvertido en enero.
+    # Por tanto, para EXTRACTOS solo se usan operaciones originales / capital nuevo real.
+    # Se excluyen filas marcadas como reinversion y filas marcadas como cancelado/call.
     if modo == "Un inversor" and inversor_elegido:
         df = df[df["inversor"].str.upper() == inversor_elegido.upper()].copy()
+
+    def usar_en_extracto(row) -> bool:
+        tipo_operacion = normalizar_si_no_estado(row.get("tipo_operacion", ""))
+        motivo = normalizar_si_no_estado(row.get("motivo", ""))
+        estado = normalizar_si_no_estado(row.get("estado_operacion", ""))
+        cancelado = normalizar_si_no_estado(row.get("cancelado", ""))
+        capital_nuevo_real = normalizar_si_no_estado(row.get("capital_nuevo_real", ""))
+
+        # 1) Nunca se devengan en extractos las reinversiones internas.
+        if es_reinversion_row(row) or tipo_operacion in {"reinversion", "reinversión"}:
+            return False
+
+        # 2) Tampoco se usan filas expresamente marcadas como canceladas/calls.
+        # Esto evita que una fila técnica de cierre entre en el extracto como inversión.
+        valores_no_extracto = {"cancelado", "cancelada", "call", "cerrado", "cerrada", "finalizado", "finalizada"}
+        if motivo in valores_no_extracto or estado in valores_no_extracto or tipo_operacion in valores_no_extracto:
+            return False
+        if cancelado in {"si", "sí", "yes", "y", "true", "1"}:
+            return False
+
+        # 3) Si existe capital_nuevo_real y pone NO, normalmente es fila técnica/reinversión.
+        # Solo se devenga en extracto lo que sea capital nuevo real o una fila matriz sin marcar.
+        if capital_nuevo_real in {"no", "false", "0"}:
+            return False
+
+        return True
+
+    df_extracto = df[df.apply(usar_en_extracto, axis=1)].copy()
 
     fecha_corte = datetime(anio, mes, ultimo_dia_mes(anio, mes))
 
@@ -2960,17 +2989,8 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     # noviembre 2025, etc., hasta la fecha de corte seleccionada.
     fecha_inicio_extracto = datetime(2025, 9, 1)
 
-    # Mapa de operaciones por id para poder enseñar la matriz en extractos.
-    df_indexado = df.copy()
-    df_indexado["id_inversion"] = df_indexado["id_inversion"].fillna("").astype(str).str.strip()
-    mapa_operaciones = {
-        str(r.get("id_inversion", "")).strip(): r
-        for _, r in df_indexado.iterrows()
-        if str(r.get("id_inversion", "")).strip()
-    }
-
     filas = []
-    for _, row in df.iterrows():
+    for _, row in df_extracto.iterrows():
         fecha_inicio = row.get("fecha_inversion")
         if pd.isna(fecha_inicio):
             continue
@@ -3002,24 +3022,16 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
                 interes = float(row.get("interes_inversor_anual", 0))
                 interes_mes = round((capital * interes / 12) * dias / dias_mes, 2)
                 mes_fecha = datetime(actual.year, actual.month, 1)
-                # Si es una reinversión, se muestra como operación matriz.
-                # El devengo usa la fecha/capital/tipo de la reinversión real,
-                # pero el extracto no la presenta como dinero nuevo.
-                es_reinv = es_reinversion_row(row) or str(row.get("id_inversion_origen", "")).strip() not in ["", "nan", "NaN", "None"]
-                id_origen = str(row.get("id_inversion_origen", "") or row.get("id_operacion_matriz", "") or "").strip()
-                fila_visible = mapa_operaciones.get(id_origen, row) if es_reinv and id_origen else row
-                fecha_visible = fila_visible.get("fecha_inversion", fecha_inicio)
-
                 filas.append({
                     "mes_fecha": mes_fecha,
-                    "fecha_inversion_orden": pd.Timestamp(fecha_visible).to_pydatetime() if pd.notna(fecha_visible) else fecha_inicio_dt,
+                    "fecha_inversion_orden": fecha_inicio_dt,
                     "inversor": row.get("inversor", ""),
-                    "id_inversion": fila_visible.get("id_inversion", row.get("id_inversion", "")),
-                    "tipo_inversion": fila_visible.get("tipo_inversion", row.get("tipo_inversion", "")),
-                    "subtipo_inversion": fila_visible.get("subtipo_inversion", row.get("subtipo_inversion", "")),
-                    "nombre_activo": fila_visible.get("nombre_activo", row.get("nombre_activo", "")),
+                    "id_inversion": row.get("id_inversion", ""),
+                    "tipo_inversion": row.get("tipo_inversion", ""),
+                    "subtipo_inversion": row.get("subtipo_inversion", ""),
+                    "nombre_activo": row.get("nombre_activo", ""),
                     "mes": f"{actual.month:02d}/{actual.year}",
-                    "fecha_inversion": pd.Timestamp(fecha_visible).strftime("%d/%m/%Y") if pd.notna(fecha_visible) else pd.Timestamp(fecha_inicio).strftime("%d/%m/%Y"),
+                    "fecha_inversion": pd.Timestamp(fecha_inicio).strftime("%d/%m/%Y"),
                     "capital_invertido": capital,
                     "dias_devengados": dias,
                     "dias_mes": dias_mes,
@@ -3060,7 +3072,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         # o con fecha_final_inversion >= fecha_corte.
         # No debe calcularse sumando todas las inversiones que han aparecido en algún mes,
         # porque eso puede incluir inversiones ya cerradas por call y excluir reinversiones vivas.
-        base_inversor = df[df["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
+        base_inversor = df_extracto[df_extracto["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
         base_inversor["fecha_inversion"] = pd.to_datetime(base_inversor["fecha_inversion"], errors="coerce", dayfirst=True)
         base_inversor["fecha_final_inversion"] = pd.to_datetime(base_inversor["fecha_final_inversion"], errors="coerce", dayfirst=True)
         base_inversor["capital_invertido"] = pd.to_numeric(base_inversor["capital_invertido"], errors="coerce").fillna(0)
