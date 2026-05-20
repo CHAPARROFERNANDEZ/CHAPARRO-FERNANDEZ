@@ -238,87 +238,6 @@ def limpiar_texto(x) -> str:
     return str(x).strip().lower()
 
 
-def normalizar_si_no_estado(valor) -> str:
-    texto = limpiar_texto(valor)
-    texto = (
-        texto.replace("á", "a")
-        .replace("é", "e")
-        .replace("í", "i")
-        .replace("ó", "o")
-        .replace("ú", "u")
-    )
-    return " ".join(texto.split())
-
-
-def es_cancelada_row(row) -> bool:
-    """Detecta inversiones marcadas manualmente como canceladas.
-
-    Uso recomendado en el Excel:
-    - columna estado_operacion = CANCELADO
-    - columna fecha_final_inversion = fecha real desde la que deja de contar
-
-    La fecha final manda sobre el cálculo. Es decir, una inversión cancelada
-    cuenta hasta su fecha final y deja de contar a partir de esa fecha.
-    """
-    estado = normalizar_si_no_estado(row.get("estado_operacion", ""))
-    cancelado = normalizar_si_no_estado(row.get("cancelado", ""))
-    motivo = normalizar_si_no_estado(row.get("motivo", ""))
-    tipo_operacion = normalizar_si_no_estado(row.get("tipo_operacion", ""))
-    valores_cancelado = {"cancelado", "cancelada", "cerrado", "cerrada", "finalizado", "finalizada", "si", "sí", "yes", "y", "true", "1"}
-    return estado in valores_cancelado or cancelado in valores_cancelado or motivo in {"cancelado", "cancelada"} or tipo_operacion in {"cancelado", "cancelada"}
-
-
-def es_reinversion_row(row) -> bool:
-    """Detecta filas que son reinversiones.
-
-    Regla de negocio:
-    - Para extractos NO se devenga esta fila directamente.
-      El extracto debe enseñar la operación matriz.
-    - Para capital activo, inversiones activas, beneficio actual y futuro SÍ
-      puede contar como capital vivo si está activa por fechas.
-    """
-    campos = [
-        row.get("tipo_operacion", ""),
-        row.get("capital_nuevo_real", ""),
-        row.get("motivo", ""),
-    ]
-    texto = " ".join(normalizar_si_no_estado(x) for x in campos)
-    return "reinversion" in texto or "reinversión" in texto
-
-
-def inversiones_vivas_por_fecha(df_base: pd.DataFrame, fecha, incluir_canceladas_hasta_fin: bool = True) -> pd.DataFrame:
-    """Filtra inversiones vivas en una fecha concreta.
-
-    Una inversión con fecha_final_inversion anterior a la fecha consultada deja
-    de contar. Esto cubre tanto calls como cancelaciones manuales.
-    """
-    if df_base is None or df_base.empty:
-        return pd.DataFrame()
-    fecha = pd.Timestamp(fecha).normalize()
-    trabajo = df_base.copy()
-    if "fecha_inversion" not in trabajo.columns:
-        return pd.DataFrame()
-    if "fecha_final_inversion" not in trabajo.columns:
-        trabajo["fecha_final_inversion"] = pd.NaT
-    return trabajo[
-        (trabajo["fecha_inversion"].notna())
-        & (trabajo["fecha_inversion"] <= fecha)
-        & (
-            trabajo["fecha_final_inversion"].isna()
-            | (trabajo["fecha_final_inversion"] >= fecha)
-        )
-    ].copy()
-
-
-def es_fila_extracto_devengable(row) -> bool:
-    """Devuelve True si la fila debe generar intereses en extractos.
-
-    Las reinversiones se excluyen del extracto para evitar duplicidad y porque
-    el movimiento que debe aparecer es la operación matriz.
-    """
-    return not es_reinversion_row(row)
-
-
 def es_chaparro_fernandez_row(row) -> bool:
     """Detecta SOLO las inversiones internas de la sociedad Chaparro Fernández.
 
@@ -382,13 +301,7 @@ def cargar_excel_completo():
     if "unnamed: 6" in inv.columns and "cuenta_cobro" not in inv.columns:
         inv = inv.rename(columns={"unnamed: 6": "cuenta_cobro"})
 
-    # Columnas de control manual. Si no existen en el Excel, se crean para
-    # que aparezcan en Gestión de Excel y puedas marcar CANCELADO / REINVERSIÓN.
-    for col in ["estado_operacion", "cancelado", "id_operacion_matriz"]:
-        if col not in inv.columns:
-            inv[col] = ""
-
-    for col in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "metodo_calculo", "activo_generador_interes", "tipo_operacion", "capital_nuevo_real", "cuenta_cobro", "motivo", "estado_operacion", "cancelado", "id_operacion_matriz"]:
+    for col in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "metodo_calculo", "activo_generador_interes", "tipo_operacion", "capital_nuevo_real", "cuenta_cobro", "motivo"]:
         if col in inv.columns:
             inv[col] = inv[col].fillna("").astype(str).str.strip()
 
@@ -504,7 +417,7 @@ def capital_activo_en_fecha(df_base: pd.DataFrame, fecha_consulta, activo: Optio
         trabajo = filtrar_activo(trabajo, activo)
     if solo_real and "capital_nuevo_real" in trabajo.columns:
         trabajo = trabajo[trabajo["capital_nuevo_real"].astype(str).str.lower() == "si"].copy()
-    filtrado = inversiones_vivas_por_fecha(trabajo, fecha_consulta)
+    filtrado = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha_consulta) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_consulta))]
     return float(filtrado["capital_invertido"].sum()) if not filtrado.empty else 0.0
 
 
@@ -588,8 +501,7 @@ def filtrar_notas(df_base: pd.DataFrame) -> pd.DataFrame:
 def inversiones_activas_para_nota(df_base: pd.DataFrame, nota: int, fecha_pago) -> pd.DataFrame:
     fecha_pago = pd.Timestamp(fecha_pago).normalize()
     trabajo = filtrar_notas(df_base)
-    trabajo = trabajo[trabajo["nota_num"] == nota].copy()
-    return inversiones_vivas_por_fecha(trabajo, fecha_pago)
+    return trabajo[(trabajo["nota_num"] == nota) & (trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha_pago) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_pago))].copy()
 
 
 def pagos_notas_mes(df_cal: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
@@ -909,7 +821,7 @@ def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame
         fecha = pd.Timestamp.today().normalize()
     fecha = pd.Timestamp(fecha).normalize()
     trabajo = excluir_call(df_inv)
-    return inversiones_vivas_por_fecha(trabajo, fecha)
+    return trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))].copy()
 
 
 def tarjeta_kpi(titulo, valor, subtitulo="", estado="normal"):
@@ -939,11 +851,6 @@ def validar_base_datos(df_inv, df_cal, df_control):
     add("Eventos de calendario sin fecha", df_cal["fecha"].isna().sum() if "fecha" in df_cal.columns else 0, "MEDIA")
     add("Control de notas sin ticker", (df_control["ticker"].fillna("").astype(str).str.strip() == "").sum() if "ticker" in df_control.columns else 0, "ALTA")
     add("Control de notas sin precio de compra", df_control["precio_compra"].isna().sum() if "precio_compra" in df_control.columns else 0, "ALTA")
-    try:
-        canceladas_sin_fin = df_inv.apply(es_cancelada_row, axis=1) & df_inv["fecha_final_inversion"].isna()
-        add("Inversiones marcadas como canceladas sin fecha final", canceladas_sin_fin.sum(), "ALTA")
-    except Exception:
-        pass
     return pd.DataFrame(resultados)
 
 
@@ -1535,7 +1442,11 @@ def construir_desglose_notas_por_tipo_inversor(df_inv: pd.DataFrame, detalle_not
             "margen_beneficio_mes", "margen_beneficio_anualizado",
         ])
 
-    notas_activas = inversiones_vivas_por_fecha(notas, fecha_analisis)
+    notas_activas = notas[
+        (notas["fecha_inversion"].notna())
+        & (notas["fecha_inversion"] <= fecha_analisis)
+        & (notas["fecha_final_inversion"].isna() | (notas["fecha_final_inversion"] >= fecha_analisis))
+    ].copy()
 
     if not notas_activas.empty:
         notas_activas["interes_inversor_anual"] = pd.to_numeric(notas_activas["interes_inversor_anual"], errors="coerce").fillna(0)
@@ -2393,15 +2304,14 @@ def seccion_notas():
             mostrar_metricas("Resultado", [("Capital total invertido", fmt(filtrar_notas(df_inv)["capital_invertido"].sum()))])
         elif consulta == "¿Cuánto capital hay actualmente activo?":
             trabajo = filtrar_notas(df_inv); hoy = pd.Timestamp.today().normalize()
-            activas = inversiones_vivas_por_fecha(trabajo, hoy)
+            activas = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= hoy) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))]
             mostrar_metricas("Resultado", [("Capital activo hoy", fmt(activas["capital_invertido"].sum() if not activas.empty else 0))])
         elif consulta == "¿Cuánto capital tiene un inversor?":
             trabajo = filtrar_notas(df_inv); filtrado = trabajo[trabajo["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()]
             mostrar_metricas("Resultado", [(f"Capital total de {nombre_inversor}", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
         elif consulta == "¿Cuánto capital activo tiene un inversor?":
             trabajo = filtrar_notas(df_inv); hoy = pd.Timestamp.today().normalize()
-            activas = inversiones_vivas_por_fecha(trabajo, hoy)
-            filtrado = activas[activas["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()]
+            filtrado = trabajo[(trabajo["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()) & (trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= hoy) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= hoy))]
             mostrar_metricas("Resultado", [(f"Capital activo de {nombre_inversor}", fmt(filtrado["capital_invertido"].sum() if not filtrado.empty else 0))])
         elif consulta == "Ver ranking de capital por inversor":
             st.dataframe(preparar_tabla_monetaria(resumen_capital_por_inversor_notas(df_inv, False), ["capital"]), use_container_width=True)
@@ -2936,61 +2846,58 @@ def formatear_extracto_excel_bytes(contenido: bytes, inversor: str, fecha_corte:
 
 
 def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int):
+    """Genera extractos para inversores.
+
+    REGLA DEFINITIVA PARA EXTRACTOS:
+    - SOLO se tienen en cuenta las filas cuya columna tipo_operacion sea exactamente NUEVA.
+    - NO se tienen en cuenta reinversiones, canceladas, vacías ni cualquier otro valor.
+    - Las reinversiones no modifican el extracto del inversor: el inversor cobra según su operación matriz NUEVA.
+    """
     df = df_inv.copy()
-    for col in ["estado_operacion", "cancelado", "id_operacion_matriz"]:
-        if col not in df.columns:
-            df[col] = ""
-    for col in ["inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "tipo_operacion", "capital_nuevo_real", "estado_operacion", "cancelado", "id_operacion_matriz", "motivo"]:
+
+    # Normalizamos columnas de texto necesarias.
+    for col in [
+        "inversor",
+        "tipo_inversion",
+        "subtipo_inversion",
+        "nombre_activo",
+        "tipo_operacion",
+        "capital_nuevo_real",
+        "motivo",
+        "id_inversion",
+    ]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
 
-    # REGLA DEFINITIVA DE EXTRACTOS:
-    # El extracto del inversor NO debe reconstruirse con reinversiones internas.
-    # Si el inversor puso 25.000 en septiembre, se le paga sobre esa operación matriz
-    # todos los meses, aunque internamente el dinero se haya reinvertido en enero.
-    # Por tanto, para EXTRACTOS solo se usan operaciones originales / capital nuevo real.
-    # Se excluyen filas marcadas como reinversion y filas marcadas como cancelado/call.
+    # ==========================================
+    # FILTRO PRINCIPAL DE EXTRACTOS
+    # ==========================================
+    # Según la regla definida: para extractos SOLO cuenta columna O / tipo_operacion = NUEVA.
+    # Todo lo demás queda fuera: reinversion, cancelada, call, vacío, etc.
+    if "tipo_operacion" not in df.columns:
+        st.error("Falta la columna tipo_operacion en la hoja INVERSIONES. Para generar extractos debe existir y contener 'NUEVA'.")
+        return []
+
+    df["tipo_operacion_normalizada"] = df["tipo_operacion"].astype(str).str.strip().str.upper()
+    df = df[df["tipo_operacion_normalizada"] == "NUEVA"].copy()
+
+    if df.empty:
+        return []
+
+    # Si se solicita un inversor concreto, filtramos después de quedarnos solo con operaciones NUEVA.
     if modo == "Un inversor" and inversor_elegido:
         df = df[df["inversor"].str.upper() == inversor_elegido.upper()].copy()
 
-    def usar_en_extracto(row) -> bool:
-        tipo_operacion = normalizar_si_no_estado(row.get("tipo_operacion", ""))
-        motivo = normalizar_si_no_estado(row.get("motivo", ""))
-        estado = normalizar_si_no_estado(row.get("estado_operacion", ""))
-        cancelado = normalizar_si_no_estado(row.get("cancelado", ""))
-        capital_nuevo_real = normalizar_si_no_estado(row.get("capital_nuevo_real", ""))
-
-        # 1) Nunca se devengan en extractos las reinversiones internas.
-        if es_reinversion_row(row) or tipo_operacion in {"reinversion", "reinversión"}:
-            return False
-
-        # 2) Tampoco se usan filas expresamente marcadas como canceladas/calls.
-        # Esto evita que una fila técnica de cierre entre en el extracto como inversión.
-        valores_no_extracto = {"cancelado", "cancelada", "call", "cerrado", "cerrada", "finalizado", "finalizada"}
-        if motivo in valores_no_extracto or estado in valores_no_extracto or tipo_operacion in valores_no_extracto:
-            return False
-        if cancelado in {"si", "sí", "yes", "y", "true", "1"}:
-            return False
-
-        # 3) Si existe capital_nuevo_real y pone NO, normalmente es fila técnica/reinversión.
-        # Solo se devenga en extracto lo que sea capital nuevo real o una fila matriz sin marcar.
-        if capital_nuevo_real in {"no", "false", "0"}:
-            return False
-
-        return True
-
-    df_extracto = df[df.apply(usar_en_extracto, axis=1)].copy()
+    if df.empty:
+        return []
 
     fecha_corte = datetime(anio, mes, ultimo_dia_mes(anio, mes))
 
-    # Orden definitivo de extractos:
-    # el DETALLE debe salir por meses naturales, no por inversión.
-    # Primero todas las operaciones de septiembre 2025, luego octubre 2025,
-    # noviembre 2025, etc., hasta la fecha de corte seleccionada.
+    # El DETALLE sale por meses naturales: septiembre 2025, octubre 2025, etc.
     fecha_inicio_extracto = datetime(2025, 9, 1)
 
     filas = []
-    for _, row in df_extracto.iterrows():
+    for _, row in df.iterrows():
         fecha_inicio = row.get("fecha_inversion")
         if pd.isna(fecha_inicio):
             continue
@@ -3004,7 +2911,6 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         if fecha_fin < fecha_inicio_extracto:
             continue
 
-        # Si la inversión empezó antes de septiembre de 2025, el extracto empieza igualmente en septiembre de 2025.
         primer_mes = max(datetime(fecha_inicio_dt.year, fecha_inicio_dt.month, 1), fecha_inicio_extracto)
         actual = primer_mes
         fin_mes = datetime(fecha_fin.year, fecha_fin.month, 1)
@@ -3044,7 +2950,6 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     if resultado.empty:
         return []
 
-    # Orden global: mes ascendente y, dentro de cada mes, operaciones ordenadas de forma estable.
     resultado = resultado.sort_values(
         ["inversor", "mes_fecha", "fecha_inversion_orden", "id_inversion", "nombre_activo"],
         ascending=[True, True, True, True, True],
@@ -3067,12 +2972,9 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         )
         totales_mes = totales_mes[["mes", "total_mes"]]
 
-        # El capital_total del RESUMEN debe representar el capital activo a fecha de corte,
-        # igual que en la app: inversiones con fecha_inversion <= fecha_corte y sin fecha final
-        # o con fecha_final_inversion >= fecha_corte.
-        # No debe calcularse sumando todas las inversiones que han aparecido en algún mes,
-        # porque eso puede incluir inversiones ya cerradas por call y excluir reinversiones vivas.
-        base_inversor = df_extracto[df_extracto["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
+        # Capital total del resumen: también SOLO operaciones NUEVA activas a fecha de corte.
+        # No se suman reinversiones porque no forman parte del extracto del inversor.
+        base_inversor = df[df["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
         base_inversor["fecha_inversion"] = pd.to_datetime(base_inversor["fecha_inversion"], errors="coerce", dayfirst=True)
         base_inversor["fecha_final_inversion"] = pd.to_datetime(base_inversor["fecha_final_inversion"], errors="coerce", dayfirst=True)
         base_inversor["capital_invertido"] = pd.to_numeric(base_inversor["capital_invertido"], errors="coerce").fillna(0)
@@ -3094,7 +2996,6 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
             "total_intereses_acumulados": round(detalle["interes_mes"].sum(), 2),
         }])
 
-        # Quitamos columnas auxiliares antes de exportar para mantener exactamente el mismo formato visible.
         detalle_exportar = detalle.drop(columns=["mes_fecha", "fecha_inversion_orden"], errors="ignore")
 
         salida = BytesIO()
@@ -3105,7 +3006,6 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         nombre_archivo = f"extracto_{str(inversor).upper().replace(' ', '_')}_{fecha_corte.strftime('%d%m%Y')}.xlsx"
         archivos.append((nombre_archivo, formatear_extracto_excel_bytes(salida.getvalue(), str(inversor), fecha_corte)))
     return archivos
-
 
 def seccion_extractos():
     df_inv, _, _ = cargar_excel_completo()
@@ -3266,7 +3166,7 @@ def seccion_gestion_excel():
             st.cache_data.clear()
             st.success("Caché limpiada.")
 
-        st.info("Puedes editar celdas, añadir filas nuevas y después guardar los cambios en el Excel. Para cancelar una inversión: pon estado_operacion = CANCELADO y fecha_final_inversion con la fecha desde la que deja de contar. Para reinversiones: pon tipo_operacion = REINVERSION; contará en capital activo, pero no duplicará el extracto.")
+        st.info("Puedes editar celdas, añadir filas nuevas y después guardar los cambios en el Excel.")
         df_editado = st.data_editor(
             st.session_state[editor_key],
             use_container_width=True,
