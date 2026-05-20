@@ -2900,8 +2900,11 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
             continue
 
         fecha_inicio_dt = pd.Timestamp(fecha_inicio).to_pydatetime()
-        fecha_final_excel = row.get("fecha_final_inversion")
-        fecha_fin = fecha_corte if pd.isna(fecha_final_excel) else min(pd.Timestamp(fecha_final_excel).to_pydatetime(), fecha_corte)
+        # Para extractos, siempre se calcula hasta la fecha de corte.
+        # La fecha_final_inversion no afecta al extracto del inversor: él puso su capital
+        # en una fecha y se le paga el interés acordado hasta el cierre, sin importar
+        # calls, cancelaciones o reinversiones de la nota.
+        fecha_fin = fecha_corte
 
         if fecha_inicio_dt > fecha_fin:
             continue
