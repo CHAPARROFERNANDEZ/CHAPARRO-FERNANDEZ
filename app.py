@@ -18,6 +18,11 @@ try:
 except Exception:
     yf = None
 
+try:
+    import gdown
+except Exception:
+    gdown = None
+
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
@@ -29,6 +34,7 @@ st.set_page_config(
 )
 
 ARCHIVO = "inversiones.xlsx"
+GDRIVE_FILE_ID = "1CImiIbg7kSLrYNpWgzPHEBCmI3KRVlBX"
 HOJA_INVERSIONES = "INVERSIONES"
 HOJA_CALENDARIO = "CALENDARIO_NOTAS"
 HOJA_CONTROL = "CONTROL_NOTAS"
@@ -285,8 +291,25 @@ def aplicar_filtro_chaparro_fernandez(df: pd.DataFrame, incluir_chaparro: bool) 
     return out[~out["es_chaparro_fernandez"]].copy()
 
 
+def descargar_excel_desde_drive():
+    """Descarga el Excel desde Google Drive y lo guarda localmente.
+    Se llama al inicio y desde el botón de refresco en Gestión de Excel.
+    """
+    if gdown is None:
+        st.warning("gdown no está instalado. Añade 'gdown' a requirements.txt.")
+        return False
+    try:
+        url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
+        gdown.download(url, ARCHIVO, quiet=True, fuzzy=True)
+        return True
+    except Exception as e:
+        st.warning(f"No se pudo descargar el Excel desde Google Drive: {e}")
+        return False
+
+
 @st.cache_data(show_spinner=False)
 def cargar_excel_completo():
+    descargar_excel_desde_drive()
     inv = pd.read_excel(ARCHIVO, sheet_name=HOJA_INVERSIONES)
     cal = pd.read_excel(ARCHIVO, sheet_name=HOJA_CALENDARIO)
     try:
@@ -3127,8 +3150,24 @@ def seccion_gestion_excel():
     tab_subir, tab_editar, tab_descargar = st.tabs(["Subir Excel", "Editar y calcular", "Descargar copia"])
 
     with tab_subir:
-        st.subheader("Subir o reemplazar inversiones.xlsx")
-        st.warning("En Streamlit Cloud los cambios guardados pueden ser temporales. Para dejarlos permanentes, descarga el Excel actualizado y súbelo también a GitHub.")
+        st.subheader("Recargar Excel desde Google Drive")
+        st.info(
+            "El Excel se lee automáticamente desde Google Drive cada vez que la app arranca. "
+            "Si has actualizado el archivo en Drive, pulsa el botón para forzar la recarga ahora."
+        )
+        if st.button("🔄 Recargar Excel desde Google Drive", type="primary"):
+            st.cache_data.clear()
+            for k in list(st.session_state.keys()):
+                if str(k).startswith("excel_editor_"):
+                    del st.session_state[k]
+            ok = descargar_excel_desde_drive()
+            if ok:
+                st.success("Excel recargado correctamente desde Google Drive.")
+            st.rerun()
+
+        st.markdown("---")
+        st.subheader("O sube un Excel manualmente")
+        st.caption("Si prefieres subir el archivo directamente desde tu ordenador, actualízalo también en Google Drive para que los cambios sean permanentes.")
         archivo_subido = st.file_uploader("Sube el archivo actualizado", type=["xlsx"])
         if archivo_subido is not None:
             nombre = archivo_subido.name.strip()
@@ -3141,7 +3180,7 @@ def seccion_gestion_excel():
                 for k in list(st.session_state.keys()):
                     if str(k).startswith("excel_editor_"):
                         del st.session_state[k]
-                st.success("Excel actualizado correctamente dentro de la app.")
+                st.success("Excel actualizado. Recuerda actualizarlo también en Google Drive para que sea permanente.")
                 st.rerun()
 
     with tab_editar:
