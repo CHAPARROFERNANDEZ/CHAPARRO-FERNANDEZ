@@ -300,7 +300,7 @@ def descargar_excel_desde_drive():
         return False
     try:
         url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
-        gdown.download(url, ARCHIVO, quiet=True, fuzzy=True)
+        gdown.download(url, ARCHIVO, quiet=True)
         return True
     except Exception as e:
         st.warning(f"No se pudo descargar el Excel desde Google Drive: {e}")
