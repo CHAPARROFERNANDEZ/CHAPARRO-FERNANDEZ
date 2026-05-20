@@ -307,7 +307,6 @@ def descargar_excel_desde_drive():
 
 @st.cache_data(show_spinner=False)
 def cargar_excel_completo():
-    descargar_excel_desde_drive()
     inv = pd.read_excel(ARCHIVO, sheet_name=HOJA_INVERSIONES)
     cal = pd.read_excel(ARCHIVO, sheet_name=HOJA_CALENDARIO)
     try:
@@ -3273,6 +3272,12 @@ def seccion_gestion_excel():
 # APP FINAL
 # =========================
 mostrar_hero(st.session_state.usuario)
+
+# Descarga el Excel desde Google Drive una vez por sesión
+if "excel_descargado" not in st.session_state:
+    with st.spinner("Cargando datos desde Google Drive..."):
+        descargar_excel_desde_drive()
+    st.session_state["excel_descargado"] = True
 
 try:
     df_inv, df_cal, df_control = cargar_excel_completo()
