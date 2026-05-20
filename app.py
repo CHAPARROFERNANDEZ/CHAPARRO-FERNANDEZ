@@ -2851,7 +2851,8 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     REGLA DEFINITIVA PARA EXTRACTOS:
     - SOLO se tienen en cuenta las filas cuya columna tipo_operacion sea exactamente NUEVA.
     - NO se tienen en cuenta reinversiones, canceladas, vacías ni cualquier otro valor.
-    - Las reinversiones no modifican el extracto del inversor: el inversor cobra según su operación matriz NUEVA.
+    - El extracto empieza desde la fecha de inversión más antigua de cada operación NUEVA,
+      sin ninguna fecha de inicio fija hardcodeada.
     """
     df = df_inv.copy()
 
@@ -2872,8 +2873,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     # ==========================================
     # FILTRO PRINCIPAL DE EXTRACTOS
     # ==========================================
-    # Según la regla definida: para extractos SOLO cuenta columna O / tipo_operacion = NUEVA.
-    # Todo lo demás queda fuera: reinversion, cancelada, call, vacío, etc.
+    # SOLO tipo_operacion = NUEVA. Reinversiones, canceladas y cualquier otro valor quedan fuera.
     if "tipo_operacion" not in df.columns:
         st.error("Falta la columna tipo_operacion en la hoja INVERSIONES. Para generar extractos debe existir y contener 'NUEVA'.")
         return []
@@ -2884,7 +2884,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     if df.empty:
         return []
 
-    # Si se solicita un inversor concreto, filtramos después de quedarnos solo con operaciones NUEVA.
+    # Si se solicita un inversor concreto, filtramos tras quedarnos solo con NUEVA.
     if modo == "Un inversor" and inversor_elegido:
         df = df[df["inversor"].str.upper() == inversor_elegido.upper()].copy()
 
@@ -2892,9 +2892,6 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         return []
 
     fecha_corte = datetime(anio, mes, ultimo_dia_mes(anio, mes))
-
-    # El DETALLE sale por meses naturales: septiembre 2025, octubre 2025, etc.
-    fecha_inicio_extracto = datetime(2025, 9, 1)
 
     filas = []
     for _, row in df.iterrows():
@@ -2908,18 +2905,16 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
 
         if fecha_inicio_dt > fecha_fin:
             continue
-        if fecha_fin < fecha_inicio_extracto:
-            continue
 
-        primer_mes = max(datetime(fecha_inicio_dt.year, fecha_inicio_dt.month, 1), fecha_inicio_extracto)
-        actual = primer_mes
-        fin_mes = datetime(fecha_fin.year, fecha_fin.month, 1)
+        # Empezamos desde el primer día del mes de la inversión, sin fecha mínima fija.
+        actual = datetime(fecha_inicio_dt.year, fecha_inicio_dt.month, 1)
+        fin_mes_loop = datetime(fecha_fin.year, fecha_fin.month, 1)
 
-        while actual <= fin_mes:
+        while actual <= fin_mes_loop:
             dias_mes = calendar.monthrange(actual.year, actual.month)[1]
             inicio_mes = datetime(actual.year, actual.month, 1)
             fin_mes_real = datetime(actual.year, actual.month, dias_mes)
-            inicio_calc = max(fecha_inicio_dt, inicio_mes, fecha_inicio_extracto)
+            inicio_calc = max(fecha_inicio_dt, inicio_mes)
             fin_calc = min(fecha_fin, fin_mes_real)
 
             if inicio_calc <= fin_calc:
@@ -2972,8 +2967,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         )
         totales_mes = totales_mes[["mes", "total_mes"]]
 
-        # Capital total del resumen: también SOLO operaciones NUEVA activas a fecha de corte.
-        # No se suman reinversiones porque no forman parte del extracto del inversor.
+        # Capital total del resumen: SOLO operaciones NUEVA activas a fecha de corte.
         base_inversor = df[df["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
         base_inversor["fecha_inversion"] = pd.to_datetime(base_inversor["fecha_inversion"], errors="coerce", dayfirst=True)
         base_inversor["fecha_final_inversion"] = pd.to_datetime(base_inversor["fecha_final_inversion"], errors="coerce", dayfirst=True)
