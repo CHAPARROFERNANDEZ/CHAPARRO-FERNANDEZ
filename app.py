@@ -3026,8 +3026,8 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
                   "Fecha inversión", "Capital ($)", "Días devengados", "Días mes", "Interés mes ($)"]
     for i, w in enumerate(col_widths[:len(col_names)], 1):
         ws_d.column_dimensions[get_column_letter(i)].width = w
-    # Ocultar columnas B, C, D, H, I (2, 3, 4, 8, 9)
-    for col_oculta in [2, 3, 4, 8, 9]:
+    # Ocultar columnas A, B, C, D, H, I (1, 2, 3, 4, 8, 9)
+    for col_oculta in [1, 2, 3, 4, 8, 9]:
         ws_d.column_dimensions[get_column_letter(col_oculta)].hidden = True
 
     # Título
