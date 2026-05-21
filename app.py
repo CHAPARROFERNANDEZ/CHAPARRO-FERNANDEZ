@@ -3176,8 +3176,20 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
                 pass
             fila_excel += 1
 
-        # Capital del mes = suma de capitales distintos ese mes
-        capital_mes_real = sum(float(r.get("capital_invertido", 0) or 0) for r in rows_mes)
+        # Capital activo al cierre del mes = solo operaciones vivas el último día del mes
+        # Una operación está viva al cierre si su fecha_fin_op >= último día del mes
+        import calendar as _cal
+        ultimo_dia = _cal.monthrange(anio_mk, mes_mk)[1]
+        fin_mes_dt = datetime(anio_mk, mes_mk, ultimo_dia)
+        capital_mes_real = 0.0
+        for r in rows_mes:
+            fecha_fin_op_str = r.get("fecha_fin_op", "")
+            try:
+                ffo = datetime.strptime(fecha_fin_op_str, "%d/%m/%Y")
+                if ffo >= fin_mes_dt:
+                    capital_mes_real += float(r.get("capital_invertido", 0) or 0)
+            except Exception:
+                capital_mes_real += float(r.get("capital_invertido", 0) or 0)
         intereses_mes_real = sum(float(r.get("interes_mes", 0) or 0) for r in rows_mes)
 
         # CIERRE MENSUAL
@@ -3488,6 +3500,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
                     "dias_devengados": dias,
                     "dias_mes": dias_mes,
                     "interes_mes": interes_mes,
+                    "fecha_fin_op": fecha_fin.strftime("%d/%m/%Y"),
                 })
 
             actual = datetime(actual.year + 1, 1, 1) if actual.month == 12 else datetime(actual.year, actual.month + 1, 1)
