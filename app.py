@@ -3539,14 +3539,16 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         )
         totales_mes = totales_mes[["mes", "total_mes"]]
 
-        # Capital total: solo NUEVA activas a fecha de corte (sin fecha_final o con fecha_final futura)
-        base_inversor = df[df["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
+        # Capital total activo: NUEVA + REINVERSION activas a fecha de corte
+        # Las reinversiones son capital real del inversor aunque no generen intereses propios en el extracto
+        base_inversor = df_inv[df_inv["inversor"].astype(str).str.upper() == str(inversor).upper()].copy()
+        base_inversor["tipo_op_norm"] = base_inversor["tipo_operacion"].astype(str).str.strip().str.upper()
         base_inversor["fecha_inversion"] = pd.to_datetime(base_inversor["fecha_inversion"], errors="coerce", dayfirst=True)
         base_inversor["fecha_final_inversion"] = pd.to_datetime(base_inversor["fecha_final_inversion"], errors="coerce", dayfirst=True)
         base_inversor["capital_invertido"] = pd.to_numeric(base_inversor["capital_invertido"], errors="coerce").fillna(0)
         fecha_corte_ts = pd.Timestamp(fecha_corte).normalize()
         activas_corte = base_inversor[
-            (base_inversor["tipo_operacion_normalizada"] == "NUEVA")
+            (base_inversor["tipo_op_norm"].isin(["NUEVA", "REINVERSION"]))
             & (base_inversor["fecha_inversion"].notna())
             & (base_inversor["fecha_inversion"] <= fecha_corte_ts)
             & (
