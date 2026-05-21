@@ -2887,18 +2887,8 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     from openpyxl import load_workbook as lw
     wb_orig = lw(bio)
 
-    # Leer RESUMEN
-    ws_res_orig = wb_orig["RESUMEN"] if "RESUMEN" in wb_orig.sheetnames else None
     capital_total = 0.0
     total_intereses = 0.0
-    if ws_res_orig:
-        for row in ws_res_orig.iter_rows(min_row=2, values_only=True):
-            if row and len(row) >= 4 and row[2] is not None:
-                try:
-                    capital_total = float(row[2])
-                    total_intereses = float(row[3])
-                except Exception:
-                    pass
 
     # Leer DETALLE
     ws_det_orig = wb_orig["DETALLE"] if "DETALLE" in wb_orig.sheetnames else None
@@ -2927,91 +2917,36 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
             return (9999, 99)
     tot_rows.sort(key=mes_sort_key)
 
+    # Calcular capital activo = operaciones vivas el último día del mes de corte (fecha_corte)
+    # Solo NUEVA sin fecha_final o con fecha_final >= fecha_corte
+    # Es el mismo criterio que el cierre del último mes
+    import calendar as _cal2
+    ultimo_dia_corte = _cal2.monthrange(fecha_corte.year, fecha_corte.month)[1]
+    fin_corte = datetime(fecha_corte.year, fecha_corte.month, ultimo_dia_corte)
+    capital_total = 0.0
+    total_intereses = 0.0
+    for row in det_rows:
+        ffop_str = str(row.get("fecha_fin_op", "") or "")
+        cap = float(row.get("capital_invertido", 0) or 0)
+        mes_str = str(row.get("mes", "") or "")
+        # Solo contar filas del mes de corte (mayo 2026)
+        mes_corte_str = f"{fecha_corte.month:02d}/{fecha_corte.year}"
+        if mes_str != mes_corte_str:
+            continue
+        if not ffop_str or ffop_str in ("", "None", "nan"):
+            capital_total += cap
+        else:
+            try:
+                ffo = datetime.strptime(ffop_str, "%d/%m/%Y")
+                if ffo >= fin_corte:
+                    capital_total += cap
+            except Exception:
+                capital_total += cap
+    total_intereses = sum(float(r.get("interes_mes", 0) or 0) for r in det_rows)
+
     # ── Crear workbook nuevo ──────────────────────────────────────────
     wb = Workbook()
     wb.remove(wb.active)
-
-    # ═══════════════════════════════════════════════════════════════
-    # HOJA 1: PORTADA
-    # ═══════════════════════════════════════════════════════════════
-    ws_p = wb.create_sheet("PORTADA")
-    ws_p.sheet_view.showGridLines = False
-    ws_p.sheet_view.showRowColHeaders = False
-
-    for col in range(1, 6):
-        ws_p.column_dimensions[get_column_letter(col)].width = 22
-    for r in range(1, 40):
-        ws_p.row_dimensions[r].height = 30
-
-    # Banda superior
-    for r in range(1, 5):
-        for c in range(1, 6):
-            ws_p.cell(row=r, column=c).fill = fill(C_AZUL_OSC)
-
-    ws_p.merge_cells("A1:E4")
-    t = ws_p["A1"]
-    t.value = "EXTRACTO DE INVERSIÓN"
-    t.font = Font(name="Calibri", size=28, bold=True, color=C_BLANCO)
-    t.alignment = aln(h="center", v="center")
-
-    # Línea decorativa
-    for c in range(1, 6):
-        ws_p.cell(row=5, column=c).fill = fill("2E86C1")
-    ws_p.row_dimensions[5].height = 6
-
-    # Datos inversor
-    ws_p.row_dimensions[7].height = 30
-    ws_p.merge_cells("A7:E7")
-    inv_cell = ws_p["A7"]
-    inv_cell.value = inversor.upper()
-    inv_cell.font = Font(name="Calibri", size=22, bold=True, color=C_AZUL_OSC)
-    inv_cell.alignment = aln(h="center", v="center")
-
-    ws_p.row_dimensions[8].height = 18
-    ws_p.merge_cells("A8:E8")
-    fecha_cell = ws_p["A8"]
-    fecha_cell.value = f"Fecha de corte: {fecha_corte.strftime('%d/%m/%Y')}"
-    fecha_cell.font = Font(name="Calibri", size=13, italic=True, color="555555")
-    fecha_cell.alignment = aln(h="center")
-
-    # Separador
-    ws_p.row_dimensions[10].height = 4
-    for c in range(1, 6):
-        ws_p.cell(row=10, column=c).fill = fill(C_AZUL_CLARO)
-
-    # Tarjetas resumen
-    def tarjeta(ws, fila, col, titulo, valor, fmt_val, color_fondo, color_titulo):
-        ws.row_dimensions[fila].height = 28
-        ws.row_dimensions[fila+1].height = 36
-        ws.row_dimensions[fila+2].height = 10
-        ws.merge_cells(start_row=fila, start_column=col, end_row=fila, end_column=col+1)
-        c1 = ws.cell(row=fila, column=col, value=titulo)
-        c1.font = Font(name="Calibri", size=10, bold=True, color=color_titulo)
-        c1.fill = fill(color_fondo)
-        c1.alignment = aln(h="center", v="center")
-        c1.border = borde_std
-        ws.merge_cells(start_row=fila+1, start_column=col, end_row=fila+1, end_column=col+1)
-        c2 = ws.cell(row=fila+1, column=col, value=valor)
-        c2.font = Font(name="Calibri", size=18, bold=True, color=C_AZUL_OSC)
-        c2.fill = fill(C_BLANCO)
-        c2.alignment = aln(h="center", v="center")
-        c2.number_format = fmt_val
-        c2.border = borde_std
-
-    tarjeta(ws_p, 12, 1, "CAPITAL INVERTIDO ACTIVO", capital_total, fmt_usd, C_AZUL_CLARO, C_AZUL_MED)
-    tarjeta(ws_p, 12, 3, "TOTAL INTERESES ACUMULADOS", total_intereses, fmt_usd, C_VERDE, C_VERDE_OSC)
-    tarjeta(ws_p, 17, 2, "TOTAL ACUMULADO (Capital + Intereses)", capital_total + total_intereses, fmt_usd, C_DORADO, C_DORADO_OSC)
-
-    # Nota pie
-    ws_p.row_dimensions[28].height = 20
-    ws_p.merge_cells("A28:E28")
-    n = ws_p["A28"]
-    n.value = "Documento confidencial — Chaparro Fernández Wealth Management"
-    n.font = Font(name="Calibri", size=9, italic=True, color="999999")
-    n.alignment = aln(h="center")
-    for c in range(1, 6):
-        ws_p.cell(row=29, column=c).fill = fill(C_AZUL_OSC)
-    ws_p.row_dimensions[29].height = 6
 
     # ═══════════════════════════════════════════════════════════════
     # HOJA 2: DETALLE con cierres mensuales, anuales y final
@@ -3398,9 +3333,6 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     ct3.alignment = aln(h="right")
     ct3.border = borde_top
 
-    # Orden de hojas
-    wb.move_sheet("PORTADA", offset=0)
-
     out = BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -3558,19 +3490,11 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         ].copy()
         capital_total = float(activas_corte["capital_invertido"].sum()) if not activas_corte.empty else 0.0
 
-        resumen = pd.DataFrame([{
-            "inversor": inversor,
-            "fecha_corte": fecha_corte.strftime("%d/%m/%Y"),
-            "capital_total": round(capital_total, 2),
-            "total_intereses_acumulados": round(detalle["interes_mes"].sum(), 2),
-        }])
-
         detalle_exportar = detalle.drop(columns=["mes_fecha", "fecha_inversion_orden"], errors="ignore")
         # fecha_fin_op se mantiene en el Excel (col 11) para calcular capital activo al cierre mensual
 
         salida = BytesIO()
         with pd.ExcelWriter(salida, engine="openpyxl") as writer:
-            resumen.to_excel(writer, sheet_name="RESUMEN", index=False)
             totales_mes.to_excel(writer, sheet_name="TOTALES_MES", index=False)
             detalle_exportar.to_excel(writer, sheet_name="DETALLE", index=False)
         nombre_archivo = f"extracto_{str(inversor).upper().replace(' ', '_')}_{fecha_corte.strftime('%d%m%Y')}.xlsx"
