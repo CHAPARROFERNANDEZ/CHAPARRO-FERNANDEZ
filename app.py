@@ -3026,8 +3026,9 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
                   "Fecha inversión", "Capital ($)", "Días devengados", "Días mes", "Interés mes ($)"]
     for i, w in enumerate(col_widths[:len(col_names)], 1):
         ws_d.column_dimensions[get_column_letter(i)].width = w
-    # Ocultar columnas A, B, C, D, H, I (1, 2, 3, 4, 8, 9)
-    for col_oculta in [1, 2, 3, 4, 8, 9]:
+    # Ocultar columnas A, B, C, D, H, I, K (1, 2, 3, 4, 8, 9, 11)
+    # La columna 11 (fecha_fin_op) se usa internamente para calcular capital activo al cierre
+    for col_oculta in [1, 2, 3, 4, 8, 9, 11]:
         ws_d.column_dimensions[get_column_letter(col_oculta)].hidden = True
 
     # Título
@@ -3063,7 +3064,8 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     col_map = {
         "id_inversion": 1, "tipo_inversion": 2, "subtipo_inversion": 3,
         "nombre_activo": 4, "mes": 5, "fecha_inversion": 6,
-        "capital_invertido": 7, "dias_devengados": 8, "dias_mes": 9, "interes_mes": 10
+        "capital_invertido": 7, "dias_devengados": 8, "dias_mes": 9, "interes_mes": 10,
+        "fecha_fin_op": 11
     }
 
     def mes_key_from_str(mes_str):
@@ -3177,19 +3179,25 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
             fila_excel += 1
 
         # Capital activo al cierre del mes = solo operaciones vivas el último día del mes
-        # Una operación está viva al cierre si su fecha_fin_op >= último día del mes
+        # Una operación está viva si su fecha_fin_op >= último día del mes
         import calendar as _cal
         ultimo_dia = _cal.monthrange(anio_mk, mes_mk)[1]
         fin_mes_dt = datetime(anio_mk, mes_mk, ultimo_dia)
         capital_mes_real = 0.0
         for r in rows_mes:
-            fecha_fin_op_str = r.get("fecha_fin_op", "")
-            try:
-                ffo = datetime.strptime(fecha_fin_op_str, "%d/%m/%Y")
-                if ffo >= fin_mes_dt:
-                    capital_mes_real += float(r.get("capital_invertido", 0) or 0)
-            except Exception:
-                capital_mes_real += float(r.get("capital_invertido", 0) or 0)
+            fecha_fin_op_str = str(r.get("fecha_fin_op", "") or "")
+            capital_row = float(r.get("capital_invertido", 0) or 0)
+            if not fecha_fin_op_str or fecha_fin_op_str in ("", "None", "nan"):
+                # Sin fecha fin → siempre activa
+                capital_mes_real += capital_row
+            else:
+                try:
+                    ffo = datetime.strptime(fecha_fin_op_str, "%d/%m/%Y")
+                    if ffo >= fin_mes_dt:
+                        capital_mes_real += capital_row
+                    # Si ffo < fin_mes_dt → cancelada dentro del mes → no suma al capital
+                except Exception:
+                    capital_mes_real += capital_row
         intereses_mes_real = sum(float(r.get("interes_mes", 0) or 0) for r in rows_mes)
 
         # CIERRE MENSUAL
@@ -3556,6 +3564,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         }])
 
         detalle_exportar = detalle.drop(columns=["mes_fecha", "fecha_inversion_orden"], errors="ignore")
+        # fecha_fin_op se mantiene en el Excel (col 11) para calcular capital activo al cierre mensual
 
         salida = BytesIO()
         with pd.ExcelWriter(salida, engine="openpyxl") as writer:
