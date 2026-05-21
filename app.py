@@ -2826,43 +2826,561 @@ def seccion_sistema_fondo():
 # =========================
 # EXTRACTOS
 # =========================
-def formatear_extracto_excel_bytes(contenido: bytes, inversor: str, fecha_corte: datetime) -> bytes:
-    bio = BytesIO(contenido)
-    wb = load_workbook(bio)
-    azul = "1F4E78"; azul_claro = "D9EAF7"; verde = "E2F0D9"; blanco = "FFFFFF"
-    borde_fino = Side(style="thin", color="D9D9D9")
-    borde = Border(left=borde_fino, right=borde_fino, top=borde_fino, bottom=borde_fino)
-    for ws in wb.worksheets:
-        ws.sheet_view.showGridLines = False
-        for row in ws.iter_rows():
-            for cell in row:
-                cell.font = Font(name="Calibri", size=11)
-                cell.alignment = Alignment(vertical="center")
-                cell.border = borde
-        for col in range(1, ws.max_column + 1):
-            ws.column_dimensions[get_column_letter(col)].width = 18
-        for row_num in range(1, ws.max_row + 1):
-            ws.row_dimensions[row_num].height = 22
-    if "RESUMEN" in wb.sheetnames:
-        ws = wb["RESUMEN"]
-        ws.insert_rows(1, 5)
-        ws["A1"] = "EXTRACTO DE INVERSIÓN"; ws["A1"].font = Font(name="Calibri", size=20, bold=True, color=blanco); ws["A1"].fill = PatternFill("solid", fgColor=azul); ws["A1"].alignment = Alignment(horizontal="center")
-        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(4, ws.max_column))
-        ws["A3"] = "Inversor"; ws["B3"] = inversor; ws["A4"] = "Fecha de corte"; ws["B4"] = fecha_corte.strftime("%d/%m/%Y")
-        for cell in ["A3", "A4"]:
-            ws[cell].font = Font(bold=True); ws[cell].fill = PatternFill("solid", fgColor=azul_claro)
-        header_row = 6
-        for cell in ws[header_row]:
-            cell.font = Font(bold=True, color=blanco); cell.fill = PatternFill("solid", fgColor=azul); cell.alignment = Alignment(horizontal="center")
-    if "TOTALES_MES" in wb.sheetnames:
-        ws = wb["TOTALES_MES"]
-        ws.insert_rows(1, 3); ws["A1"] = "RESUMEN MENSUAL"; ws["A1"].font = Font(size=18, bold=True, color=blanco); ws["A1"].fill = PatternFill("solid", fgColor=azul); ws["A1"].alignment = Alignment(horizontal="center")
-        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(2, ws.max_column))
-    if "DETALLE" in wb.sheetnames:
-        ws = wb["DETALLE"]
-        ws.insert_rows(1, 3); ws["A1"] = "DETALLE DEL EXTRACTO"; ws["A1"].font = Font(size=18, bold=True, color=blanco); ws["A1"].fill = PatternFill("solid", fgColor=azul); ws["A1"].alignment = Alignment(horizontal="center")
-        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ws.max_column)
-    out = BytesIO(); wb.save(out); return out.getvalue()
+def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_corte: datetime, detalle_df: "pd.DataFrame | None" = None) -> bytes:
+    """
+    Genera el extracto Excel profesional con:
+    - Hoja PORTADA con resumen ejecutivo
+    - Hoja DETALLE con filas de operación, cierres mensuales, anuales y cierre final
+    - Hoja RESUMEN_MENSUAL con tabla de totales por mes
+    - Todo en formato dólar, diseño premium
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    from openpyxl.utils import get_column_letter
+    from openpyxl.drawing.image import Image as XLImage
+    import calendar as cal_mod
+
+    # ── Paleta de colores ──────────────────────────────────────────────
+    C_AZUL_OSC   = "0D2137"   # cabeceras principales
+    C_AZUL_MED   = "1A3F5C"   # cabeceras secundarias
+    C_AZUL_CLARO = "D6E9F8"   # fondo filas par detalle
+    C_VERDE_OSC  = "1E4620"   # cierre anual texto
+    C_VERDE      = "D9EAD3"   # cierre anual fondo
+    C_NARANJA_OSC= "7F3F00"   # cierre mensual texto
+    C_NARANJA    = "FCE5CD"   # cierre mensual fondo
+    C_DORADO_OSC = "4A3000"   # cierre final texto
+    C_DORADO     = "FFF2CC"   # cierre final fondo
+    C_BLANCO     = "FFFFFF"
+    C_GRIS_CLARO = "F7F9FC"
+    C_GRIS_MED   = "D9D9D9"
+
+    fmt_usd = '"$"#,##0.00'
+
+    borde_fino  = Side(style="thin",   color=C_GRIS_MED)
+    borde_medio = Side(style="medium", color=C_AZUL_MED)
+    borde_std   = Border(left=borde_fino, right=borde_fino, top=borde_fino, bottom=borde_fino)
+    borde_top   = Border(left=borde_fino, right=borde_fino, top=borde_medio, bottom=borde_fino)
+
+    def fill(hex_color):
+        return PatternFill("solid", fgColor=hex_color)
+
+    def font(bold=False, size=11, color="000000", italic=False):
+        return Font(name="Calibri", bold=bold, size=size, color=color, italic=italic)
+
+    def aln(h="left", v="center", wrap=False):
+        return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+
+    def set_cell(ws, row, col, value, bold=False, size=11, fcolor=None, tcolor="000000",
+                 align_h="left", fmt=None, italic=False, border=None):
+        c = ws.cell(row=row, column=col, value=value)
+        c.font = font(bold=bold, size=size, color=tcolor, italic=italic)
+        c.alignment = aln(h=align_h)
+        if fcolor:
+            c.fill = fill(fcolor)
+        if fmt:
+            c.number_format = fmt
+        c.border = border if border else borde_std
+        return c
+
+    # ── Leer datos originales ─────────────────────────────────────────
+    bio = BytesIO(contenido_raw)
+    from openpyxl import load_workbook as lw
+    wb_orig = lw(bio)
+
+    # Leer RESUMEN
+    ws_res_orig = wb_orig["RESUMEN"] if "RESUMEN" in wb_orig.sheetnames else None
+    capital_total = 0.0
+    total_intereses = 0.0
+    if ws_res_orig:
+        for row in ws_res_orig.iter_rows(min_row=2, values_only=True):
+            if row and len(row) >= 4 and row[2] is not None:
+                try:
+                    capital_total = float(row[2])
+                    total_intereses = float(row[3])
+                except Exception:
+                    pass
+
+    # Leer DETALLE
+    ws_det_orig = wb_orig["DETALLE"] if "DETALLE" in wb_orig.sheetnames else None
+    det_rows = []
+    det_cols = []
+    if ws_det_orig:
+        headers = [c.value for c in next(ws_det_orig.iter_rows(min_row=1, max_row=1))]
+        det_cols = headers
+        for row in ws_det_orig.iter_rows(min_row=2, values_only=True):
+            det_rows.append(dict(zip(headers, row)))
+
+    # Leer TOTALES_MES
+    ws_tot_orig = wb_orig["TOTALES_MES"] if "TOTALES_MES" in wb_orig.sheetnames else None
+    tot_rows = []
+    if ws_tot_orig:
+        for row in ws_tot_orig.iter_rows(min_row=2, values_only=True):
+            if row and row[0]:
+                tot_rows.append({"mes": row[0], "total_mes": row[1] if len(row) > 1 else 0})
+
+    # Ordenar totales_mes cronológicamente
+    def mes_sort_key(m):
+        try:
+            partes = str(m["mes"]).split("/")
+            return (int(partes[1]), int(partes[0]))
+        except Exception:
+            return (9999, 99)
+    tot_rows.sort(key=mes_sort_key)
+
+    # ── Crear workbook nuevo ──────────────────────────────────────────
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # ═══════════════════════════════════════════════════════════════
+    # HOJA 1: PORTADA
+    # ═══════════════════════════════════════════════════════════════
+    ws_p = wb.create_sheet("PORTADA")
+    ws_p.sheet_view.showGridLines = False
+    ws_p.sheet_view.showRowColHeaders = False
+
+    for col in range(1, 6):
+        ws_p.column_dimensions[get_column_letter(col)].width = 22
+    for r in range(1, 40):
+        ws_p.row_dimensions[r].height = 24
+
+    # Banda superior
+    for r in range(1, 5):
+        for c in range(1, 6):
+            ws_p.cell(row=r, column=c).fill = fill(C_AZUL_OSC)
+
+    ws_p.merge_cells("A1:E4")
+    t = ws_p["A1"]
+    t.value = "EXTRACTO DE INVERSIÓN"
+    t.font = Font(name="Calibri", size=28, bold=True, color=C_BLANCO)
+    t.alignment = aln(h="center", v="center")
+
+    # Línea decorativa
+    for c in range(1, 6):
+        ws_p.cell(row=5, column=c).fill = fill("2E86C1")
+    ws_p.row_dimensions[5].height = 6
+
+    # Datos inversor
+    ws_p.row_dimensions[7].height = 30
+    ws_p.merge_cells("A7:E7")
+    inv_cell = ws_p["A7"]
+    inv_cell.value = inversor.upper()
+    inv_cell.font = Font(name="Calibri", size=22, bold=True, color=C_AZUL_OSC)
+    inv_cell.alignment = aln(h="center", v="center")
+
+    ws_p.row_dimensions[8].height = 18
+    ws_p.merge_cells("A8:E8")
+    fecha_cell = ws_p["A8"]
+    fecha_cell.value = f"Fecha de corte: {fecha_corte.strftime('%d/%m/%Y')}"
+    fecha_cell.font = Font(name="Calibri", size=13, italic=True, color="555555")
+    fecha_cell.alignment = aln(h="center")
+
+    # Separador
+    ws_p.row_dimensions[10].height = 4
+    for c in range(1, 6):
+        ws_p.cell(row=10, column=c).fill = fill(C_AZUL_CLARO)
+
+    # Tarjetas resumen
+    def tarjeta(ws, fila, col, titulo, valor, fmt_val, color_fondo, color_titulo):
+        ws.row_dimensions[fila].height = 28
+        ws.row_dimensions[fila+1].height = 36
+        ws.row_dimensions[fila+2].height = 10
+        ws.merge_cells(start_row=fila, start_column=col, end_row=fila, end_column=col+1)
+        c1 = ws.cell(row=fila, column=col, value=titulo)
+        c1.font = Font(name="Calibri", size=10, bold=True, color=color_titulo)
+        c1.fill = fill(color_fondo)
+        c1.alignment = aln(h="center", v="center")
+        c1.border = borde_std
+        ws.merge_cells(start_row=fila+1, start_column=col, end_row=fila+1, end_column=col+1)
+        c2 = ws.cell(row=fila+1, column=col, value=valor)
+        c2.font = Font(name="Calibri", size=18, bold=True, color=C_AZUL_OSC)
+        c2.fill = fill(C_BLANCO)
+        c2.alignment = aln(h="center", v="center")
+        c2.number_format = fmt_val
+        c2.border = borde_std
+
+    tarjeta(ws_p, 12, 1, "CAPITAL INVERTIDO ACTIVO", capital_total, fmt_usd, C_AZUL_CLARO, C_AZUL_MED)
+    tarjeta(ws_p, 12, 3, "TOTAL INTERESES ACUMULADOS", total_intereses, fmt_usd, C_VERDE, C_VERDE_OSC)
+    tarjeta(ws_p, 17, 2, "TOTAL ACUMULADO (Capital + Intereses)", capital_total + total_intereses, fmt_usd, C_DORADO, C_DORADO_OSC)
+
+    # Nota pie
+    ws_p.row_dimensions[28].height = 20
+    ws_p.merge_cells("A28:E28")
+    n = ws_p["A28"]
+    n.value = "Documento confidencial — Chaparro Fernández Wealth Management"
+    n.font = Font(name="Calibri", size=9, italic=True, color="999999")
+    n.alignment = aln(h="center")
+    for c in range(1, 6):
+        ws_p.cell(row=29, column=c).fill = fill(C_AZUL_OSC)
+    ws_p.row_dimensions[29].height = 6
+
+    # ═══════════════════════════════════════════════════════════════
+    # HOJA 2: DETALLE con cierres mensuales, anuales y final
+    # ═══════════════════════════════════════════════════════════════
+    ws_d = wb.create_sheet("DETALLE")
+    ws_d.sheet_view.showGridLines = False
+    ws_d.freeze_panes = "A5"
+
+    # Anchos de columna
+    col_widths = [14, 16, 16, 18, 18, 12, 14, 16, 14, 12, 16]
+    col_names  = ["ID", "Tipo inversión", "Subtipo", "Activo", "Mes",
+                  "Fecha inversión", "Capital ($)", "Días devengados", "Días mes", "Interés mes ($)"]
+    for i, w in enumerate(col_widths[:len(col_names)], 1):
+        ws_d.column_dimensions[get_column_letter(i)].width = w
+
+    # Título
+    ws_d.merge_cells(f"A1:{get_column_letter(len(col_names))}1")
+    t = ws_d["A1"]
+    t.value = f"DETALLE DEL EXTRACTO — {inversor.upper()}"
+    t.font = Font(name="Calibri", size=16, bold=True, color=C_BLANCO)
+    t.fill = fill(C_AZUL_OSC)
+    t.alignment = aln(h="center", v="center")
+    ws_d.row_dimensions[1].height = 32
+
+    ws_d.merge_cells(f"A2:{get_column_letter(len(col_names))}2")
+    sub = ws_d["A2"]
+    sub.value = f"Fecha de corte: {fecha_corte.strftime('%d/%m/%Y')}   |   Inversor: {inversor}"
+    sub.font = Font(name="Calibri", size=10, italic=True, color="444444")
+    sub.alignment = aln(h="center")
+    ws_d.row_dimensions[2].height = 18
+
+    ws_d.row_dimensions[3].height = 6
+    for c in range(1, len(col_names)+1):
+        ws_d.cell(row=3, column=c).fill = fill("2E86C1")
+
+    # Cabecera
+    for ci, nombre in enumerate(col_names, 1):
+        c = ws_d.cell(row=4, column=ci, value=nombre)
+        c.font = Font(name="Calibri", size=10, bold=True, color=C_BLANCO)
+        c.fill = fill(C_AZUL_MED)
+        c.alignment = aln(h="center")
+        c.border = borde_std
+    ws_d.row_dimensions[4].height = 22
+
+    # Mapeo columnas detalle
+    col_map = {
+        "id_inversion": 1, "tipo_inversion": 2, "subtipo_inversion": 3,
+        "nombre_activo": 4, "mes": 5, "fecha_inversion": 6,
+        "capital_invertido": 7, "dias_devengados": 8, "dias_mes": 9, "interes_mes": 10
+    }
+
+    def mes_key_from_str(mes_str):
+        try:
+            p = str(mes_str).split("/")
+            return (int(p[1]), int(p[0]))
+        except Exception:
+            return (9999, 99)
+
+    # Agrupar filas por mes
+    from collections import defaultdict
+    meses_orden = []
+    filas_por_mes = defaultdict(list)
+    for row in det_rows:
+        mk = mes_key_from_str(row.get("mes", ""))
+        if mk not in filas_por_mes:
+            meses_orden.append(mk)
+        filas_por_mes[mk].append(row)
+    meses_orden = sorted(set(meses_orden))
+
+    fila_excel = 5
+    intereses_acum_anio = 0.0
+    capital_anio = 0.0
+    anio_actual = None
+    intereses_acum_total = 0.0
+
+    for mk in meses_orden:
+        anio_mk, mes_mk = mk
+        rows_mes = filas_por_mes[mk]
+
+        # Cambio de año: insertar cierre anual del año anterior
+        if anio_actual is not None and anio_mk != anio_actual:
+            # CIERRE ANUAL
+            ws_d.row_dimensions[fila_excel].height = 24
+            ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+            c = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {anio_actual}")
+            c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
+            c.fill = fill(C_VERDE)
+            c.alignment = aln(h="center")
+            c.border = borde_top
+
+            cap_c = ws_d.cell(row=fila_excel, column=7, value=capital_anio)
+            cap_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
+            cap_c.fill = fill(C_VERDE)
+            cap_c.number_format = fmt_usd
+            cap_c.alignment = aln(h="right")
+            cap_c.border = borde_top
+
+            for col_v in [8, 9]:
+                cx = ws_d.cell(row=fila_excel, column=col_v, value="")
+                cx.fill = fill(C_VERDE)
+                cx.border = borde_top
+
+            int_c = ws_d.cell(row=fila_excel, column=10, value=intereses_acum_anio)
+            int_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
+            int_c.fill = fill(C_VERDE)
+            int_c.number_format = fmt_usd
+            int_c.alignment = aln(h="right")
+            int_c.border = borde_top
+
+            fila_excel += 1
+            # Fila acumulado anual
+            ws_d.row_dimensions[fila_excel].height = 20
+            ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
+            ca = ws_d.cell(row=fila_excel, column=1, value=f"   Capital + Intereses acumulados {anio_actual}")
+            ca.font = Font(name="Calibri", size=10, italic=True, color=C_VERDE_OSC)
+            ca.fill = fill(C_VERDE)
+            ca.alignment = aln(h="right")
+            ca.border = borde_std
+            for col_v in [9]:
+                cx = ws_d.cell(row=fila_excel, column=col_v, value="")
+                cx.fill = fill(C_VERDE)
+                cx.border = borde_std
+            total_anio_c = ws_d.cell(row=fila_excel, column=10, value=capital_anio + intereses_acum_anio)
+            total_anio_c.font = Font(name="Calibri", size=10, bold=True, italic=True, color=C_VERDE_OSC)
+            total_anio_c.fill = fill(C_VERDE)
+            total_anio_c.number_format = fmt_usd
+            total_anio_c.alignment = aln(h="right")
+            total_anio_c.border = borde_std
+            fila_excel += 1
+            intereses_acum_anio = 0.0
+
+        anio_actual = anio_mk
+
+        # Filas de detalle del mes
+        intereses_mes = 0.0
+        capital_mes = 0.0
+        par = (fila_excel % 2 == 0)
+        for ri, row in enumerate(rows_mes):
+            fondo = C_AZUL_CLARO if (fila_excel % 2 == 0) else C_GRIS_CLARO
+            ws_d.row_dimensions[fila_excel].height = 20
+            for col_key, col_idx in col_map.items():
+                val = row.get(col_key, "")
+                c = ws_d.cell(row=fila_excel, column=col_idx, value=val)
+                c.font = Font(name="Calibri", size=10, color="222222")
+                c.fill = fill(fondo)
+                c.border = borde_std
+                c.alignment = aln(h="right" if col_idx in [7, 10] else "center" if col_idx in [8, 9] else "left")
+                if col_idx == 7:
+                    c.number_format = fmt_usd
+                if col_idx == 10:
+                    c.number_format = fmt_usd
+            v_cap = row.get("capital_invertido", 0) or 0
+            v_int = row.get("interes_mes", 0) or 0
+            try:
+                intereses_mes += float(v_int)
+                if float(v_cap) > capital_mes:
+                    capital_mes = float(v_cap)
+            except Exception:
+                pass
+            fila_excel += 1
+
+        # Capital del mes = suma de capitales distintos ese mes
+        capital_mes_real = sum(float(r.get("capital_invertido", 0) or 0) for r in rows_mes)
+        intereses_mes_real = sum(float(r.get("interes_mes", 0) or 0) for r in rows_mes)
+
+        # CIERRE MENSUAL
+        ws_d.row_dimensions[fila_excel].height = 22
+        mes_label = f"{mes_mk:02d}/{anio_mk}"
+        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+        cm = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {mes_label}")
+        cm.font = Font(name="Calibri", size=10, bold=True, color=C_NARANJA_OSC)
+        cm.fill = fill(C_NARANJA)
+        cm.alignment = aln(h="center")
+        cm.border = borde_top
+
+        cap_cm = ws_d.cell(row=fila_excel, column=7, value=capital_mes_real)
+        cap_cm.font = Font(name="Calibri", size=10, bold=True, color=C_NARANJA_OSC)
+        cap_cm.fill = fill(C_NARANJA)
+        cap_cm.number_format = fmt_usd
+        cap_cm.alignment = aln(h="right")
+        cap_cm.border = borde_top
+
+        for col_v in [8, 9]:
+            cx = ws_d.cell(row=fila_excel, column=col_v, value="")
+            cx.fill = fill(C_NARANJA)
+            cx.border = borde_top
+
+        int_cm = ws_d.cell(row=fila_excel, column=10, value=intereses_mes_real)
+        int_cm.font = Font(name="Calibri", size=10, bold=True, color=C_NARANJA_OSC)
+        int_cm.fill = fill(C_NARANJA)
+        int_cm.number_format = fmt_usd
+        int_cm.alignment = aln(h="right")
+        int_cm.border = borde_top
+
+        fila_excel += 1
+        intereses_acum_anio += intereses_mes_real
+        intereses_acum_total += intereses_mes_real
+        capital_anio = capital_mes_real
+
+    # CIERRE ANUAL del último año
+    if anio_actual is not None:
+        ws_d.row_dimensions[fila_excel].height = 24
+        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+        c = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {anio_actual}")
+        c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
+        c.fill = fill(C_VERDE)
+        c.alignment = aln(h="center")
+        c.border = borde_top
+        cap_c = ws_d.cell(row=fila_excel, column=7, value=capital_anio)
+        cap_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
+        cap_c.fill = fill(C_VERDE)
+        cap_c.number_format = fmt_usd
+        cap_c.alignment = aln(h="right")
+        cap_c.border = borde_top
+        for col_v in [8, 9]:
+            cx = ws_d.cell(row=fila_excel, column=col_v, value="")
+            cx.fill = fill(C_VERDE)
+            cx.border = borde_top
+        int_c = ws_d.cell(row=fila_excel, column=10, value=intereses_acum_anio)
+        int_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
+        int_c.fill = fill(C_VERDE)
+        int_c.number_format = fmt_usd
+        int_c.alignment = aln(h="right")
+        int_c.border = borde_top
+        fila_excel += 1
+
+        ws_d.row_dimensions[fila_excel].height = 20
+        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
+        ca = ws_d.cell(row=fila_excel, column=1, value=f"   Capital + Intereses acumulados {anio_actual}")
+        ca.font = Font(name="Calibri", size=10, italic=True, color=C_VERDE_OSC)
+        ca.fill = fill(C_VERDE)
+        ca.alignment = aln(h="right")
+        ca.border = borde_std
+        cx = ws_d.cell(row=fila_excel, column=9, value="")
+        cx.fill = fill(C_VERDE)
+        cx.border = borde_std
+        total_anio_c = ws_d.cell(row=fila_excel, column=10, value=capital_anio + intereses_acum_anio)
+        total_anio_c.font = Font(name="Calibri", size=10, bold=True, italic=True, color=C_VERDE_OSC)
+        total_anio_c.fill = fill(C_VERDE)
+        total_anio_c.number_format = fmt_usd
+        total_anio_c.alignment = aln(h="right")
+        total_anio_c.border = borde_std
+        fila_excel += 1
+
+    # CIERRE FINAL
+    ws_d.row_dimensions[fila_excel].height = 28
+    ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+    cf = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE FINAL  {fecha_corte.strftime('%d/%m/%Y')}")
+    cf.font = Font(name="Calibri", size=13, bold=True, color=C_DORADO_OSC)
+    cf.fill = fill(C_DORADO)
+    cf.alignment = aln(h="center")
+    cf.border = borde_top
+    cap_cf = ws_d.cell(row=fila_excel, column=7, value=capital_total)
+    cap_cf.font = Font(name="Calibri", size=13, bold=True, color=C_DORADO_OSC)
+    cap_cf.fill = fill(C_DORADO)
+    cap_cf.number_format = fmt_usd
+    cap_cf.alignment = aln(h="right")
+    cap_cf.border = borde_top
+    for col_v in [8, 9]:
+        cx = ws_d.cell(row=fila_excel, column=col_v, value="")
+        cx.fill = fill(C_DORADO)
+        cx.border = borde_top
+    int_cf = ws_d.cell(row=fila_excel, column=10, value=total_intereses)
+    int_cf.font = Font(name="Calibri", size=13, bold=True, color=C_DORADO_OSC)
+    int_cf.fill = fill(C_DORADO)
+    int_cf.number_format = fmt_usd
+    int_cf.alignment = aln(h="right")
+    int_cf.border = borde_top
+    fila_excel += 1
+
+    ws_d.row_dimensions[fila_excel].height = 24
+    ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
+    cfa = ws_d.cell(row=fila_excel, column=1, value="   TOTAL ACUMULADO  (Capital + Intereses)")
+    cfa.font = Font(name="Calibri", size=12, bold=True, color=C_DORADO_OSC)
+    cfa.fill = fill(C_DORADO)
+    cfa.alignment = aln(h="right")
+    cfa.border = borde_std
+    cx = ws_d.cell(row=fila_excel, column=9, value="")
+    cx.fill = fill(C_DORADO)
+    cx.border = borde_std
+    total_cf = ws_d.cell(row=fila_excel, column=10, value=capital_total + total_intereses)
+    total_cf.font = Font(name="Calibri", size=12, bold=True, color=C_DORADO_OSC)
+    total_cf.fill = fill(C_DORADO)
+    total_cf.number_format = fmt_usd
+    total_cf.alignment = aln(h="right")
+    total_cf.border = borde_std
+
+    # ═══════════════════════════════════════════════════════════════
+    # HOJA 3: RESUMEN MENSUAL
+    # ═══════════════════════════════════════════════════════════════
+    ws_m = wb.create_sheet("RESUMEN MENSUAL")
+    ws_m.sheet_view.showGridLines = False
+    ws_m.column_dimensions["A"].width = 16
+    ws_m.column_dimensions["B"].width = 22
+    ws_m.column_dimensions["C"].width = 22
+
+    ws_m.merge_cells("A1:C1")
+    tm = ws_m["A1"]
+    tm.value = "RESUMEN DE INTERESES POR MES"
+    tm.font = Font(name="Calibri", size=16, bold=True, color=C_BLANCO)
+    tm.fill = fill(C_AZUL_OSC)
+    tm.alignment = aln(h="center", v="center")
+    ws_m.row_dimensions[1].height = 32
+
+    ws_m.merge_cells("A2:C2")
+    ws_m["A2"].fill = fill("2E86C1")
+    ws_m.row_dimensions[2].height = 5
+
+    for ci, hdr in enumerate(["MES", "INTERESES ($)", "ACUMULADO ($)"], 1):
+        c = ws_m.cell(row=3, column=ci, value=hdr)
+        c.font = Font(name="Calibri", size=11, bold=True, color=C_BLANCO)
+        c.fill = fill(C_AZUL_MED)
+        c.alignment = aln(h="center")
+        c.border = borde_std
+    ws_m.row_dimensions[3].height = 22
+
+    acum = 0.0
+    for ri, tr in enumerate(tot_rows, 4):
+        fondo = C_AZUL_CLARO if ri % 2 == 0 else C_GRIS_CLARO
+        ws_m.row_dimensions[ri].height = 20
+        c1 = ws_m.cell(row=ri, column=1, value=tr["mes"])
+        c1.font = font(size=10)
+        c1.fill = fill(fondo)
+        c1.alignment = aln(h="center")
+        c1.border = borde_std
+
+        val = float(tr["total_mes"] or 0)
+        acum += val
+        c2 = ws_m.cell(row=ri, column=2, value=val)
+        c2.font = font(size=10)
+        c2.fill = fill(fondo)
+        c2.number_format = fmt_usd
+        c2.alignment = aln(h="right")
+        c2.border = borde_std
+
+        c3 = ws_m.cell(row=ri, column=3, value=acum)
+        c3.font = font(size=10)
+        c3.fill = fill(fondo)
+        c3.number_format = fmt_usd
+        c3.alignment = aln(h="right")
+        c3.border = borde_std
+
+    # Fila total
+    fila_tot = 4 + len(tot_rows)
+    ws_m.row_dimensions[fila_tot].height = 24
+    ct = ws_m.cell(row=fila_tot, column=1, value="TOTAL")
+    ct.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
+    ct.fill = fill(C_DORADO)
+    ct.alignment = aln(h="center")
+    ct.border = borde_top
+    ct2 = ws_m.cell(row=fila_tot, column=2, value=acum)
+    ct2.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
+    ct2.fill = fill(C_DORADO)
+    ct2.number_format = fmt_usd
+    ct2.alignment = aln(h="right")
+    ct2.border = borde_top
+    ct3 = ws_m.cell(row=fila_tot, column=3, value=acum)
+    ct3.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
+    ct3.fill = fill(C_DORADO)
+    ct3.number_format = fmt_usd
+    ct3.alignment = aln(h="right")
+    ct3.border = borde_top
+
+    # Orden de hojas
+    wb.move_sheet("PORTADA", offset=0)
+
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int):
