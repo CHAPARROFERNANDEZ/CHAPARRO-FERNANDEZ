@@ -2941,7 +2941,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     for col in range(1, 6):
         ws_p.column_dimensions[get_column_letter(col)].width = 22
     for r in range(1, 40):
-        ws_p.row_dimensions[r].height = 24
+        ws_p.row_dimensions[r].height = 30
 
     # Banda superior
     for r in range(1, 5):
@@ -3026,6 +3026,9 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
                   "Fecha inversión", "Capital ($)", "Días devengados", "Días mes", "Interés mes ($)"]
     for i, w in enumerate(col_widths[:len(col_names)], 1):
         ws_d.column_dimensions[get_column_letter(i)].width = w
+    # Ocultar columnas B, C, D, H, I (2, 3, 4, 8, 9)
+    for col_oculta in [2, 3, 4, 8, 9]:
+        ws_d.column_dimensions[get_column_letter(col_oculta)].hidden = True
 
     # Título
     ws_d.merge_cells(f"A1:{get_column_letter(len(col_names))}1")
@@ -3034,16 +3037,16 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     t.font = Font(name="Calibri", size=16, bold=True, color=C_BLANCO)
     t.fill = fill(C_AZUL_OSC)
     t.alignment = aln(h="center", v="center")
-    ws_d.row_dimensions[1].height = 32
+    ws_d.row_dimensions[1].height = 42
 
     ws_d.merge_cells(f"A2:{get_column_letter(len(col_names))}2")
     sub = ws_d["A2"]
     sub.value = f"Fecha de corte: {fecha_corte.strftime('%d/%m/%Y')}   |   Inversor: {inversor}"
     sub.font = Font(name="Calibri", size=10, italic=True, color="444444")
     sub.alignment = aln(h="center")
-    ws_d.row_dimensions[2].height = 18
+    ws_d.row_dimensions[2].height = 24
 
-    ws_d.row_dimensions[3].height = 6
+    ws_d.row_dimensions[3].height = 8
     for c in range(1, len(col_names)+1):
         ws_d.cell(row=3, column=c).fill = fill("2E86C1")
 
@@ -3054,7 +3057,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         c.fill = fill(C_AZUL_MED)
         c.alignment = aln(h="center")
         c.border = borde_std
-    ws_d.row_dimensions[4].height = 22
+    ws_d.row_dimensions[4].height = 28
 
     # Mapeo columnas detalle
     col_map = {
@@ -3151,7 +3154,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         par = (fila_excel % 2 == 0)
         for ri, row in enumerate(rows_mes):
             fondo = C_AZUL_CLARO if (fila_excel % 2 == 0) else C_GRIS_CLARO
-            ws_d.row_dimensions[fila_excel].height = 20
+            ws_d.row_dimensions[fila_excel].height = 26
             for col_key, col_idx in col_map.items():
                 val = row.get(col_key, "")
                 c = ws_d.cell(row=fila_excel, column=col_idx, value=val)
@@ -3178,7 +3181,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         intereses_mes_real = sum(float(r.get("interes_mes", 0) or 0) for r in rows_mes)
 
         # CIERRE MENSUAL
-        ws_d.row_dimensions[fila_excel].height = 22
+        ws_d.row_dimensions[fila_excel].height = 28
         mes_label = f"{mes_mk:02d}/{anio_mk}"
         ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
         cm = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {mes_label}")
@@ -3213,7 +3216,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
 
     # CIERRE ANUAL del último año
     if anio_actual is not None:
-        ws_d.row_dimensions[fila_excel].height = 24
+        ws_d.row_dimensions[fila_excel].height = 30
         ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
         c = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {anio_actual}")
         c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
@@ -3257,7 +3260,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         fila_excel += 1
 
     # CIERRE FINAL
-    ws_d.row_dimensions[fila_excel].height = 28
+    ws_d.row_dimensions[fila_excel].height = 36
     ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
     cf = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE FINAL  {fecha_corte.strftime('%d/%m/%Y')}")
     cf.font = Font(name="Calibri", size=13, bold=True, color=C_DORADO_OSC)
@@ -3282,7 +3285,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     int_cf.border = borde_top
     fila_excel += 1
 
-    ws_d.row_dimensions[fila_excel].height = 24
+    ws_d.row_dimensions[fila_excel].height = 30
     ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
     cfa = ws_d.cell(row=fila_excel, column=1, value="   TOTAL ACUMULADO  (Capital + Intereses)")
     cfa.font = Font(name="Calibri", size=12, bold=True, color=C_DORADO_OSC)
@@ -3314,7 +3317,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     tm.font = Font(name="Calibri", size=16, bold=True, color=C_BLANCO)
     tm.fill = fill(C_AZUL_OSC)
     tm.alignment = aln(h="center", v="center")
-    ws_m.row_dimensions[1].height = 32
+    ws_m.row_dimensions[1].height = 42
 
     ws_m.merge_cells("A2:C2")
     ws_m["A2"].fill = fill("2E86C1")
@@ -3326,12 +3329,12 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         c.fill = fill(C_AZUL_MED)
         c.alignment = aln(h="center")
         c.border = borde_std
-    ws_m.row_dimensions[3].height = 22
+    ws_m.row_dimensions[3].height = 28
 
     acum = 0.0
     for ri, tr in enumerate(tot_rows, 4):
         fondo = C_AZUL_CLARO if ri % 2 == 0 else C_GRIS_CLARO
-        ws_m.row_dimensions[ri].height = 20
+        ws_m.row_dimensions[ri].height = 26
         c1 = ws_m.cell(row=ri, column=1, value=tr["mes"])
         c1.font = font(size=10)
         c1.fill = fill(fondo)
@@ -3356,7 +3359,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
 
     # Fila total
     fila_tot = 4 + len(tot_rows)
-    ws_m.row_dimensions[fila_tot].height = 24
+    ws_m.row_dimensions[fila_tot].height = 30
     ct = ws_m.cell(row=fila_tot, column=1, value="TOTAL")
     ct.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
     ct.fill = fill(C_DORADO)
