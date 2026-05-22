@@ -437,13 +437,33 @@ def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, an
 
 
 def capital_activo_en_fecha(df_base: pd.DataFrame, fecha_consulta, activo: Optional[str] = None, solo_real: bool = False) -> float:
+    """Capital activo en una fecha aplicando la misma lógica que inversiones_activas_global.
+
+    - NOTAS: todas las activas cuentan (nueva, reinversion, call).
+    - NO-NOTAS: se excluyen las canceladas.
+    - solo_real: si True, aplica además el filtro capital_nuevo_real=si (solo para notas).
+    """
     fecha_consulta = pd.Timestamp(fecha_consulta).normalize()
     trabajo = df_base.copy()
     if activo:
         trabajo = filtrar_activo(trabajo, activo)
-    if solo_real and "capital_nuevo_real" in trabajo.columns:
-        trabajo = trabajo[trabajo["capital_nuevo_real"].astype(str).str.lower() == "si"].copy()
-    filtrado = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha_consulta) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_consulta))]
+
+    activas = trabajo[
+        (trabajo["fecha_inversion"].notna()) &
+        (trabajo["fecha_inversion"] <= fecha_consulta) &
+        (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_consulta))
+    ].copy()
+
+    if activas.empty:
+        return 0.0
+
+    es_nota = activas["tipo_inversion"].apply(limpiar_texto) == "nota"
+    es_cancelada = activas["tipo_operacion"].apply(limpiar_texto) == "cancelada"
+    filtrado = activas[es_nota | (~es_nota & ~es_cancelada)].copy()
+
+    if solo_real and "capital_nuevo_real" in filtrado.columns:
+        filtrado = filtrado[filtrado["capital_nuevo_real"].astype(str).str.lower() == "si"].copy()
+
     return float(filtrado["capital_invertido"].sum()) if not filtrado.empty else 0.0
 
 
@@ -837,18 +857,37 @@ def detectar_activo(row):
     return "otros"
 
 
-def excluir_call(df: pd.DataFrame) -> pd.DataFrame:
-    if "motivo" not in df.columns:
-        return df.copy()
-    return df[df["motivo"].apply(limpiar_texto) != "call"].copy()
-
-
 def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame:
+    """Devuelve las inversiones que cuentan como capital activo en una fecha.
+
+    Reglas:
+    - NOTAS (tipo_inversion=nota): todas las activas en la fecha cuentan,
+      sean nueva, reinversion o call. Solo se excluyen las cerradas (fecha_final < fecha).
+    - TODO LO DEMÁS: solo se excluyen las que tienen tipo_operacion=cancelada.
+      Las reinversiones no existen fuera de notas, así que no hace falta filtrarlas.
+    """
     if fecha is None:
         fecha = pd.Timestamp.today().normalize()
     fecha = pd.Timestamp(fecha).normalize()
-    trabajo = excluir_call(df_inv)
-    return trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))].copy()
+    trabajo = df_inv.copy()
+
+    # Filtro base: activas en la fecha
+    activas = trabajo[
+        (trabajo["fecha_inversion"].notna()) &
+        (trabajo["fecha_inversion"] <= fecha) &
+        (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))
+    ].copy()
+
+    if activas.empty:
+        return activas
+
+    es_nota = activas["tipo_inversion"].apply(limpiar_texto) == "nota"
+    es_cancelada = activas["tipo_operacion"].apply(limpiar_texto) == "cancelada"
+
+    # Notas: todas las activas (cualquier tipo_operacion)
+    # No-notas: excluir canceladas
+    resultado = activas[es_nota | (~es_nota & ~es_cancelada)].copy()
+    return resultado
 
 
 def tarjeta_kpi(titulo, valor, subtitulo="", estado="normal"):
