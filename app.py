@@ -437,13 +437,34 @@ def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, an
 
 
 def capital_activo_en_fecha(df_base: pd.DataFrame, fecha_consulta, activo: Optional[str] = None, solo_real: bool = False) -> float:
+    """Suma del capital activo en una fecha, evitando doble conteo de reinversiones.
+
+    Si solo_real=True se aplica como filtro adicional capital_nuevo_real=si.
+    En cualquier caso se excluyen reinversiones (capital_nuevo_real=no) cuyo origen
+    sigue activo en esa misma fecha para evitar doblar el capital.
+    """
     fecha_consulta = pd.Timestamp(fecha_consulta).normalize()
     trabajo = df_base.copy()
     if activo:
         trabajo = filtrar_activo(trabajo, activo)
     if solo_real and "capital_nuevo_real" in trabajo.columns:
         trabajo = trabajo[trabajo["capital_nuevo_real"].astype(str).str.lower() == "si"].copy()
-    filtrado = trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha_consulta) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_consulta))]
+    filtrado = trabajo[
+        (trabajo["fecha_inversion"].notna()) &
+        (trabajo["fecha_inversion"] <= fecha_consulta) &
+        (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha_consulta))
+    ].copy()
+    if not filtrado.empty and "capital_nuevo_real" in filtrado.columns and "id_inversion_origen" in filtrado.columns:
+        ids_activos = set(filtrado["id_inversion"].tolist())
+        excluir_ids = set()
+        candidatos = filtrado[filtrado["capital_nuevo_real"].astype(str).str.lower() == "no"]
+        for _, fila in candidatos.iterrows():
+            origen_raw = str(fila.get("id_inversion_origen", "") or "")
+            origenes = [x.strip() for x in re.split(r"[+,]", origen_raw) if x.strip()]
+            if any(o in ids_activos for o in origenes):
+                excluir_ids.add(fila["id_inversion"])
+        if excluir_ids:
+            filtrado = filtrado[~filtrado["id_inversion"].isin(excluir_ids)]
     return float(filtrado["capital_invertido"].sum()) if not filtrado.empty else 0.0
 
 
@@ -838,17 +859,62 @@ def detectar_activo(row):
 
 
 def excluir_call(df: pd.DataFrame) -> pd.DataFrame:
+    # NOTA: esta función ya no se usa en inversiones_activas_global.
+    # Las filas con motivo=call son capital real activo y deben contarse.
     if "motivo" not in df.columns:
         return df.copy()
     return df[df["motivo"].apply(limpiar_texto) != "call"].copy()
 
 
+def _ids_activos_en_fecha(df_inv: pd.DataFrame, fecha) -> set:
+    """Devuelve el conjunto de id_inversion activos en una fecha dada (sin filtros extra)."""
+    activos = df_inv[
+        (df_inv["fecha_inversion"].notna()) &
+        (df_inv["fecha_inversion"] <= fecha) &
+        (df_inv["fecha_final_inversion"].isna() | (df_inv["fecha_final_inversion"] >= fecha))
+    ]
+    return set(activos["id_inversion"].tolist())
+
+
 def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame:
+    """
+    Devuelve las inversiones activas en una fecha, evitando doble conteo de reinversiones.
+
+    Reglas:
+    - Una inversión está activa si fecha_inversion <= fecha y (fecha_final_inversion vacía o >= fecha).
+    - Las filas con capital_nuevo_real=no son reinversiones. Si alguno de sus orígenes
+      (id_inversion_origen) también está activo en esa misma fecha, la reinversión se excluye
+      para evitar doble conteo.
+    - Las filas con motivo=call SÍ se incluyen: son capital real activo.
+    """
     if fecha is None:
         fecha = pd.Timestamp.today().normalize()
     fecha = pd.Timestamp(fecha).normalize()
-    trabajo = excluir_call(df_inv)
-    return trabajo[(trabajo["fecha_inversion"].notna()) & (trabajo["fecha_inversion"] <= fecha) & (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))].copy()
+
+    trabajo = df_inv.copy()
+    activos_base = trabajo[
+        (trabajo["fecha_inversion"].notna()) &
+        (trabajo["fecha_inversion"] <= fecha) &
+        (trabajo["fecha_final_inversion"].isna() | (trabajo["fecha_final_inversion"] >= fecha))
+    ].copy()
+
+    if activos_base.empty:
+        return activos_base
+
+    # Detectar reinversiones cuyo origen sigue activo → excluir para no doblar
+    if "capital_nuevo_real" in activos_base.columns and "id_inversion_origen" in activos_base.columns:
+        ids_activos = set(activos_base["id_inversion"].tolist())
+        excluir_ids = set()
+        candidatos = activos_base[activos_base["capital_nuevo_real"].astype(str).str.lower() == "no"]
+        for _, fila in candidatos.iterrows():
+            origen_raw = str(fila.get("id_inversion_origen", "") or "")
+            origenes = [x.strip() for x in re.split(r"[+,]", origen_raw) if x.strip()]
+            if any(o in ids_activos for o in origenes):
+                excluir_ids.add(fila["id_inversion"])
+        if excluir_ids:
+            activos_base = activos_base[~activos_base["id_inversion"].isin(excluir_ids)].copy()
+
+    return activos_base
 
 
 def tarjeta_kpi(titulo, valor, subtitulo="", estado="normal"):
