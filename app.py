@@ -1290,8 +1290,11 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     if mes is None:
         mes = hoy_real.month
     fecha_analisis = pd.Timestamp(int(anio), int(mes), ultimo_dia_mes(int(anio), int(mes))).normalize()
-    df_inv = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
-    activas = inversiones_activas_global(df_inv, fecha_analisis)
+    # El filtro chaparro solo afecta al capital activo mostrado, NO a los cálculos de cobros.
+    # resumen_notas_mes y detalle_activo_mes usan df_inv completo (igual que Consultas).
+    # Así se garantiza que Dashboard y Consultas siempre muestren los mismos importes.
+    df_inv_filtrado = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
+    activas = inversiones_activas_global(df_inv_filtrado, fecha_analisis)
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
