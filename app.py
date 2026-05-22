@@ -336,6 +336,11 @@ def cargar_excel_completo():
         else:
             inv[col] = 0
 
+    # periodicidad_meses: cuántos meses cubre cada pago (1=mensual, 3=trimestral, etc.)
+    if "periodicidad_meses" in inv.columns:
+        inv["periodicidad_meses"] = pd.to_numeric(inv["periodicidad_meses"], errors="coerce").fillna(1).astype(int)
+    else:
+        inv["periodicidad_meses"] = 1
     if "nota" in cal.columns:
         cal["nota"] = pd.to_numeric(cal["nota"], errors="coerce").astype("Int64")
     if "tipo_evento" in cal.columns:
@@ -745,7 +750,8 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
 
         for _, fila in activas.iterrows():
             capital = float(fila.get("capital_invertido", 0))
-            cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12
+            periodicidad = int(fila.get("periodicidad_meses", 1) or 1)
+            cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12 * periodicidad
             cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
 
             # Tratamiento especial Chaparro Fernández:
@@ -758,7 +764,7 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
                 beneficio_empresa = 0.0
                 tratamiento_chaparro = "INTERNO: pago = cobro nota"
             else:
-                pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12
+                pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12 * periodicidad
                 beneficio_empresa = cobro_compania - pago_inversor
                 tratamiento_chaparro = "NO"
 
