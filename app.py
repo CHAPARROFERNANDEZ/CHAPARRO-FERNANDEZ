@@ -2015,6 +2015,15 @@ def seccion_historico_y_proyecciones():
 
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
+
+    # ===== DIAGNÓSTICO TEMPORAL - BORRAR DESPUÉS =====
+    nota16 = df_inv[df_inv['nombre_activo'] == 'NOTA_16']
+    if not nota16.empty:
+        st.warning(f"NOTA_16 fecha_final_inversion: {nota16['fecha_final_inversion'].tolist()}")
+    else:
+        st.error("NOTA_16 no encontrada en df_inv")
+    # ===== FIN DIAGNÓSTICO =====
+
     st.markdown("## Dashboard financiero")
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
 
