@@ -305,8 +305,9 @@ def descargar_excel_desde_drive():
         return False
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=300)
 def cargar_excel_completo():
+    descargar_excel_desde_drive()
     inv = pd.read_excel(ARCHIVO, sheet_name=HOJA_INVERSIONES)
     cal = pd.read_excel(ARCHIVO, sheet_name=HOJA_CALENDARIO)
     try:
