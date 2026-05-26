@@ -2776,12 +2776,16 @@ def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incl
     df_inv, _, _ = cargar_excel_completo()
     st.header(f"📌 Consultas {nombre_visible}")
     opciones = [
-        f"¿Cuánto ingresará {nombre_visible} en un mes?", "¿Cuánto cobrará cada inversor ese mes?", "¿Cuánto cobrará un inversor concreto ese mes?",
-        "¿Cuál será el beneficio de la empresa ese mes?", "¿Cuál es el total pagado a inversores desde el inicio?",
-        f"¿Cuánto capital hay actualmente activo en {nombre_visible} hoy?", f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?",
+        f"¿Cuánto ingresará {nombre_visible} en un mes?",
+        "¿Cuánto cobrará cada inversor ese mes?",
+        "¿Cuánto cobrará un inversor concreto ese mes?",
+        "¿Cuál será el beneficio de la empresa ese mes?",
+        "¿Cuál es el total pagado a inversores desde el inicio?",
+        "¿Cuánto ha ingresado la compañía desde el inicio?",
+        "¿Cuál es el beneficio total acumulado desde el inicio?",
+        f"¿Cuánto capital hay actualmente activo en {nombre_visible} hoy?",
+        f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?",
     ]
-    if incluir_ingresado_desde_inicio:
-        opciones += ["¿Cuánto ha ingresado la compañía desde el inicio?", "¿Cuál es el beneficio total acumulado desde el inicio?"]
     consulta = st.selectbox("Elige una pregunta", opciones)
     necesita_mes = consulta in opciones[:4] or consulta == f"¿Cuánto capital había activo en {nombre_visible} en un mes concreto?"
     anio = mes = None
@@ -2817,6 +2821,12 @@ def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incl
                 st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
         elif consulta == "¿Cuál es el total pagado a inversores desde el inicio?":
             mostrar_metricas("Resultado", [("Total pagado", fmt(total_pagado_activo_desde_inicio(df_inv, activo_key, tasa_anual)))])
+        elif consulta == "¿Cuánto ha ingresado la compañía desde el inicio?":
+            mostrar_metricas("Resultado", [("Total ingresado", fmt(total_ingresado_activo_desde_inicio(df_inv, activo_key, tasa_anual)))])
+        elif consulta == "¿Cuál es el beneficio total acumulado desde el inicio?":
+            ingreso = total_ingresado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
+            pagado  = total_pagado_activo_desde_inicio(df_inv, activo_key, tasa_anual)
+            mostrar_metricas("Resultado", [("Beneficio acumulado", fmt(ingreso - pagado))])
         elif consulta == f"¿Cuánto capital hay actualmente activo en {nombre_visible} hoy?":
             bruto = capital_activo_en_fecha(df_inv, pd.Timestamp.today(), activo_key, False)
             real = capital_activo_en_fecha(df_inv, pd.Timestamp.today(), activo_key, True)
@@ -2917,7 +2927,7 @@ def seccion_notas():
 
 
 def seccion_notas_archivo():
-    _, _, df_control = cargar_excel_completo()
+    df_inv, _, df_control = cargar_excel_completo()
     st.header("🧾 Notas")
     st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
 
@@ -2937,12 +2947,27 @@ def seccion_notas_archivo():
         st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
         return
 
+    # Detectar notas con call ejecutado: todas sus filas tienen motivo=call
+    # y fecha_final_inversion ya pasada → excluirlas del resumen
+    hoy = pd.Timestamp.today().normalize()
+    notas_con_call = set()
+    if "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
+        notas_df = df_inv[df_inv["motivo"].astype(str).str.lower().str.strip() == "call"].copy()
+        notas_df["fecha_final_inversion"] = pd.to_datetime(notas_df["fecha_final_inversion"], errors="coerce")
+        notas_df["nota_num"] = notas_df["nombre_activo"].apply(extraer_numero_nota)
+        # Una nota tiene call ejecutado si TODAS sus filas tienen fecha_final <= hoy
+        for nota_num, grupo in notas_df.groupby("nota_num"):
+            if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= hoy)).all():
+                notas_con_call.add(int(nota_num))
+
+    df_control_filtrado = df_control[~df_control["nota"].isin(notas_con_call)].copy() if notas_con_call else df_control
+
     if st.button("Actualizar precios actuales"):
         st.cache_data.clear()
         st.rerun()
 
     with st.spinner("Descargando precios actuales..."):
-        resumen = construir_resumen_actual_notas_alertas(df_control)
+        resumen = construir_resumen_actual_notas_alertas(df_control_filtrado)
 
     if resumen.empty:
         st.warning("No se pudo generar el resumen.")
