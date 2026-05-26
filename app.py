@@ -284,9 +284,9 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
 
     # ── DETALLE DE OPERACIONES ────────────────────────────────────────────────
     # Solo columnas visibles (las que no son ocultas en el Excel)
-    cols_visibles = ["mes", "nombre_activo", "fecha_inversion", "capital_invertido", "interes_mes"]
-    etiquetas_vis = ["Mes", "Activo", "Fecha inversión", "Capital ($)", "Interés mes ($)"]
-    anchos_vis    = [22*mm, 50*mm, 28*mm, 34*mm, 34*mm]
+    cols_visibles = ["mes", "fecha_inversion", "capital_invertido", "interes_mes"]
+    etiquetas_vis = ["Mes", "Fecha inversión", "Capital ($)", "Interés mes ($)"]
+    anchos_vis    = [28*mm, 40*mm, 50*mm, 50*mm]
 
     det_filtrado = []
     for r in det_rows:
