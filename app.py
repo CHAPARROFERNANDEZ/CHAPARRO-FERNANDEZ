@@ -4026,8 +4026,34 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
             if inicio_calc <= fin_calc:
                 dias = (fin_calc - inicio_calc).days + 1
                 capital = float(row.get("capital_invertido", 0))
-                interes = float(row.get("interes_inversor_anual", 0))
-                interes_mes = round((capital * interes / 12) * dias / dias_mes, 2)
+                interes_base = float(row.get("interes_inversor_anual", 0))
+
+                # ── Tramo especial Biscafe / Crowe Bolivia ──────────────────
+                # Hasta el 31/01/2026 cobraban al 5%; desde el 01/02/2026 al 7,5%.
+                # Si la inversión empezó antes del 01/02/2026 y el interés registrado
+                # es 0.075, recalculamos con los dos tramos correctos.
+                INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+                CORTE_TRAMO = datetime(2026, 2, 1)
+                inversor_upper = str(row.get("inversor", "")).strip().upper()
+
+                if inversor_upper in INVERSORES_TRAMO:
+                    # Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+                    # Se aplica siempre, independientemente de cuándo empezó la inversión
+                    fin_tramo1  = datetime(2026, 1, 31)
+                    inicio_tramo2 = CORTE_TRAMO
+                    interes_mes = 0.0
+                    # Tramo 1: días del mes que caen en o antes del 31/01/2026 → 5%
+                    if inicio_calc <= fin_tramo1:
+                        fin_t1  = min(fin_calc, fin_tramo1)
+                        dias_t1 = (fin_t1 - inicio_calc).days + 1
+                        interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes, 2)
+                    # Tramo 2: días del mes que caen en o después del 01/02/2026 → 7.5%
+                    if fin_calc >= inicio_tramo2:
+                        ini_t2  = max(inicio_calc, inicio_tramo2)
+                        dias_t2 = (fin_calc - ini_t2).days + 1
+                        interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes, 2)
+                else:
+                    interes_mes = round((capital * interes_base / 12) * dias / dias_mes, 2)
                 mes_fecha = datetime(actual.year, actual.month, 1)
                 filas.append({
                     "mes_fecha": mes_fecha,
