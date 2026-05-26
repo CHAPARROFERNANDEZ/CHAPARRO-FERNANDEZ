@@ -528,7 +528,13 @@ def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn):
                 resultados.append({"Inversor": inversor, "Email": mapa_emails.get(inversor, "—"), "Estado": "⚠️ Sin datos", "Detalle": "Sin inversiones en este periodo."})
                 continue
 
-            nombre_archivo, extracto_bytes = archivos[0]
+            # La tupla tiene 3 elementos: (nombre, excel_formateado, excel_crudo)
+            # Usamos el excel_crudo para leer datos limpios para el PDF
+            if len(archivos[0]) == 3:
+                nombre_archivo, _, excel_crudo_pdf = archivos[0]
+            else:
+                nombre_archivo, excel_crudo_pdf = archivos[0]
+            extracto_bytes = excel_crudo_pdf
             email_dest = mapa_emails.get(inversor, "")
 
             total_intereses_email = 0.0
@@ -4094,8 +4100,9 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         with pd.ExcelWriter(salida, engine="openpyxl") as writer:
             totales_mes.to_excel(writer, sheet_name="TOTALES_MES", index=False)
             detalle_exportar.to_excel(writer, sheet_name="DETALLE", index=False)
+        excel_crudo = salida.getvalue()
         nombre_archivo = f"extracto_{str(inversor).upper().replace(' ', '_')}_{fecha_corte.strftime('%d%m%Y')}.xlsx"
-        archivos.append((nombre_archivo, formatear_extracto_excel_bytes(salida.getvalue(), str(inversor), fecha_corte)))
+        archivos.append((nombre_archivo, formatear_extracto_excel_bytes(excel_crudo, str(inversor), fecha_corte), excel_crudo))
     return archivos
 
 def seccion_extractos():
@@ -4112,14 +4119,14 @@ def seccion_extractos():
         if not archivos:
             st.warning("No se han generado extractos. Revisa el Excel o la fecha seleccionada.")
         elif len(archivos) == 1:
-            nombre, contenido = archivos[0]
+            t = archivos[0]; nombre, contenido = t[0], t[1]
             st.success(f"Extracto generado: {nombre}")
             st.download_button("Descargar extracto", contenido, file_name=nombre, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             zip_buffer = BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                for nombre, contenido in archivos:
-                    zf.writestr(nombre, contenido)
+                for t in archivos:
+                    zf.writestr(t[0], t[1])
             st.success(f"Se han generado {len(archivos)} extractos.")
             st.download_button("Descargar todos en ZIP", zip_buffer.getvalue(), file_name=f"extractos_{mes}_{anio}.zip", mime="application/zip")
 
