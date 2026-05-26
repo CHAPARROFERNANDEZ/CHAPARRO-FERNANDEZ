@@ -402,93 +402,78 @@ def enviar_extracto_email(destinatario: str, inversor: str, mes: int, anio: int,
         return False, str(e)
 
 
-def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn):
-    """Panel completo en Streamlit para configurar y enviar extractos por email."""
-    st.header("📧 Envío de extractos por email")
-    st.caption("Genera y envía automáticamente el extracto mensual en Excel a cada inversor que tenga email registrado en la columna 'email' del Excel.")
+def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn,
+                                   anio_override=None, mes_override=None,
+                                   inversor_override=None, modo_override=None):
+    """Panel de envío por email. Recibe año/mes/inversor ya seleccionados desde seccion_extractos."""
 
     mapa_emails = _leer_emails_inversores(df_inv)
 
     if not mapa_emails:
-        st.error("⚠️ No se encontró ningún email en el Excel. Añade una columna llamada **email** en la hoja INVERSIONES con el correo de cada inversor.")
-        with st.expander("Ver cómo añadir la columna email en Excel"):
+        st.error("⚠️ No hay emails registrados en el Excel.")
+        with st.expander("¿Cómo añadir emails?"):
             st.markdown("""
-1. Abre `inversiones.xlsx` en Excel o Google Sheets.
-2. En la hoja **INVERSIONES**, añade una columna nueva con el encabezado exacto: `email`
-3. Rellena el email del inversor en las filas correspondientes (basta con **una fila** por inversor).
-4. Guarda y vuelve a subir el Excel a la app (menú → Gestión de Excel → Recargar desde Google Drive).
+Abre `inversiones.xlsx`, en la hoja **INVERSIONES** añade una columna llamada `email`
+y rellena el correo de cada inversor en al menos una de sus filas.
+Luego recarga el Excel desde el menú Gestión de Excel.
 """)
         return
 
-    st.subheader("⚙️ Configuración de cuenta Gmail")
-
-    with st.expander("📖 Cómo obtener la contraseña de aplicación Gmail (leer antes de empezar)", expanded=False):
-        st.markdown("""
-**Pasos (solo se hace una vez):**
-
-1. Ve a [myaccount.google.com](https://myaccount.google.com) con la cuenta que usarás para enviar.
-2. Activa la **verificación en dos pasos** si no la tienes.
-3. Busca **"Contraseñas de aplicación"** (en el apartado Seguridad).
-4. Crea una nueva → selecciona *Correo* y *Otro* → escribe `CF Wealth`.
-5. Google te dará una clave de 16 caracteres tipo `xxxx xxxx xxxx xxxx`. Esa es la contraseña.
-
-⚠️ **Nunca uses tu contraseña normal de Gmail**. La contraseña de aplicación es diferente.
-""")
-
+    # ── Credenciales Gmail ────────────────────────────────────────────────────
     secrets_ok = False
     try:
         smtp_sender   = st.secrets["email"]["sender"]
         smtp_password = st.secrets["email"]["password"]
         display_name  = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
-        st.success(f"✅ Credenciales cargadas desde configuración segura: **{smtp_sender}**")
+        st.success(f"✅ Gmail configurado: **{smtp_sender}**")
         secrets_ok = True
     except Exception:
         pass
 
     if not secrets_ok:
-        col1, col2 = st.columns(2)
-        smtp_sender   = col1.text_input("Cuenta Gmail emisora", placeholder="tucuenta@gmail.com", key="smtp_sender_input")
-        smtp_password = col2.text_input("Contraseña de aplicación Gmail", type="password", placeholder="xxxx xxxx xxxx xxxx", key="smtp_password_input")
-        display_name  = st.text_input("Nombre visible del remitente", value="Chaparro Fernández Wealth", key="smtp_display_name")
+        with st.expander("⚙️ Configurar cuenta Gmail", expanded=True):
+            st.caption("Solo necesitas hacer esto una vez. Usa una contraseña de aplicación, no tu contraseña normal de Gmail. Puedes crearla en [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).")
+            col1, col2 = st.columns(2)
+            smtp_sender   = col1.text_input("Cuenta Gmail emisora", placeholder="tucuenta@gmail.com", key="smtp_sender_input")
+            smtp_password = col2.text_input("Contraseña de aplicación", type="password", placeholder="xxxx xxxx xxxx xxxx", key="smtp_password_input")
+            display_name  = st.text_input("Nombre remitente", value="Chaparro Fernández Wealth", key="smtp_display_name")
 
     st.divider()
 
-    st.subheader("📅 Mes del extracto")
-    hoy_email = datetime.today()
-    mes_defecto = hoy_email.month - 1 if hoy_email.month > 1 else 12
-    anio_defecto = hoy_email.year if hoy_email.month > 1 else hoy_email.year - 1
-
-    col1, col2 = st.columns(2)
-    anio_email = int(col1.number_input("Año", 2020, 2100, anio_defecto, key="email_anio"))
-    mes_email  = int(col2.number_input("Mes", 1, 12, mes_defecto, key="email_mes"))
+    # ── Destinatarios: usar el inversor ya seleccionado arriba ────────────────
+    anio_email = anio_override or datetime.today().year
+    mes_email  = mes_override  or (datetime.today().month - 1 or 12)
     mes_str_email = MESES_ES_EMAIL.get(mes_email, str(mes_email)).capitalize()
-
-    st.divider()
-
-    st.subheader("👥 Destinatarios")
     inversores_con_email = sorted(mapa_emails.keys())
-    todos_str = [f"{inv}  →  {mapa_emails[inv]}" for inv in inversores_con_email]
 
-    modo_envio = st.radio("¿A quién enviar?", ["Todos los inversores con email", "Seleccionar inversores"], horizontal=True, key="email_modo_envio")
-
-    if modo_envio == "Seleccionar inversores":
-        seleccionados_str = st.multiselect("Inversores a incluir", options=todos_str, default=todos_str, key="email_seleccion")
-        inversores_enviar = [s.split("  →  ")[0].strip() for s in seleccionados_str]
+    # Si viene un inversor concreto de la pestaña Descargar, preseleccionarlo
+    if inversor_override and modo_override == "Un inversor":
+        inv_upper = str(inversor_override).upper()
+        if inv_upper in mapa_emails:
+            inversores_enviar = [inv_upper]
+            st.info(f"Se enviará el extracto de **{inv_upper}** a **{mapa_emails[inv_upper]}**")
+        else:
+            st.warning(f"**{inv_upper}** no tiene email registrado en el Excel.")
+            return
     else:
-        inversores_enviar = inversores_con_email
-        st.info(f"Se enviarán extractos a **{len(inversores_enviar)} inversores**: " + ", ".join(inversores_con_email))
+        todos_str = [f"{inv}  →  {mapa_emails[inv]}" for inv in inversores_con_email]
+        seleccionados_str = st.multiselect(
+            "Inversores a incluir",
+            options=todos_str, default=todos_str, key="email_seleccion"
+        )
+        inversores_enviar = [s.split("  →  ")[0].strip() for s in seleccionados_str]
+        if not inversores_enviar:
+            st.warning("Selecciona al menos un inversor.")
+            return
 
-    with st.expander("🔍 Vista previa de destinatarios", expanded=False):
-        preview_data = [{"Inversor": inv, "Email": mapa_emails.get(inv, "—")} for inv in inversores_enviar]
-        st.dataframe(pd.DataFrame(preview_data), use_container_width=True, hide_index=True)
-
-    with st.expander("🔌 Probar conexión Gmail antes de enviar", expanded=False):
-        email_prueba = st.text_input("Email de prueba (te llegará a ti)", placeholder="tuemail@gmail.com", key="email_prueba_dest")
+    # ── Test de conexión ──────────────────────────────────────────────────────
+    with st.expander("🔌 Probar conexión Gmail", expanded=False):
+        email_prueba = st.text_input("Email de destino para la prueba", placeholder="tuemail@gmail.com", key="email_prueba_dest")
         if st.button("Enviar email de prueba", key="btn_email_prueba"):
             if not smtp_sender or not smtp_password:
-                st.error("Introduce las credenciales Gmail primero.")
+                st.error("Configura las credenciales Gmail primero.")
             elif not email_prueba:
-                st.error("Introduce un email de destino para la prueba.")
+                st.error("Introduce un email de destino.")
             else:
                 ok, err = enviar_extracto_email(
                     destinatario=email_prueba, inversor="INVERSOR TEST",
@@ -496,28 +481,24 @@ def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn):
                     nombre_archivo="test.xlsx", total_intereses=12345.67,
                     smtp_sender=smtp_sender, smtp_password=smtp_password, display_name=display_name,
                 )
-                if ok:
-                    st.success(f"✅ Email de prueba enviado a {email_prueba}. Revisa tu bandeja de entrada.")
-                else:
-                    st.error(f"❌ Error: {err}")
+                st.success(f"✅ Email de prueba enviado a {email_prueba}.") if ok else st.error(f"❌ {err}")
 
     st.divider()
-    st.subheader(f"🚀 Enviar extractos — {mes_str_email} {anio_email}")
 
-    if not inversores_enviar:
-        st.warning("No hay inversores seleccionados.")
-        return
-
-    if st.button(f"📨 Generar y enviar {len(inversores_enviar)} extracto(s) por email", type="primary", use_container_width=True, key="btn_enviar_extractos"):
+    # ── Botón de envío ────────────────────────────────────────────────────────
+    if st.button(
+        f"📨 Enviar extracto{'s' if len(inversores_enviar) > 1 else ''} de {mes_str_email} {anio_email}  ({len(inversores_enviar)} inversor{'es' if len(inversores_enviar) > 1 else ''})",
+        type="primary", use_container_width=True, key="btn_enviar_extractos"
+    ):
         if not smtp_sender or not smtp_password:
-            st.error("Introduce las credenciales Gmail antes de enviar.")
+            st.error("Configura las credenciales Gmail antes de enviar.")
             return
 
         progreso   = st.progress(0, text="Preparando envíos...")
         resultados = []
 
         for i, inversor in enumerate(inversores_enviar):
-            progreso.progress((i) / len(inversores_enviar), text=f"Generando extracto de {inversor}... ({i+1}/{len(inversores_enviar)})")
+            progreso.progress(i / len(inversores_enviar), text=f"Generando extracto de {inversor}... ({i+1}/{len(inversores_enviar)})")
             try:
                 archivos = generar_extractos_fn(df_inv, "Un inversor", inversor, anio_email, mes_email)
             except Exception as e:
@@ -528,29 +509,24 @@ def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn):
                 resultados.append({"Inversor": inversor, "Email": mapa_emails.get(inversor, "—"), "Estado": "⚠️ Sin datos", "Detalle": "Sin inversiones en este periodo."})
                 continue
 
-            # La tupla tiene 3 elementos: (nombre, excel_formateado, excel_crudo)
-            # Usamos el excel_crudo para leer datos limpios para el PDF
-            if len(archivos[0]) == 3:
-                nombre_archivo, _, excel_crudo_pdf = archivos[0]
-            else:
-                nombre_archivo, excel_crudo_pdf = archivos[0]
-            extracto_bytes = excel_crudo_pdf
-            email_dest = mapa_emails.get(inversor, "")
+            t = archivos[0]
+            nombre_archivo   = t[0]
+            extracto_bytes   = t[2] if len(t) == 3 else t[1]
+            email_dest       = mapa_emails.get(inversor, "")
 
             total_intereses_email = 0.0
             try:
                 from openpyxl import load_workbook as _lw
                 wb_tmp = _lw(BytesIO(extracto_bytes))
                 if "TOTALES_MES" in wb_tmp.sheetnames:
-                    ws_t = wb_tmp["TOTALES_MES"]
-                    for row in ws_t.iter_rows(min_row=2, values_only=True):
+                    for row in wb_tmp["TOTALES_MES"].iter_rows(min_row=2, values_only=True):
                         if row and row[0] and f"{mes_email:02d}/{anio_email}" in str(row[0]):
                             try:
                                 total_intereses_email += float(row[1] or 0)
                             except Exception:
                                 pass
             except Exception:
-                total_intereses_email = 0.0
+                pass
 
             progreso.progress((i + 0.5) / len(inversores_enviar), text=f"Enviando a {email_dest}...")
             ok, err = enviar_extracto_email(
@@ -560,30 +536,28 @@ def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn):
                 total_intereses=total_intereses_email,
                 smtp_sender=smtp_sender, smtp_password=smtp_password, display_name=display_name,
             )
-            if ok:
-                resultados.append({"Inversor": inversor, "Email": email_dest, "Estado": "✅ Enviado", "Detalle": nombre_archivo})
-            else:
-                resultados.append({"Inversor": inversor, "Email": email_dest, "Estado": "❌ Error al enviar", "Detalle": err})
+            resultados.append({
+                "Inversor": inversor, "Email": email_dest,
+                "Estado": "✅ Enviado" if ok else "❌ Error",
+                "Detalle": nombre_archivo if ok else err,
+            })
 
         progreso.progress(1.0, text="¡Proceso completado!")
-
-        df_res = pd.DataFrame(resultados)
-        enviados  = (df_res["Estado"] == "✅ Enviado").sum()
-        errores   = df_res["Estado"].str.startswith("❌").sum()
-        sin_datos = (df_res["Estado"] == "⚠️ Sin datos").sum()
+        df_res   = pd.DataFrame(resultados)
+        enviados = (df_res["Estado"] == "✅ Enviado").sum()
+        errores  = df_res["Estado"].str.startswith("❌").sum()
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("✅ Enviados correctamente", enviados)
-        col2.metric("⚠️ Sin datos / omitidos", sin_datos)
+        col1.metric("✅ Enviados", enviados)
+        col2.metric("⚠️ Sin datos", (df_res["Estado"] == "⚠️ Sin datos").sum())
         col3.metric("❌ Errores", errores)
-
         st.dataframe(df_res, use_container_width=True, hide_index=True)
 
         if errores == 0 and enviados > 0:
             st.balloons()
-            st.success(f"🎉 Todos los extractos de {mes_str_email} {anio_email} han sido enviados correctamente.")
+            st.success(f"🎉 Todos los extractos de {mes_str_email} {anio_email} enviados correctamente.")
         elif errores > 0:
-            st.warning(f"Se enviaron {enviados} extractos pero hubo {errores} error(es). Revisa la columna 'Detalle'.")
+            st.warning(f"Se enviaron {enviados} pero hubo {errores} error(es). Revisa la columna Detalle.")
 
 
 # =========================
@@ -4134,27 +4108,45 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
 def seccion_extractos():
     df_inv, _, _ = cargar_excel_completo()
     st.header("📤 Extractos")
-    modo = st.radio("¿Qué quieres generar?", ["Todos", "Un inversor"], horizontal=True)
+
+    # ── Parámetros comunes ────────────────────────────────────────────────────
+    modo = st.radio("¿Para quién?", ["Todos los inversores", "Un inversor"], horizontal=True, key="ext_modo")
     inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
-    inversor = st.selectbox("Inversor", inversores) if modo == "Un inversor" and inversores else None
+    inversor = st.selectbox("Inversor", inversores, key="ext_inversor") if modo == "Un inversor" and inversores else None
     c1, c2 = st.columns(2)
-    anio = int(c1.number_input("Año de corte", 2020, 2100, pd.Timestamp.today().year))
-    mes = int(c2.number_input("Mes de corte", 1, 12, pd.Timestamp.today().month))
-    if st.button("Generar extractos"):
-        archivos = generar_extractos(df_inv, modo, inversor, anio, mes)
-        if not archivos:
-            st.warning("No se han generado extractos. Revisa el Excel o la fecha seleccionada.")
-        elif len(archivos) == 1:
-            t = archivos[0]; nombre, contenido = t[0], t[1]
-            st.success(f"Extracto generado: {nombre}")
-            st.download_button("Descargar extracto", contenido, file_name=nombre, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        else:
-            zip_buffer = BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                for t in archivos:
-                    zf.writestr(t[0], t[1])
-            st.success(f"Se han generado {len(archivos)} extractos.")
-            st.download_button("Descargar todos en ZIP", zip_buffer.getvalue(), file_name=f"extractos_{mes}_{anio}.zip", mime="application/zip")
+    anio = int(c1.number_input("Año", 2020, 2100, pd.Timestamp.today().year, key="ext_anio"))
+    mes  = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month, key="ext_mes"))
+
+    st.divider()
+
+    # ── Dos pestañas: Descargar / Enviar por email ────────────────────────────
+    tab_descargar, tab_email = st.tabs(["⬇️  Descargar", "📧  Enviar por email"])
+
+    with tab_descargar:
+        st.caption("Genera el extracto en Excel y descárgalo directamente.")
+        if st.button("Generar extracto(s)", type="primary", key="ext_btn_descargar"):
+            archivos = generar_extractos(df_inv, "Un inversor" if inversor else "Todos", inversor, anio, mes)
+            if not archivos:
+                st.warning("No se han generado extractos. Revisa el Excel o la fecha seleccionada.")
+            elif len(archivos) == 1:
+                t = archivos[0]; nombre, contenido = t[0], t[1]
+                st.success(f"Extracto generado: {nombre}")
+                st.download_button("⬇️ Descargar extracto", contenido, file_name=nombre,
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="ext_dl_uno")
+            else:
+                zip_buffer = BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for t in archivos:
+                        zf.writestr(t[0], t[1])
+                st.success(f"Se han generado {len(archivos)} extractos.")
+                st.download_button("⬇️ Descargar todos en ZIP", zip_buffer.getvalue(),
+                                   file_name=f"extractos_{mes}_{anio}.zip",
+                                   mime="application/zip", key="ext_dl_zip")
+
+    with tab_email:
+        st.caption("Genera el extracto en PDF y envíalo directamente al email del inversor.")
+        seccion_envio_extractos_email(df_inv, generar_extractos, anio_override=anio, mes_override=mes, inversor_override=inversor, modo_override=modo)
 
 
 
@@ -4391,42 +4383,36 @@ except Exception as e:
 menu = st.sidebar.selectbox(
     "Menú principal",
     [
-        "Dashboard financiero", "Histórico y proyecciones", "Centro de control", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick",
-        "Notas estructuradas", "Alertas y calendario", "Sistema Fondo", "Extractos", "Gestión de Excel", "Calidad de datos", "Base de datos",
-        "Envío por email",
+        "Dashboard financiero", "Centro de control", "Consultas",
+        "Notas estructuradas", "Alertas y calendario", "Extractos", "Gestión de Excel",
     ],
 )
 
 if menu == "Dashboard financiero":
     dashboard_financiero()
-elif menu == "Histórico y proyecciones":
-    seccion_historico_y_proyecciones()
+
 elif menu == "Centro de control":
     centro_control_inversiones()
-elif menu == "Consultas Fútbol":
-    seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
-elif menu == "Consultas Notas":
-    seccion_notas()
-elif menu == "Consultas Paraguay":
-    seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
-elif menu == "Consultas MotoClick":
-    seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
+elif menu == "Consultas":
+    tipo_consulta = st.selectbox(
+        "¿Qué quieres consultar?",
+        ["Notas", "Fútbol", "Paraguay", "MotoClick"],
+        key="consultas_selector"
+    )
+    if tipo_consulta == "Notas":
+        seccion_notas()
+    elif tipo_consulta == "Fútbol":
+        seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
+    elif tipo_consulta == "Paraguay":
+        seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
+    elif tipo_consulta == "MotoClick":
+        seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
 elif menu == "Notas estructuradas":
     seccion_notas_archivo()
 elif menu == "Alertas y calendario":
     panel_alertas_y_calendario()
-elif menu == "Sistema Fondo":
-    seccion_sistema_fondo()
+
 elif menu == "Extractos":
     seccion_extractos()
 elif menu == "Gestión de Excel":
     seccion_gestion_excel()
-elif menu == "Calidad de datos":
-    panel_calidad_datos()
-elif menu == "Base de datos":
-    st.markdown("## Base de datos")
-    hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
-    hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
-    st.dataframe(hojas[hoja], use_container_width=True)
-elif menu == "Envío por email":
-    seccion_envio_extractos_email(df_inv, generar_extractos)
