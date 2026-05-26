@@ -1,6 +1,7 @@
 streamlit
 pandas
 openpyxl
-yfinance
+requests
 plotly
-gdown
+yfinance
+reportlab
