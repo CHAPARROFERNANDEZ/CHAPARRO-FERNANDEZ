@@ -1,7 +1,13 @@
 import calendar
 import re
+import smtplib
+import ssl
 import zipfile
 from datetime import datetime
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from io import BytesIO
 from typing import Optional
 
@@ -39,6 +45,294 @@ HOJA_CONTROL = "CONTROL_NOTAS"
 TASA_ANUAL_FUTBOL = 0.15
 TASA_ANUAL_MOTOCLICK = 0.25
 TASA_ANUAL_PARAGUAY = 0.15
+
+MESES_ES_EMAIL = {
+    1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+    5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+    9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
+}
+
+
+# =========================
+# MÓDULO EMAIL EXTRACTOS
+# =========================
+
+def _leer_emails_inversores(df_inv: pd.DataFrame) -> dict:
+    """Devuelve {inversor_upper: email} leyendo la columna 'email' del Excel."""
+    if "email" not in df_inv.columns:
+        return {}
+    mapa = {}
+    for _, row in df_inv.iterrows():
+        inv = str(row.get("inversor", "")).strip()
+        mail = str(row.get("email", "")).strip()
+        if inv and mail and mail.lower() not in ("", "nan", "none"):
+            key = inv.upper()
+            if key not in mapa:
+                mapa[key] = mail
+    return mapa
+
+
+def _construir_cuerpo_html_email(inversor: str, mes: int, anio: int, total_intereses: float) -> str:
+    """Genera el cuerpo HTML del email con diseño premium CF."""
+    mes_str = MESES_ES_EMAIL.get(mes, str(mes)).capitalize()
+    fecha_str = f"{mes_str} {anio}"
+    total_fmt = f"${total_intereses:,.2f}"
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(7,20,37,0.14);">
+        <tr>
+          <td style="background:linear-gradient(135deg,#0e2338 0%,#173b5c 60%,#bf9a5f 100%);padding:36px 40px;text-align:center;">
+            <table cellpadding="0" cellspacing="0" style="margin:0 auto 16px auto;">
+              <tr><td style="width:72px;height:72px;background:rgba(255,255,255,0.95);border-radius:16px;font-size:26px;font-weight:800;color:#0e2338;text-align:center;vertical-align:middle;border:1px solid rgba(191,154,95,0.5);">CF</td></tr>
+            </table>
+            <div style="color:#ffffff;font-size:22px;font-weight:800;letter-spacing:-0.5px;margin-bottom:6px;">Chaparro Fernández Wealth</div>
+            <div style="color:rgba(255,255,255,0.75);font-size:13px;font-weight:500;">Extracto mensual de inversiones — {fecha_str}</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:36px 40px;">
+            <p style="color:#334155;font-size:15px;margin:0 0 24px;">Estimado/a <strong style="color:#0e2338;">{inversor}</strong>,</p>
+            <p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 28px;">Adjunto encontrará su extracto de inversiones correspondiente al mes de <strong>{fecha_str}</strong>. El documento detalla todas sus posiciones activas, los intereses devengados y el acumulado histórico desde el inicio de su relación con nosotros.</p>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:linear-gradient(145deg,#ffffff,#f5f0e8);border:1px solid rgba(191,154,95,0.30);border-radius:14px;margin-bottom:28px;">
+              <tr><td style="padding:24px;text-align:center;">
+                <div style="font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Total intereses {fecha_str}</div>
+                <div style="font-size:32px;font-weight:800;color:#0e2338;letter-spacing:-1px;">{total_fmt}</div>
+              </td></tr>
+            </table>
+            <p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 28px;">El extracto completo en formato Excel está adjunto a este correo. Incluye el detalle operación por operación, el cierre mensual, el cierre anual y el resumen acumulado de toda su cartera.</p>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4ff;border-left:4px solid #0e2338;border-radius:4px;margin-bottom:28px;">
+              <tr><td style="padding:14px 18px;"><p style="color:#1e293b;font-size:13px;margin:0;line-height:1.6;">🔒 <strong>Confidencial.</strong> Este correo y el documento adjunto contienen información financiera privada. Por favor no lo reenvíe a terceros sin autorización expresa.</p></td></tr>
+            </table>
+            <p style="color:#475569;font-size:14px;line-height:1.7;margin:0;">Ante cualquier consulta no dude en ponerse en contacto con nosotros. Gracias por su confianza.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#071425;padding:24px 40px;text-align:center;">
+            <p style="color:rgba(255,255,255,0.5);font-size:12px;margin:0;line-height:1.8;">Chaparro Fernández Wealth · Sistema privado de inversiones<br>Este mensaje ha sido generado automáticamente — por favor no responda directamente.</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def enviar_extracto_email(destinatario: str, inversor: str, mes: int, anio: int,
+                           extracto_bytes: bytes, nombre_archivo: str,
+                           total_intereses: float, smtp_sender: str,
+                           smtp_password: str,
+                           display_name: str = "Chaparro Fernández Wealth") -> tuple:
+    """Envía un extracto Excel por email a un inversor usando Gmail SMTP."""
+    mes_str = MESES_ES_EMAIL.get(mes, str(mes)).capitalize()
+    try:
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = f"Extracto de inversiones — {mes_str} {anio} | Chaparro Fernández Wealth"
+        msg["From"]    = f"{display_name} <{smtp_sender}>"
+        msg["To"]      = destinatario
+        cuerpo = _construir_cuerpo_html_email(inversor, mes, anio, total_intereses)
+        msg.attach(MIMEText(cuerpo, "html", "utf-8"))
+        if extracto_bytes:
+            adjunto = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            adjunto.set_payload(extracto_bytes)
+            encoders.encode_base64(adjunto)
+            adjunto.add_header("Content-Disposition", "attachment", filename=nombre_archivo)
+            msg.attach(adjunto)
+        contexto = ssl.create_default_context()
+        with smtplib.SMTP("smtp.gmail.com", 587) as servidor:
+            servidor.ehlo()
+            servidor.starttls(context=contexto)
+            servidor.login(smtp_sender, smtp_password)
+            servidor.sendmail(smtp_sender, destinatario, msg.as_bytes())
+        return True, ""
+    except smtplib.SMTPAuthenticationError:
+        return False, "Error de autenticación Gmail. Usa una contraseña de aplicación (no tu contraseña normal)."
+    except smtplib.SMTPRecipientsRefused:
+        return False, f"La dirección {destinatario} fue rechazada por el servidor."
+    except Exception as e:
+        return False, str(e)
+
+
+def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn):
+    """Panel completo en Streamlit para configurar y enviar extractos por email."""
+    st.header("📧 Envío de extractos por email")
+    st.caption("Genera y envía automáticamente el extracto mensual en Excel a cada inversor que tenga email registrado en la columna 'email' del Excel.")
+
+    mapa_emails = _leer_emails_inversores(df_inv)
+
+    if not mapa_emails:
+        st.error("⚠️ No se encontró ningún email en el Excel. Añade una columna llamada **email** en la hoja INVERSIONES con el correo de cada inversor.")
+        with st.expander("Ver cómo añadir la columna email en Excel"):
+            st.markdown("""
+1. Abre `inversiones.xlsx` en Excel o Google Sheets.
+2. En la hoja **INVERSIONES**, añade una columna nueva con el encabezado exacto: `email`
+3. Rellena el email del inversor en las filas correspondientes (basta con **una fila** por inversor).
+4. Guarda y vuelve a subir el Excel a la app (menú → Gestión de Excel → Recargar desde Google Drive).
+""")
+        return
+
+    st.subheader("⚙️ Configuración de cuenta Gmail")
+
+    with st.expander("📖 Cómo obtener la contraseña de aplicación Gmail (leer antes de empezar)", expanded=False):
+        st.markdown("""
+**Pasos (solo se hace una vez):**
+
+1. Ve a [myaccount.google.com](https://myaccount.google.com) con la cuenta que usarás para enviar.
+2. Activa la **verificación en dos pasos** si no la tienes.
+3. Busca **"Contraseñas de aplicación"** (en el apartado Seguridad).
+4. Crea una nueva → selecciona *Correo* y *Otro* → escribe `CF Wealth`.
+5. Google te dará una clave de 16 caracteres tipo `xxxx xxxx xxxx xxxx`. Esa es la contraseña.
+
+⚠️ **Nunca uses tu contraseña normal de Gmail**. La contraseña de aplicación es diferente.
+""")
+
+    secrets_ok = False
+    try:
+        smtp_sender   = st.secrets["email"]["sender"]
+        smtp_password = st.secrets["email"]["password"]
+        display_name  = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+        st.success(f"✅ Credenciales cargadas desde configuración segura: **{smtp_sender}**")
+        secrets_ok = True
+    except Exception:
+        pass
+
+    if not secrets_ok:
+        col1, col2 = st.columns(2)
+        smtp_sender   = col1.text_input("Cuenta Gmail emisora", placeholder="tucuenta@gmail.com", key="smtp_sender_input")
+        smtp_password = col2.text_input("Contraseña de aplicación Gmail", type="password", placeholder="xxxx xxxx xxxx xxxx", key="smtp_password_input")
+        display_name  = st.text_input("Nombre visible del remitente", value="Chaparro Fernández Wealth", key="smtp_display_name")
+
+    st.divider()
+
+    st.subheader("📅 Mes del extracto")
+    hoy_email = datetime.today()
+    mes_defecto = hoy_email.month - 1 if hoy_email.month > 1 else 12
+    anio_defecto = hoy_email.year if hoy_email.month > 1 else hoy_email.year - 1
+
+    col1, col2 = st.columns(2)
+    anio_email = int(col1.number_input("Año", 2020, 2100, anio_defecto, key="email_anio"))
+    mes_email  = int(col2.number_input("Mes", 1, 12, mes_defecto, key="email_mes"))
+    mes_str_email = MESES_ES_EMAIL.get(mes_email, str(mes_email)).capitalize()
+
+    st.divider()
+
+    st.subheader("👥 Destinatarios")
+    inversores_con_email = sorted(mapa_emails.keys())
+    todos_str = [f"{inv}  →  {mapa_emails[inv]}" for inv in inversores_con_email]
+
+    modo_envio = st.radio("¿A quién enviar?", ["Todos los inversores con email", "Seleccionar inversores"], horizontal=True, key="email_modo_envio")
+
+    if modo_envio == "Seleccionar inversores":
+        seleccionados_str = st.multiselect("Inversores a incluir", options=todos_str, default=todos_str, key="email_seleccion")
+        inversores_enviar = [s.split("  →  ")[0].strip() for s in seleccionados_str]
+    else:
+        inversores_enviar = inversores_con_email
+        st.info(f"Se enviarán extractos a **{len(inversores_enviar)} inversores**: " + ", ".join(inversores_con_email))
+
+    with st.expander("🔍 Vista previa de destinatarios", expanded=False):
+        preview_data = [{"Inversor": inv, "Email": mapa_emails.get(inv, "—")} for inv in inversores_enviar]
+        st.dataframe(pd.DataFrame(preview_data), use_container_width=True, hide_index=True)
+
+    with st.expander("🔌 Probar conexión Gmail antes de enviar", expanded=False):
+        email_prueba = st.text_input("Email de prueba (te llegará a ti)", placeholder="tuemail@gmail.com", key="email_prueba_dest")
+        if st.button("Enviar email de prueba", key="btn_email_prueba"):
+            if not smtp_sender or not smtp_password:
+                st.error("Introduce las credenciales Gmail primero.")
+            elif not email_prueba:
+                st.error("Introduce un email de destino para la prueba.")
+            else:
+                ok, err = enviar_extracto_email(
+                    destinatario=email_prueba, inversor="INVERSOR TEST",
+                    mes=mes_email, anio=anio_email, extracto_bytes=b"",
+                    nombre_archivo="test.xlsx", total_intereses=12345.67,
+                    smtp_sender=smtp_sender, smtp_password=smtp_password, display_name=display_name,
+                )
+                if ok:
+                    st.success(f"✅ Email de prueba enviado a {email_prueba}. Revisa tu bandeja de entrada.")
+                else:
+                    st.error(f"❌ Error: {err}")
+
+    st.divider()
+    st.subheader(f"🚀 Enviar extractos — {mes_str_email} {anio_email}")
+
+    if not inversores_enviar:
+        st.warning("No hay inversores seleccionados.")
+        return
+
+    if st.button(f"📨 Generar y enviar {len(inversores_enviar)} extracto(s) por email", type="primary", use_container_width=True, key="btn_enviar_extractos"):
+        if not smtp_sender or not smtp_password:
+            st.error("Introduce las credenciales Gmail antes de enviar.")
+            return
+
+        progreso   = st.progress(0, text="Preparando envíos...")
+        resultados = []
+
+        for i, inversor in enumerate(inversores_enviar):
+            progreso.progress((i) / len(inversores_enviar), text=f"Generando extracto de {inversor}... ({i+1}/{len(inversores_enviar)})")
+            try:
+                archivos = generar_extractos_fn(df_inv, "Un inversor", inversor, anio_email, mes_email)
+            except Exception as e:
+                resultados.append({"Inversor": inversor, "Email": mapa_emails.get(inversor, "—"), "Estado": "❌ Error al generar", "Detalle": str(e)})
+                continue
+
+            if not archivos:
+                resultados.append({"Inversor": inversor, "Email": mapa_emails.get(inversor, "—"), "Estado": "⚠️ Sin datos", "Detalle": "Sin inversiones en este periodo."})
+                continue
+
+            nombre_archivo, extracto_bytes = archivos[0]
+            email_dest = mapa_emails.get(inversor, "")
+
+            total_intereses_email = 0.0
+            try:
+                from openpyxl import load_workbook as _lw
+                wb_tmp = _lw(BytesIO(extracto_bytes))
+                if "TOTALES_MES" in wb_tmp.sheetnames:
+                    ws_t = wb_tmp["TOTALES_MES"]
+                    for row in ws_t.iter_rows(min_row=2, values_only=True):
+                        if row and row[0] and f"{mes_email:02d}/{anio_email}" in str(row[0]):
+                            try:
+                                total_intereses_email += float(row[1] or 0)
+                            except Exception:
+                                pass
+            except Exception:
+                total_intereses_email = 0.0
+
+            progreso.progress((i + 0.5) / len(inversores_enviar), text=f"Enviando a {email_dest}...")
+            ok, err = enviar_extracto_email(
+                destinatario=email_dest, inversor=inversor,
+                mes=mes_email, anio=anio_email,
+                extracto_bytes=extracto_bytes, nombre_archivo=nombre_archivo,
+                total_intereses=total_intereses_email,
+                smtp_sender=smtp_sender, smtp_password=smtp_password, display_name=display_name,
+            )
+            if ok:
+                resultados.append({"Inversor": inversor, "Email": email_dest, "Estado": "✅ Enviado", "Detalle": nombre_archivo})
+            else:
+                resultados.append({"Inversor": inversor, "Email": email_dest, "Estado": "❌ Error al enviar", "Detalle": err})
+
+        progreso.progress(1.0, text="¡Proceso completado!")
+
+        df_res = pd.DataFrame(resultados)
+        enviados  = (df_res["Estado"] == "✅ Enviado").sum()
+        errores   = df_res["Estado"].str.startswith("❌").sum()
+        sin_datos = (df_res["Estado"] == "⚠️ Sin datos").sum()
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("✅ Enviados correctamente", enviados)
+        col2.metric("⚠️ Sin datos / omitidos", sin_datos)
+        col3.metric("❌ Errores", errores)
+
+        st.dataframe(df_res, use_container_width=True, hide_index=True)
+
+        if errores == 0 and enviados > 0:
+            st.balloons()
+            st.success(f"🎉 Todos los extractos de {mes_str_email} {anio_email} han sido enviados correctamente.")
+        elif errores > 0:
+            st.warning(f"Se enviaron {enviados} extractos pero hubo {errores} error(es). Revisa la columna 'Detalle'.")
 
 
 # =========================
@@ -3821,6 +4115,7 @@ menu = st.sidebar.selectbox(
     [
         "Dashboard financiero", "Histórico y proyecciones", "Centro de control", "Consultas Fútbol", "Consultas Notas", "Consultas Paraguay", "Consultas MotoClick",
         "Notas estructuradas", "Alertas y calendario", "Sistema Fondo", "Extractos", "Gestión de Excel", "Calidad de datos", "Base de datos",
+        "Envío por email",
     ],
 )
 
@@ -3855,3 +4150,5 @@ elif menu == "Base de datos":
     hojas = {"INVERSIONES": df_inv, "CALENDARIO_NOTAS": df_cal, "CONTROL_NOTAS": df_control}
     hoja = st.selectbox("Selecciona hoja", list(hojas.keys()))
     st.dataframe(hojas[hoja], use_container_width=True)
+elif menu == "Envío por email":
+    seccion_envio_extractos_email(df_inv, generar_extractos)
