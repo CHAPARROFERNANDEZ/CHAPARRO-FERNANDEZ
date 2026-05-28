@@ -4641,7 +4641,7 @@ def seccion_asistente_ia_fondo():
                 mask = df_c2["fecha"] >= hoy
                 if fecha_limite:
                     mask = mask & (df_c2["fecha"] <= pd.Timestamp(fecha_limite))
-                prox = df_c2[mask & (df_c2["tipo_evento"] == "PAGO")].sort_values("fecha").head(20)
+                prox = df_c2[mask & (df_c2["tipo_evento"].astype(str).str.upper() == "PAGO")].sort_values("fecha").head(20)
                 cols_c = [c for c in ["fecha","nota","importe_cobro","importe_pago_inversor"] if c in prox.columns]
                 lineas += ["", "=== COBROS NOTAS CALENDARIO ===",
                            prox[cols_c].to_string(index=False) if not prox.empty else "Sin cobros."]
