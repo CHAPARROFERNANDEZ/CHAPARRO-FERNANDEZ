@@ -2926,83 +2926,209 @@ def seccion_notas():
             st.dataframe(preparar_tabla_monetaria(resumen_capital_por_inversor_notas(df_inv, True), ["capital"]), use_container_width=True)
 
 
-def seccion_notas_archivo():
-    df_inv, _, df_control = cargar_excel_completo()
-    st.header("🧾 Notas")
-    st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
+def _cargar_pdfs_notas() -> dict:
+    """Lee todos los PDFs de la carpeta notas_pdfs/ y los devuelve en base64."""
+    import os, base64
+    pdfs = {}
+    carpeta = os.path.join(os.path.dirname(__file__), "notas_pdfs")
+    if not os.path.exists(carpeta):
+        return pdfs
+    for fname in sorted(os.listdir(carpeta)):
+        if fname.lower().endswith(".pdf"):
+            try:
+                with open(os.path.join(carpeta, fname), "rb") as f:
+                    pdfs[fname] = base64.standard_b64encode(f.read()).decode()
+            except Exception:
+                pass
+    return pdfs
 
-    if yf is None:
-        st.error("Falta yfinance. Añade yfinance a requirements.txt.")
-        return
-    if df_control is None or df_control.empty:
-        st.warning("La hoja CONTROL_NOTAS está vacía o no existe.")
-        return
 
-    faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in df_control.columns]
-    barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in df_control.columns), None)
-    if faltan:
-        st.error(f"En CONTROL_NOTAS faltan columnas: {', '.join(faltan)}")
-        return
-    if barrera_col is None:
-        st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
-        return
+def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
+    """Pestaña: chat IA especializado en los PDFs de las notas estructuradas."""
+    st.caption("Pregúntame cualquier cosa sobre las notas: cobros, calls, barreras, vencimientos...")
 
-    # Detectar notas con call ejecutado: todas sus filas tienen motivo=call
-    # y fecha_final_inversion ya pasada → excluirlas del resumen
-    hoy = pd.Timestamp.today().normalize()
-    notas_con_call = set()
-    if "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
-        notas_df = df_inv[df_inv["motivo"].astype(str).str.lower().str.strip() == "call"].copy()
-        notas_df["fecha_final_inversion"] = pd.to_datetime(notas_df["fecha_final_inversion"], errors="coerce")
-        notas_df["nota_num"] = notas_df["nombre_activo"].apply(extraer_numero_nota)
-        # Una nota tiene call ejecutado si TODAS sus filas tienen fecha_final <= hoy
-        for nota_num, grupo in notas_df.groupby("nota_num"):
-            if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= hoy)).all():
-                notas_con_call.add(int(nota_num))
+    import os
+    carpeta_pdfs = os.path.join(os.path.dirname(__file__), "notas_pdfs")
+    os.makedirs(carpeta_pdfs, exist_ok=True)
+    pdfs_existentes = sorted([f for f in os.listdir(carpeta_pdfs) if f.lower().endswith(".pdf")])
 
-    df_control_filtrado = df_control[~df_control["nota"].isin(notas_con_call)].copy() if notas_con_call else df_control
+    with st.expander(f"📂 PDFs cargados ({len(pdfs_existentes)})", expanded=not pdfs_existentes):
+        if pdfs_existentes:
+            col_l, col_d = st.columns([3, 1])
+            with col_l:
+                for pdf in pdfs_existentes:
+                    st.markdown(f"✅ `{pdf}`")
+            with col_d:
+                pdf_borrar = st.selectbox("Borrar", ["—"] + pdfs_existentes, key="pdf_borrar_sel")
+                if pdf_borrar != "—" and st.button("🗑️ Borrar", key="btn_borrar_pdf"):
+                    os.remove(os.path.join(carpeta_pdfs, pdf_borrar))
+                    st.rerun()
+        else:
+            st.info("Sube los PDFs de las notas para activar el asistente.")
 
-    if st.button("Actualizar precios actuales"):
-        st.cache_data.clear()
+        subidos = st.file_uploader(
+            "Subir PDFs (nota1.pdf, nota2.pdf...)",
+            type=["pdf"], accept_multiple_files=True, key="uploader_pdfs_notas"
+        )
+        if subidos:
+            for f in subidos:
+                with open(os.path.join(carpeta_pdfs, f.name), "wb") as out:
+                    out.write(f.read())
+            st.success(f"✅ {len(subidos)} PDF(s) guardado(s).")
+            st.rerun()
+
+    if "chat_notas_ia" not in st.session_state:
+        st.session_state["chat_notas_ia"] = []
+
+    for msg in st.session_state["chat_notas_ia"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if not st.session_state["chat_notas_ia"]:
+        st.markdown("**Preguntas frecuentes:**")
+        sugs = ["¿Cuándo es el próximo cobro?", "¿Cuándo es el próximo call?",
+                "¿Cuánto cobraremos este mes?", "¿Qué notas están cerca de la barrera?",
+                "Dame un resumen de todas las notas activas"]
+        cols = st.columns(len(sugs))
+        for i, s in enumerate(sugs):
+            if cols[i].button(s, key=f"sug_nota_{i}", use_container_width=True):
+                st.session_state["chat_notas_ia"].append({"role": "user", "content": s})
+                st.rerun()
+
+    pregunta = st.chat_input("Escribe tu pregunta sobre las notas...", key="chat_input_notas")
+    if pregunta:
+        st.session_state["chat_notas_ia"].append({"role": "user", "content": pregunta})
         st.rerun()
 
-    with st.spinner("Descargando precios actuales..."):
-        resumen = construir_resumen_actual_notas_alertas(df_control_filtrado)
+    if st.session_state["chat_notas_ia"] and st.session_state["chat_notas_ia"][-1]["role"] == "user":
+        ultima = st.session_state["chat_notas_ia"][-1]["content"]
+        with st.chat_message("assistant"):
+            with st.spinner("Analizando documentos..."):
+                try:
+                    import requests as _req
+                    pdfs_b64 = _cargar_pdfs_notas()
+                    hoy = pd.Timestamp.today().normalize()
+                    ctx_lines = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}"]
+                    if df_control is not None and not df_control.empty:
+                        ctx_lines += ["", "=== CONTROL_NOTAS ===", df_control.to_string(index=False)]
+                    if df_cal is not None and not df_cal.empty:
+                        df_c2 = df_cal.copy()
+                        df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
+                        prox = df_c2[df_c2["fecha"] >= hoy].sort_values("fecha").head(30)
+                        ctx_lines += ["", "=== PRÓXIMOS EVENTOS (30) ===", prox.to_string(index=False)]
+                    contexto = "\n".join(ctx_lines)
 
-    if resumen.empty:
-        st.warning("No se pudo generar el resumen.")
-        return
+                    contenido = []
+                    for nombre_pdf, pdf_b64 in pdfs_b64.items():
+                        contenido.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}, "title": nombre_pdf.replace(".pdf","").upper()})
+                    contenido.append({"type": "text", "text": f"DATOS DEL EXCEL:\n\n{contexto}\n\n---\nPREGUNTA: {ultima}"})
 
-    alertas_resumen = resumen_alertas_por_nota(resumen)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Notas analizadas", resumen["nota"].nunique())
-    c2.metric("Tickers", len(resumen))
-    c3.metric("Notas en amarillo", int((alertas_resumen["alerta"] == "AMARILLO").sum()) if not alertas_resumen.empty else 0)
-    c4.metric("Notas en rojo", int((alertas_resumen["alerta"] == "ROJO").sum()) if not alertas_resumen.empty else 0)
+                    historial = []
+                    for m in st.session_state["chat_notas_ia"][:-1][-6:]:
+                        historial.append({"role": m["role"], "content": m["content"]})
+                    historial.append({"role": "user", "content": contenido})
 
-    tabla = resumen.copy()
-    tabla["variacion_%"] = pd.to_numeric(tabla["variacion_%"], errors="coerce")
-    columnas_dinero = ["precio_compra", "precio_actual", "precio_contingencia"]
-    tabla_mostrar = preparar_tabla_monetaria(tabla, columnas_dinero)
-    if "variacion_%" in tabla_mostrar.columns:
-        tabla_mostrar["variacion_%"] = tabla["variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+                    resp = _req.post("https://api.anthropic.com/v1/messages",
+                        headers={"Content-Type": "application/json"},
+                        json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
+                              "system": "Eres un asistente financiero especializado en notas estructuradas para Chaparro Fernández Wealth. Tienes los term sheets oficiales del banco y los datos del Excel. Responde siempre en español, con precisión. Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
+                              "messages": historial}, timeout=60)
+                    data = resp.json()
+                    respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
+                    if not respuesta:
+                        respuesta = f"Error API: {data.get('error',{}).get('message', str(data))}"
+                except Exception as e:
+                    respuesta = f"Error: {e}"
+                st.markdown(respuesta)
+        st.session_state["chat_notas_ia"].append({"role": "assistant", "content": respuesta})
 
-    st.dataframe(tabla_mostrar.style.apply(colorear_filas_alerta_notas, axis=1), use_container_width=True)
+    if st.session_state["chat_notas_ia"]:
+        if st.button("🗑️ Limpiar conversación", key="btn_limpiar_notas"):
+            st.session_state["chat_notas_ia"] = []
+            st.rerun()
 
-    st.markdown("### Alertas por variación")
-    st.caption("Amarillo: variación igual o inferior a -25%. Rojo: variación igual o inferior a -35%.")
-    if alertas_resumen.empty:
-        st.success("No hay notas en amarillo ni en rojo por variación.")
-    else:
-        rojas = int((alertas_resumen["alerta"] == "ROJO").sum())
-        amarillas = int((alertas_resumen["alerta"] == "AMARILLO").sum())
-        if rojas > 0:
-            st.error(f"Hay {rojas} notas en rojo y {amarillas} notas en amarillo.")
+
+def seccion_notas_archivo():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.header("🧾 Notas")
+
+    tab_resumen, tab_ia = st.tabs(["📊 Resumen y alertas", "💬 Asistente IA"])
+
+    with tab_resumen:
+        st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
+
+        if yf is None:
+            st.error("Falta yfinance. Añade yfinance a requirements.txt.")
+            return
+        if df_control is None or df_control.empty:
+            st.warning("La hoja CONTROL_NOTAS está vacía o no existe.")
+            return
+
+        faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in df_control.columns]
+        barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in df_control.columns), None)
+        if faltan:
+            st.error(f"En CONTROL_NOTAS faltan columnas: {', '.join(faltan)}")
+            return
+        if barrera_col is None:
+            st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
+            return
+
+        hoy = pd.Timestamp.today().normalize()
+        notas_con_call = set()
+        if "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
+            notas_df = df_inv[df_inv["motivo"].astype(str).str.lower().str.strip() == "call"].copy()
+            notas_df["fecha_final_inversion"] = pd.to_datetime(notas_df["fecha_final_inversion"], errors="coerce")
+            notas_df["nota_num"] = notas_df["nombre_activo"].apply(extraer_numero_nota)
+            for nota_num, grupo in notas_df.groupby("nota_num"):
+                if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= hoy)).all():
+                    notas_con_call.add(int(nota_num))
+
+        df_control_filtrado = df_control[~df_control["nota"].isin(notas_con_call)].copy() if notas_con_call else df_control
+
+        if st.button("Actualizar precios actuales"):
+            st.cache_data.clear()
+            st.rerun()
+
+        with st.spinner("Descargando precios actuales..."):
+            resumen = construir_resumen_actual_notas_alertas(df_control_filtrado)
+
+        if resumen.empty:
+            st.warning("No se pudo generar el resumen.")
+            return
+
+        alertas_resumen = resumen_alertas_por_nota(resumen)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Notas analizadas", resumen["nota"].nunique())
+        c2.metric("Tickers", len(resumen))
+        c3.metric("Notas en amarillo", int((alertas_resumen["alerta"] == "AMARILLO").sum()) if not alertas_resumen.empty else 0)
+        c4.metric("Notas en rojo", int((alertas_resumen["alerta"] == "ROJO").sum()) if not alertas_resumen.empty else 0)
+
+        tabla = resumen.copy()
+        tabla["variacion_%"] = pd.to_numeric(tabla["variacion_%"], errors="coerce")
+        columnas_dinero = ["precio_compra", "precio_actual", "precio_contingencia"]
+        tabla_mostrar = preparar_tabla_monetaria(tabla, columnas_dinero)
+        if "variacion_%" in tabla_mostrar.columns:
+            tabla_mostrar["variacion_%"] = tabla["variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+
+        st.dataframe(tabla_mostrar.style.apply(colorear_filas_alerta_notas, axis=1), use_container_width=True)
+
+        st.markdown("### Alertas por variación")
+        st.caption("Amarillo: variación igual o inferior a -25%. Rojo: variación igual o inferior a -35%.")
+        if alertas_resumen.empty:
+            st.success("No hay notas en amarillo ni en rojo por variación.")
         else:
-            st.warning(f"Hay {amarillas} notas en amarillo.")
-        alertas_mostrar = alertas_resumen.copy()
-        alertas_mostrar["peor_variacion_%"] = alertas_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
-        st.dataframe(alertas_mostrar, use_container_width=True)
+            rojas = int((alertas_resumen["alerta"] == "ROJO").sum())
+            amarillas = int((alertas_resumen["alerta"] == "AMARILLO").sum())
+            if rojas > 0:
+                st.error(f"Hay {rojas} notas en rojo y {amarillas} notas en amarillo.")
+            else:
+                st.warning(f"Hay {amarillas} notas en amarillo.")
+            alertas_mostrar = alertas_resumen.copy()
+            alertas_mostrar["peor_variacion_%"] = alertas_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+            st.dataframe(alertas_mostrar, use_container_width=True)
+
+    with tab_ia:
+        _tab_asistente_ia_notas(df_inv, df_cal, df_control)
 
 
 def seccion_alertas_notas():
@@ -4405,11 +4531,93 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
+
+def seccion_asistente_ia_fondo():
+    """Asistente IA para consultar cualquier dato del fondo en lenguaje natural."""
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.header("✨ Asistente IA — Fondo CF")
+    st.caption("Pregúntame cualquier cosa sobre el fondo: inversores, capitales, intereses, vencimientos, beneficios...")
+
+    def _contexto_fondo() -> str:
+        hoy = pd.Timestamp.today().normalize()
+        lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}", ""]
+        if df_inv is not None and not df_inv.empty:
+            lineas += ["=== INVERSIONES ===", df_inv.to_string(index=False), ""]
+        if df_cal is not None and not df_cal.empty:
+            df_c2 = df_cal.copy()
+            df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
+            prox = df_c2[df_c2["fecha"] >= hoy].sort_values("fecha").head(30)
+            lineas += ["=== PRÓXIMOS EVENTOS (30) ===", prox.to_string(index=False) if not prox.empty else "Sin eventos.", ""]
+        if df_control is not None and not df_control.empty:
+            lineas += ["=== CONTROL DE NOTAS ===", df_control.to_string(index=False)]
+        return "\n".join(lineas)
+
+    if "chat_fondo_ia" not in st.session_state:
+        st.session_state["chat_fondo_ia"] = []
+
+    for msg in st.session_state["chat_fondo_ia"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if not st.session_state["chat_fondo_ia"]:
+        st.markdown("**Ejemplos de preguntas:**")
+        sugs = [
+            "¿Cuánto capital total hay activo hoy?",
+            "¿Cuánto le debemos a cada inversor este mes?",
+            "¿Qué inversiones vencen en los próximos 30 días?",
+            "¿Cuál es el inversor con más capital?",
+            "¿Cuánto hemos pagado en intereses este año?",
+            "¿Cuánto beneficio ha generado MotoClick desde el inicio?",
+        ]
+        col1, col2, col3 = st.columns(3)
+        for i, s in enumerate(sugs):
+            col = [col1, col2, col3][i % 3]
+            if col.button(s, key=f"sug_fondo_{i}", use_container_width=True):
+                st.session_state["chat_fondo_ia"].append({"role": "user", "content": s})
+                st.rerun()
+
+    pregunta = st.chat_input("Escribe tu pregunta sobre el fondo...", key="chat_input_fondo")
+    if pregunta:
+        st.session_state["chat_fondo_ia"].append({"role": "user", "content": pregunta})
+        st.rerun()
+
+    if st.session_state["chat_fondo_ia"] and st.session_state["chat_fondo_ia"][-1]["role"] == "user":
+        ultima = st.session_state["chat_fondo_ia"][-1]["content"]
+        with st.chat_message("assistant"):
+            with st.spinner("Analizando datos del fondo..."):
+                try:
+                    import requests as _req
+                    contexto = _contexto_fondo()
+                    historial = []
+                    for m in st.session_state["chat_fondo_ia"][:-1][-8:]:
+                        historial.append({"role": m["role"], "content": m["content"]})
+                    historial.append({"role": "user", "content": f"DATOS DEL FONDO:\n\n{contexto}\n\n---\nPREGUNTA: {ultima}"})
+
+                    resp = _req.post("https://api.anthropic.com/v1/messages",
+                        headers={"Content-Type": "application/json"},
+                        json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
+                              "system": "Eres un asistente financiero experto de Chaparro Fernández Wealth. Tienes acceso completo a todos los datos del fondo. Responde siempre en español, con precisión. Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. Fechas en DD/MM/YYYY, importes con $ y 2 decimales. Muestra los cálculos paso a paso.",
+                              "messages": historial}, timeout=60)
+                    data = resp.json()
+                    respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
+                    if not respuesta:
+                        respuesta = f"Error API: {data.get('error',{}).get('message', str(data))}"
+                except Exception as e:
+                    respuesta = f"Error: {e}"
+                st.markdown(respuesta)
+        st.session_state["chat_fondo_ia"].append({"role": "assistant", "content": respuesta})
+
+    if st.session_state["chat_fondo_ia"]:
+        if st.button("🗑️ Limpiar conversación", key="btn_limpiar_fondo"):
+            st.session_state["chat_fondo_ia"] = []
+            st.rerun()
+
 menu = st.sidebar.selectbox(
     "Menú principal",
     [
         "Dashboard financiero", "Centro de control", "Consultas",
         "Notas estructuradas", "Alertas y calendario", "Extractos", "Gestión de Excel",
+        "✨ Asistente IA",
     ],
 )
 
@@ -4441,3 +4649,5 @@ elif menu == "Extractos":
     seccion_extractos()
 elif menu == "Gestión de Excel":
     seccion_gestion_excel()
+elif menu == "✨ Asistente IA":
+    seccion_asistente_ia_fondo()
