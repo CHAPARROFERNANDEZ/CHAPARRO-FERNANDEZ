@@ -3018,13 +3018,18 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                     pdfs_b64 = _cargar_pdfs_notas()
                     hoy = pd.Timestamp.today().normalize()
                     ctx_lines = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}"]
-                    if df_control is not None and not df_control.empty:
-                        ctx_lines += ["", "=== CONTROL_NOTAS ===", df_control.to_string(index=False)]
+                    # Solo próximos 15 eventos para minimizar tokens
                     if df_cal is not None and not df_cal.empty:
                         df_c2 = df_cal.copy()
                         df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-                        prox = df_c2[df_c2["fecha"] >= hoy].sort_values("fecha").head(30)
-                        ctx_lines += ["", "=== PRÓXIMOS EVENTOS (30) ===", prox.to_string(index=False)]
+                        prox = df_c2[df_c2["fecha"] >= hoy].sort_values("fecha").head(15)
+                        cols_cal = [c for c in ["fecha","nota","tipo_evento","importe_cobro","importe_pago_inversor"] if c in prox.columns]
+                        ctx_lines += ["", "=== PRÓXIMOS EVENTOS ===", prox[cols_cal].to_string(index=False)]
+                    # Control notas: solo columnas esenciales
+                    if df_control is not None and not df_control.empty:
+                        cols_ctrl = [c for c in ["nota","ticker","precio_compra","contingency","barrera_capital","fecha_vencimiento","proximo_call"] if c in df_control.columns]
+                        if cols_ctrl:
+                            ctx_lines += ["", "=== NOTAS (resumen) ===", df_control[cols_ctrl].to_string(index=False)]
                     contexto = "\n".join(ctx_lines)
 
                     # Filtrar solo los PDFs relevantes según la pregunta (máx 3)
@@ -4684,13 +4689,23 @@ def seccion_asistente_ia_fondo():
                     historial = []
                     for m in st.session_state["chat_fondo_ia"][:-1][-8:]:
                         historial.append({"role": m["role"], "content": m["content"]})
-                    historial.append({"role": "user", "content": f"DATOS DEL FONDO:\n\n{contexto}\n\n---\nPREGUNTA: {ultima}"})
+                    historial.append({"role": "user", "content": f"DATOS DEL FONDO:\n\n{ctx_fondo}\n\n---\nPREGUNTA: {ultima}"})
+
+                    # Construir contexto mínimo según la pregunta para no superar tokens
+                    import re as _re_fondo
+                    ctx_fondo = _contexto_fondo()
+                    # Si la pregunta es simple (capital, próximo, total) recortar contexto
+                    palabras_simples = ["capital","próximo","proximo","total","cuanto","cuánto","beneficio","vence","vencen"]
+                    es_simple = any(p in ultima.lower() for p in palabras_simples) and "desglos" not in ultima.lower() and "detalle" not in ultima.lower()
+                    if es_simple:
+                        # Solo primeras 3000 chars del contexto
+                        ctx_fondo = ctx_fondo[:3000]
 
                     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
-                        json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-                              "system": "Eres el asistente financiero interno de Chaparro Fernández Wealth. Reglas estrictas: 1) Responde SIEMPRE en español. 2) Sé extremadamente conciso — da solo el número o dato que se pide, sin tablas ni desglose salvo que explícitamente te lo pidan. 3) Ejemplo correcto: 'El capital total activo hoy es $485.000,00'. Ejemplo incorrecto: listar cada inversión. 4) Si te piden detalle, entonces sí desglosa. 5) Incluye TODAS las inversiones del fondo (notas, fútbol, paraguay, motoclick, etc.), no solo las notas. 6) Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. 7) Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
+                        json={"model": "claude-sonnet-4-5", "max_tokens": 500,
+                              "system": "Eres el asistente financiero interno de Chaparro Fernández Wealth. Reglas: 1) Responde SIEMPRE en español. 2) Extremadamente conciso — solo el dato pedido. 3) Sin tablas ni desglose salvo que te lo pidan. 4) Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. 5) Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
                               "messages": historial}, timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
