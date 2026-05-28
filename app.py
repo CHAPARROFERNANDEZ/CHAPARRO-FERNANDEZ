@@ -3086,7 +3086,7 @@ def seccion_notas_archivo():
     df_inv, df_cal, df_control = cargar_excel_completo()
     st.header("🧾 Notas")
 
-    tab_resumen, tab_ia = st.tabs(["📊 Resumen y alertas", "💬 Asistente IA"])
+    tab_resumen, = st.tabs(["📊 Resumen y alertas"])
 
     with tab_resumen:
         st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
@@ -3161,8 +3161,6 @@ def seccion_notas_archivo():
             alertas_mostrar["peor_variacion_%"] = alertas_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
             st.dataframe(alertas_mostrar, use_container_width=True)
 
-    with tab_ia:
-        _tab_asistente_ia_notas(df_inv, df_cal, df_control)
 
 
 def seccion_alertas_notas():
@@ -4567,158 +4565,184 @@ except Exception as e:
 
 
 def seccion_asistente_ia_fondo():
-    """Asistente IA para consultar cualquier dato del fondo en lenguaje natural."""
+    """IA única: fondo completo + PDFs de notas estructuradas."""
     df_inv, df_cal, df_control = cargar_excel_completo()
-    st.header("✨ Asistente IA — Fondo CF")
-    st.caption("Pregúntame cualquier cosa sobre el fondo: inversores, capitales, intereses, vencimientos, beneficios...")
+    st.header("✨ Asistente IA — Chaparro Fernández Wealth")
+    st.caption("Pregúntame cualquier cosa: cobros, calls, barreras, capitales, intereses, inversores, beneficios...")
 
-    def _contexto_fondo() -> str:
-        """Genera contexto usando las funciones de cálculo reales del código — nunca inventa números."""
+    import os, re as _re_ia, requests as _req_ia
+
+    # ── Gestión de PDFs ───────────────────────────────────────────────────────
+    import tempfile, base64 as _b64
+    carpeta_tmp = os.path.join(tempfile.gettempdir(), "notas_pdfs_cf")
+    carpeta_repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notas_pdfs")
+    os.makedirs(carpeta_tmp, exist_ok=True)
+
+    def _pdfs_disponibles():
+        pdfs = {}
+        for carpeta in [carpeta_repo, carpeta_tmp]:
+            if not os.path.exists(carpeta) or not os.path.isdir(carpeta):
+                continue
+            for fname in sorted(os.listdir(carpeta)):
+                if fname.lower().endswith(".pdf"):
+                    clave = _re_ia.sub(r"[^a-z0-9]", "", fname.lower().replace(".pdf",""))
+                    if clave not in {_re_ia.sub(r"[^a-z0-9]","",k.lower().replace(".pdf","")) for k in pdfs}:
+                        try:
+                            with open(os.path.join(carpeta, fname), "rb") as f:
+                                pdfs[fname] = _b64.standard_b64encode(f.read()).decode()
+                        except Exception:
+                            pass
+        return pdfs
+
+    pdfs_b64 = _pdfs_disponibles()
+    n_pdfs = len(pdfs_b64)
+
+    with st.expander(f"📂 PDFs de notas cargados ({n_pdfs})", expanded=n_pdfs == 0):
+        if pdfs_b64:
+            for p in sorted(pdfs_b64.keys()):
+                st.markdown(f"✅ `{p}`")
+        else:
+            st.info("No hay PDFs. Súbelos desde aquí o a la carpeta notas_pdfs/ en GitHub.")
+        subidos = st.file_uploader("Subir PDFs", type=["pdf"], accept_multiple_files=True, key="up_pdfs_ia")
+        if subidos:
+            for f in subidos:
+                with open(os.path.join(carpeta_tmp, f.name), "wb") as out:
+                    out.write(f.read())
+            st.success(f"✅ {len(subidos)} PDF(s) guardado(s).")
+            st.rerun()
+
+    # ── Contexto del Excel ────────────────────────────────────────────────────
+    def _contexto_excel(fecha_limite=None) -> str:
         hoy = pd.Timestamp.today().normalize()
-        anio_hoy = hoy.year
-        mes_hoy = hoy.month
-        lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}", ""]
+        anio_hoy, mes_hoy = hoy.year, hoy.month
+        lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}"]
 
-        # ── Resumen general del dashboard (fuente de verdad) ──────────────────
+        # Resumen dashboard
         try:
-            resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_hoy, mes_hoy)
-            lineas.append("=== RESUMEN GENERAL DEL FONDO (MES ACTUAL) ===")
-            for k, v in resumen.items():
-                lineas.append(f"{k}: {v}")
-            lineas.append("")
-        except Exception as e:
-            lineas.append(f"(Error resumen general: {e})")
-
-        # ── Capital activo total hoy ──────────────────────────────────────────
-        try:
-            cap_total = capital_activo_en_fecha(df_inv, hoy)
-            lineas.append(f"Capital total activo hoy: ${cap_total:,.2f}")
+            res = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_hoy, mes_hoy)
+            lineas += ["", "=== RESUMEN FONDO ==="] + [f"{k}: {v}" for k, v in res.items()]
         except Exception:
             pass
 
-        # ── Capital activo por activo ─────────────────────────────────────────
+        # Capital por activo
         try:
-            for activo in ["notas", "futbol", "paraguay", "motoclick"]:
+            lineas.append("")
+            for activo in ["notas","futbol","paraguay","motoclick"]:
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
                 lineas.append(f"Capital activo {activo}: ${cap:,.2f}")
-            lineas.append("")
         except Exception:
             pass
 
-        # ── Ingresos y pagos desde inicio por activo ─────────────────────────
-        try:
-            lineas.append("=== TOTALES DESDE INICIO ===")
-            for activo, tasa in [("futbol", TASA_ANUAL_FUTBOL), ("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK)]:
-                ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
-                pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
-                lineas.append(f"{activo} — Ingresado: ${ing:,.2f} | Pagado inversores: ${pag:,.2f} | Beneficio: ${ing-pag:,.2f}")
-            lineas.append("")
-        except Exception as e:
-            lineas.append(f"(Error totales: {e})")
-
-        # ── Próximos cobros de notas (calendario) ─────────────────────────────
+        # Cobros calendario hasta fecha límite o próximos 20
         try:
             if df_cal is not None and not df_cal.empty:
                 df_c2 = df_cal.copy()
                 df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-                prox = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["tipo_evento"] == "PAGO")].sort_values("fecha").head(20)
-                lineas.append("=== PRÓXIMOS COBROS DE NOTAS ===")
-                lineas.append(prox[["fecha","nota","importe_cobro","importe_pago_inversor"]].to_string(index=False) if not prox.empty else "Sin cobros próximos.")
-                lineas.append("")
-        except Exception as e:
-            lineas.append(f"(Error próximos cobros: {e})")
-
-        # ── Detalle mes actual notas ──────────────────────────────────────────
-        try:
-            det_mes = detalle_activo_mes(df_inv, "notas", 0, anio_hoy, mes_hoy)
-            if not det_mes.empty:
-                lineas.append(f"=== DETALLE NOTAS MES {mes_hoy:02d}/{anio_hoy} ===")
-                lineas.append(det_mes.to_string(index=False))
-                lineas.append("")
+                mask = df_c2["fecha"] >= hoy
+                if fecha_limite:
+                    mask = mask & (df_c2["fecha"] <= pd.Timestamp(fecha_limite))
+                prox = df_c2[mask & (df_c2["tipo_evento"] == "PAGO")].sort_values("fecha").head(20)
+                cols_c = [c for c in ["fecha","nota","importe_cobro","importe_pago_inversor"] if c in prox.columns]
+                lineas += ["", "=== COBROS NOTAS CALENDARIO ===",
+                           prox[cols_c].to_string(index=False) if not prox.empty else "Sin cobros."]
         except Exception:
             pass
 
-        # ── Inversiones por inversor ──────────────────────────────────────────
+        # Inversiones activas
         try:
             if df_inv is not None and not df_inv.empty:
-                lineas.append("=== INVERSIONES RAW (para consultas por inversor) ===")
-                cols = [c for c in ["id_inversion","inversor","nombre_activo","capital_invertido",
+                cols = [c for c in ["inversor","nombre_activo","capital_invertido",
                                     "interes_inversor_anual","fecha_inversion","fecha_final_inversion","tipo_operacion"] if c in df_inv.columns]
-                lineas.append(df_inv[cols].to_string(index=False))
+                lineas += ["", "=== INVERSIONES ===", df_inv[cols].to_string(index=False)]
         except Exception:
             pass
 
         return "\n".join(lineas)
 
-    if "chat_fondo_ia" not in st.session_state:
-        st.session_state["chat_fondo_ia"] = []
+    # ── Chat ──────────────────────────────────────────────────────────────────
+    if "chat_ia_cf" not in st.session_state:
+        st.session_state["chat_ia_cf"] = []
 
-    for msg in st.session_state["chat_fondo_ia"]:
+    for msg in st.session_state["chat_ia_cf"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if not st.session_state["chat_fondo_ia"]:
-        st.markdown("**Ejemplos de preguntas:**")
+    if not st.session_state["chat_ia_cf"]:
+        st.markdown("**Ejemplos:**")
         sugs = [
-            "¿Cuánto capital total hay activo hoy?",
-            "¿Cuánto le debemos a cada inversor este mes?",
-            "¿Qué inversiones vencen en los próximos 30 días?",
-            "¿Cuál es el inversor con más capital?",
-            "¿Cuánto hemos pagado en intereses este año?",
-            "¿Cuánto beneficio ha generado MotoClick desde el inicio?",
+            "¿Cuándo es el próximo cobro?",
+            "¿Cuánto cobraremos del 28/05 al 07/06?",
+            "¿Cuándo es el próximo call?",
+            "¿Cuánto capital hay activo hoy?",
+            "¿Cuánto beneficio ha generado MotoClick?",
+            "Dame los detalles de la Nota 7",
         ]
         col1, col2, col3 = st.columns(3)
         for i, s in enumerate(sugs):
-            col = [col1, col2, col3][i % 3]
-            if col.button(s, key=f"sug_fondo_{i}", use_container_width=True):
-                st.session_state["chat_fondo_ia"].append({"role": "user", "content": s})
+            if [col1,col2,col3][i%3].button(s, key=f"sug_ia_{i}", use_container_width=True):
+                st.session_state["chat_ia_cf"].append({"role": "user", "content": s})
                 st.rerun()
 
-    pregunta = st.chat_input("Escribe tu pregunta sobre el fondo...", key="chat_input_fondo")
+    pregunta = st.chat_input("Escribe tu pregunta...", key="chat_input_ia_cf")
     if pregunta:
-        st.session_state["chat_fondo_ia"].append({"role": "user", "content": pregunta})
+        st.session_state["chat_ia_cf"].append({"role": "user", "content": pregunta})
         st.rerun()
 
-    if st.session_state["chat_fondo_ia"] and st.session_state["chat_fondo_ia"][-1]["role"] == "user":
-        ultima = st.session_state["chat_fondo_ia"][-1]["content"]
+    if st.session_state["chat_ia_cf"] and st.session_state["chat_ia_cf"][-1]["role"] == "user":
+        ultima = st.session_state["chat_ia_cf"][-1]["content"]
         with st.chat_message("assistant"):
-            with st.spinner("Analizando datos del fondo..."):
+            with st.spinner("Analizando..."):
                 try:
-                    import requests as _req
-                    contexto = _contexto_fondo()
+                    # Detectar fecha límite en la pregunta (ej: "hasta el 07/06/2026")
+                    fecha_limite = None
+                    m_fecha = _re_ia.search(r"hasta\s+(?:el\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", ultima.lower())
+                    if m_fecha:
+                        d, mo = int(m_fecha.group(1)), int(m_fecha.group(2))
+                        yr = int(m_fecha.group(3)) if m_fecha.group(3) else pd.Timestamp.today().year
+                        fecha_limite = f"{yr}-{mo:02d}-{d:02d}"
+
+                    ctx = _contexto_excel(fecha_limite)
+
+                    # Seleccionar PDFs relevantes (máx 2 para no superar tokens)
+                    nums = _re_ia.findall(r"nota[_\s]*(\d+)", ultima.lower())
+                    if nums:
+                        def _norm(s): return _re_ia.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
+                        pdfs_sel = {k:v for k,v in pdfs_b64.items() if any(_norm(k)==f"nota{n}" for n in nums)}
+                        if not pdfs_sel: pdfs_sel = dict(list(pdfs_b64.items())[:2])
+                    elif any(w in ultima.lower() for w in ["call","cobro","pago","barrera","vencimiento","próximo","proximo"]):
+                        pdfs_sel = dict(list(pdfs_b64.items())[:2])
+                    else:
+                        pdfs_sel = {}
+
+                    # Construir mensaje con PDFs + contexto
+                    contenido = []
+                    for nombre_pdf, pdf_b64 in pdfs_sel.items():
+                        contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
+                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:3500]}\n\n---\nPREGUNTA: {ultima}"})
+
                     historial = []
-                    for m in st.session_state["chat_fondo_ia"][:-1][-8:]:
+                    for m in st.session_state["chat_ia_cf"][:-1][-6:]:
                         historial.append({"role": m["role"], "content": m["content"]})
-                    historial.append({"role": "user", "content": f"DATOS DEL FONDO:\n\n{ctx_fondo}\n\n---\nPREGUNTA: {ultima}"})
+                    historial.append({"role": "user", "content": contenido})
 
-                    # Construir contexto mínimo según la pregunta para no superar tokens
-                    import re as _re_fondo
-                    ctx_fondo = _contexto_fondo()
-                    # Si la pregunta es simple (capital, próximo, total) recortar contexto
-                    palabras_simples = ["capital","próximo","proximo","total","cuanto","cuánto","beneficio","vence","vencen"]
-                    es_simple = any(p in ultima.lower() for p in palabras_simples) and "desglos" not in ultima.lower() and "detalle" not in ultima.lower()
-                    if es_simple:
-                        # Solo primeras 3000 chars del contexto
-                        ctx_fondo = ctx_fondo[:3000]
-
-                    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
-                    resp = _req.post("https://api.anthropic.com/v1/messages",
-                        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
-                        json={"model": "claude-sonnet-4-5", "max_tokens": 500,
-                              "system": "Eres el asistente financiero interno de Chaparro Fernández Wealth. Reglas: 1) Responde SIEMPRE en español. 2) Extremadamente conciso — solo el dato pedido. 3) Sin tablas ni desglose salvo que te lo pidan. 4) Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. 5) Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
-                              "messages": historial}, timeout=60)
+                    api_key = st.secrets.get("ANTHROPIC_API_KEY","") or st.secrets.get("anthropic",{}).get("api_key","")
+                    resp = _req_ia.post("https://api.anthropic.com/v1/messages",
+                        headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
+                        json={"model":"claude-sonnet-4-5","max_tokens":600,
+                              "system":"Eres el asistente financiero interno de Chaparro Fernández Wealth. Tienes acceso a los term sheets de las notas (PDFs) y a todos los datos del fondo (Excel). Reglas: 1) Responde SIEMPRE en español. 2) Conciso: solo el dato pedido, sin desglose salvo que te lo pidan. 3) Para cobros entre fechas: suma importe_cobro del calendario + lo que indiquen los PDFs. 4) Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. 5) Fechas DD/MM/YYYY, importes con $ y 2 decimales.",
+                              "messages":historial},timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
                     if not respuesta:
-                        respuesta = f"Error API: {data.get('error',{}).get('message', str(data))}"
+                        respuesta = f"Error API: {data.get('error',{}).get('message',str(data))}"
                 except Exception as e:
                     respuesta = f"Error: {e}"
                 st.markdown(respuesta)
-        st.session_state["chat_fondo_ia"].append({"role": "assistant", "content": respuesta})
+        st.session_state["chat_ia_cf"].append({"role":"assistant","content":respuesta})
 
-    if st.session_state["chat_fondo_ia"]:
-        if st.button("🗑️ Limpiar conversación", key="btn_limpiar_fondo"):
-            st.session_state["chat_fondo_ia"] = []
+    if st.session_state["chat_ia_cf"]:
+        if st.button("🗑️ Limpiar conversación", key="btn_limpiar_ia_cf"):
+            st.session_state["chat_ia_cf"] = []
             st.rerun()
 
 menu = st.sidebar.selectbox(
