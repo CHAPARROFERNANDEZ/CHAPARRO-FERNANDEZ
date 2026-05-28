@@ -3032,7 +3032,7 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-                              "system": "Eres un asistente financiero especializado en notas estructuradas para Chaparro Fernández Wealth. Tienes los term sheets oficiales del banco y los datos del Excel. Responde siempre en español, con precisión. Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
+                              "system": "Eres el asistente de notas estructuradas de Chaparro Fernández Wealth. Reglas estrictas: 1) Responde SIEMPRE en español. 2) Sé extremadamente conciso — da solo el dato que se pide, sin tablas ni desglose salvo que explícitamente te lo pidan. 3) Ejemplo correcto: 'El próximo cobro es el 05/06/2026, NOTA_13'. 4) Si te piden detalle, entonces sí desglosa. 5) Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
                               "messages": historial}, timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
@@ -4598,7 +4598,7 @@ def seccion_asistente_ia_fondo():
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-                              "system": "Eres un asistente financiero experto de Chaparro Fernández Wealth. Tienes acceso completo a todos los datos del fondo. Responde siempre en español, con precisión. Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. Fechas en DD/MM/YYYY, importes con $ y 2 decimales. Muestra los cálculos paso a paso.",
+                              "system": "Eres el asistente financiero interno de Chaparro Fernández Wealth. Reglas estrictas: 1) Responde SIEMPRE en español. 2) Sé extremadamente conciso — da solo el número o dato que se pide, sin tablas ni desglose salvo que explícitamente te lo pidan. 3) Ejemplo correcto: 'El capital total activo hoy es $485.000,00'. Ejemplo incorrecto: listar cada inversión. 4) Si te piden detalle, entonces sí desglosa. 5) Incluye TODAS las inversiones del fondo (notas, fútbol, paraguay, motoclick, etc.), no solo las notas. 6) Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. 7) Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
                               "messages": historial}, timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
