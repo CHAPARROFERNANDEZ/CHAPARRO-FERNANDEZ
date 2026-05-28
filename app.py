@@ -2928,18 +2928,26 @@ def seccion_notas():
 
 def _cargar_pdfs_notas() -> dict:
     """Lee todos los PDFs de la carpeta notas_pdfs/ y los devuelve en base64."""
-    import os, base64, tempfile
+    import os, base64, tempfile, re as _re2
     pdfs = {}
-    carpeta = os.path.join(tempfile.gettempdir(), "notas_pdfs_cf")
-    if not os.path.exists(carpeta):
-        return pdfs
-    for fname in sorted(os.listdir(carpeta)):
-        if fname.lower().endswith(".pdf"):
-            try:
-                with open(os.path.join(carpeta, fname), "rb") as f:
-                    pdfs[fname] = base64.standard_b64encode(f.read()).decode()
-            except Exception:
-                pass
+    # Buscar en carpeta temporal (subidos desde la app) y en carpeta del repo (GitHub)
+    carpetas = [
+        os.path.join(tempfile.gettempdir(), "notas_pdfs_cf"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "notas_pdfs"),
+    ]
+    for carpeta in carpetas:
+        if not os.path.exists(carpeta):
+            continue
+        for fname in sorted(os.listdir(carpeta)):
+            if fname.lower().endswith(".pdf"):
+                # Normalizar nombre: "NOTA 10.pdf" -> "nota10"
+                clave = _re2.sub(r"[^a-z0-9]", "", fname.lower().replace(".pdf",""))
+                if clave not in {_re2.sub(r"[^a-z0-9]","",k.lower().replace(".pdf","")) for k in pdfs}:
+                    try:
+                        with open(os.path.join(carpeta, fname), "rb") as f:
+                            pdfs[fname] = base64.standard_b64encode(f.read()).decode()
+                    except Exception:
+                        pass
     return pdfs
 
 
@@ -3018,8 +3026,27 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                         ctx_lines += ["", "=== PRÓXIMOS EVENTOS (30) ===", prox.to_string(index=False)]
                     contexto = "\n".join(ctx_lines)
 
+                    # Filtrar solo los PDFs relevantes según la pregunta (máx 3)
+                    # para no superar el límite de tokens
+                    import re as _re
+                    nums_mencionados = _re.findall(r"nota[_\s]*(\d+)", ultima.lower())
+                    if nums_mencionados:
+                        # Si menciona notas concretas, solo esas
+                        # Normalizar nombre del PDF para comparar: "NOTA 10.pdf" -> "nota10"
+                        def _norm(s): return _re.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
+                        pdfs_filtrados = {k: v for k, v in pdfs_b64.items()
+                                          if any(_norm(k) == f"nota{n}" for n in nums_mencionados)}
+                        if not pdfs_filtrados:
+                            pdfs_filtrados = dict(list(pdfs_b64.items())[:3])
+                    elif any(w in ultima.lower() for w in ["próximo", "proximo", "siguiente", "cobro", "call", "pago"]):
+                        # Preguntas de calendario: enviar solo los 3 primeros PDFs
+                        pdfs_filtrados = dict(list(pdfs_b64.items())[:3])
+                    else:
+                        # Pregunta general: sin PDFs, solo con el contexto del Excel
+                        pdfs_filtrados = {}
+
                     contenido = []
-                    for nombre_pdf, pdf_b64 in pdfs_b64.items():
+                    for nombre_pdf, pdf_b64 in pdfs_filtrados.items():
                         contenido.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}, "title": nombre_pdf.replace(".pdf","").upper()})
                     contenido.append({"type": "text", "text": f"DATOS DEL EXCEL:\n\n{contexto}\n\n---\nPREGUNTA: {ultima}"})
 
