@@ -2934,9 +2934,10 @@ def _cargar_pdfs_notas() -> dict:
     carpetas = [
         os.path.join(tempfile.gettempdir(), "notas_pdfs_cf"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "notas_pdfs"),
+        os.path.dirname(os.path.abspath(__file__)),  # raíz del repo como fallback
     ]
     for carpeta in carpetas:
-        if not os.path.exists(carpeta):
+        if not os.path.exists(carpeta) or not os.path.isdir(carpeta):
             continue
         for fname in sorted(os.listdir(carpeta)):
             if fname.lower().endswith(".pdf"):
