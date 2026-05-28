@@ -4736,9 +4736,13 @@ def seccion_asistente_ia_fondo():
                         contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
                     contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:3500]}\n\n---\nPREGUNTA: {ultima}"})
 
+                    # Solo los últimos 2 turnos del historial (sin datos pesados)
                     historial = []
-                    for m in st.session_state["chat_ia_cf"][:-1][-6:]:
-                        historial.append({"role": m["role"], "content": m["content"]})
+                    mensajes_prev = st.session_state["chat_ia_cf"][:-1]
+                    for m in mensajes_prev[-4:]:
+                        # Solo texto plano del historial, nunca los bloques con PDFs/contexto
+                        if isinstance(m["content"], str):
+                            historial.append({"role": m["role"], "content": m["content"]})
                     historial.append({"role": "user", "content": contenido})
 
                     api_key = st.secrets.get("ANTHROPIC_API_KEY","") or st.secrets.get("anthropic",{}).get("api_key","")
