@@ -3031,7 +3031,7 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
-                        json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
+                        json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
                               "system": "Eres un asistente financiero especializado en notas estructuradas para Chaparro Fernández Wealth. Tienes los term sheets oficiales del banco y los datos del Excel. Responde siempre en español, con precisión. Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
                               "messages": historial}, timeout=60)
                     data = resp.json()
@@ -4597,7 +4597,7 @@ def seccion_asistente_ia_fondo():
                     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
-                        json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
+                        json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
                               "system": "Eres un asistente financiero experto de Chaparro Fernández Wealth. Tienes acceso completo a todos los datos del fondo. Responde siempre en español, con precisión. Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. Fechas en DD/MM/YYYY, importes con $ y 2 decimales. Muestra los cálculos paso a paso.",
                               "messages": historial}, timeout=60)
                     data = resp.json()
