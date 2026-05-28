@@ -4540,17 +4540,81 @@ def seccion_asistente_ia_fondo():
     st.caption("Pregúntame cualquier cosa sobre el fondo: inversores, capitales, intereses, vencimientos, beneficios...")
 
     def _contexto_fondo() -> str:
+        """Genera contexto usando las funciones de cálculo reales del código — nunca inventa números."""
         hoy = pd.Timestamp.today().normalize()
+        anio_hoy = hoy.year
+        mes_hoy = hoy.month
         lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}", ""]
-        if df_inv is not None and not df_inv.empty:
-            lineas += ["=== INVERSIONES ===", df_inv.to_string(index=False), ""]
-        if df_cal is not None and not df_cal.empty:
-            df_c2 = df_cal.copy()
-            df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-            prox = df_c2[df_c2["fecha"] >= hoy].sort_values("fecha").head(30)
-            lineas += ["=== PRÓXIMOS EVENTOS (30) ===", prox.to_string(index=False) if not prox.empty else "Sin eventos.", ""]
-        if df_control is not None and not df_control.empty:
-            lineas += ["=== CONTROL DE NOTAS ===", df_control.to_string(index=False)]
+
+        # ── Resumen general del dashboard (fuente de verdad) ──────────────────
+        try:
+            resumen = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_hoy, mes_hoy)
+            lineas.append("=== RESUMEN GENERAL DEL FONDO (MES ACTUAL) ===")
+            for k, v in resumen.items():
+                lineas.append(f"{k}: {v}")
+            lineas.append("")
+        except Exception as e:
+            lineas.append(f"(Error resumen general: {e})")
+
+        # ── Capital activo total hoy ──────────────────────────────────────────
+        try:
+            cap_total = capital_activo_en_fecha(df_inv, hoy)
+            lineas.append(f"Capital total activo hoy: ${cap_total:,.2f}")
+        except Exception:
+            pass
+
+        # ── Capital activo por activo ─────────────────────────────────────────
+        try:
+            for activo in ["notas", "futbol", "paraguay", "motoclick"]:
+                cap = capital_activo_en_fecha(df_inv, hoy, activo)
+                lineas.append(f"Capital activo {activo}: ${cap:,.2f}")
+            lineas.append("")
+        except Exception:
+            pass
+
+        # ── Ingresos y pagos desde inicio por activo ─────────────────────────
+        try:
+            lineas.append("=== TOTALES DESDE INICIO ===")
+            for activo, tasa in [("futbol", TASA_ANUAL_FUTBOL), ("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK)]:
+                ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
+                pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
+                lineas.append(f"{activo} — Ingresado: ${ing:,.2f} | Pagado inversores: ${pag:,.2f} | Beneficio: ${ing-pag:,.2f}")
+            lineas.append("")
+        except Exception as e:
+            lineas.append(f"(Error totales: {e})")
+
+        # ── Próximos cobros de notas (calendario) ─────────────────────────────
+        try:
+            if df_cal is not None and not df_cal.empty:
+                df_c2 = df_cal.copy()
+                df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
+                prox = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["tipo_evento"] == "PAGO")].sort_values("fecha").head(20)
+                lineas.append("=== PRÓXIMOS COBROS DE NOTAS ===")
+                lineas.append(prox[["fecha","nota","importe_cobro","importe_pago_inversor"]].to_string(index=False) if not prox.empty else "Sin cobros próximos.")
+                lineas.append("")
+        except Exception as e:
+            lineas.append(f"(Error próximos cobros: {e})")
+
+        # ── Detalle mes actual notas ──────────────────────────────────────────
+        try:
+            det_mes = detalle_activo_mes(df_inv, "notas", 0, anio_hoy, mes_hoy)
+            if not det_mes.empty:
+                lineas.append(f"=== DETALLE NOTAS MES {mes_hoy:02d}/{anio_hoy} ===")
+                lineas.append(det_mes.to_string(index=False))
+                lineas.append("")
+        except Exception:
+            pass
+
+        # ── Inversiones por inversor ──────────────────────────────────────────
+        try:
+            if df_inv is not None and not df_inv.empty:
+                lineas.append("=== INVERSIONES RAW (para consultas por inversor) ===")
+                cols = [c for c in ["id_inversion","inversor","nombre_activo","capital_invertido",
+                                    "interes_inversor_anual","fecha_inversion","fecha_final_inversion","tipo_operacion"] if c in df_inv.columns]
+                lineas.append(df_inv[cols].to_string(index=False))
+        except Exception:
+            pass
+
         return "\n".join(lineas)
 
     if "chat_fondo_ia" not in st.session_state:
