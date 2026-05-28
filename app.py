@@ -4612,50 +4612,66 @@ def seccion_asistente_ia_fondo():
             st.rerun()
 
     # ── Contexto del Excel ────────────────────────────────────────────────────
-    def _contexto_excel(fecha_limite=None) -> str:
+    def _contexto_excel(pregunta: str = "", fecha_limite=None) -> str:
+        """Contexto adaptado según la pregunta para no superar el límite de tokens."""
         hoy = pd.Timestamp.today().normalize()
         anio_hoy, mes_hoy = hoy.year, hoy.month
+        p = pregunta.lower()
         lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}"]
 
-        # Resumen dashboard
+        # ── Siempre: resumen rápido de capitales ──────────────────────────────
         try:
-            res = obtener_resumen_dashboard(df_inv, df_cal, df_control, anio_hoy, mes_hoy)
-            lineas += ["", "=== RESUMEN FONDO ==="] + [f"{k}: {v}" for k, v in res.items()]
-        except Exception:
-            pass
-
-        # Capital por activo
-        try:
-            lineas.append("")
+            cap_total = capital_activo_en_fecha(df_inv, hoy)
+            lineas.append(f"Capital total activo: ${cap_total:,.2f}")
             for activo in ["notas","futbol","paraguay","motoclick"]:
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
-                lineas.append(f"Capital activo {activo}: ${cap:,.2f}")
+                lineas.append(f"Capital {activo}: ${cap:,.2f}")
         except Exception:
             pass
 
-        # Cobros calendario hasta fecha límite o próximos 20
-        try:
-            if df_cal is not None and not df_cal.empty:
-                df_c2 = df_cal.copy()
-                df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-                mask = df_c2["fecha"] >= hoy
-                if fecha_limite:
-                    mask = mask & (df_c2["fecha"] <= pd.Timestamp(fecha_limite))
-                prox = df_c2[mask & (df_c2["tipo_evento"].astype(str).str.upper() == "PAGO")].sort_values("fecha").head(20)
-                cols_c = [c for c in ["fecha","nota","importe_cobro","importe_pago_inversor"] if c in prox.columns]
-                lineas += ["", "=== COBROS NOTAS CALENDARIO ===",
-                           prox[cols_c].to_string(index=False) if not prox.empty else "Sin cobros."]
-        except Exception:
-            pass
+        # ── Cobros / calendario ───────────────────────────────────────────────
+        keywords_cobro = ["cobro","pago","call","próximo","proximo","cuando","cuándo","fecha","hasta","junio","julio","mayo"]
+        if any(k in p for k in keywords_cobro):
+            try:
+                if df_cal is not None and not df_cal.empty:
+                    df_c2 = df_cal.copy()
+                    df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
+                    mask = df_c2["fecha"] >= hoy
+                    if fecha_limite:
+                        mask = mask & (df_c2["fecha"] <= pd.Timestamp(fecha_limite))
+                    pagos = df_c2[mask & (df_c2["tipo_evento"].astype(str).str.upper() == "PAGO")].sort_values("fecha").head(25)
+                    cols_c = [c for c in ["fecha","nota","importe_cobro","importe_pago_inversor"] if c in pagos.columns]
+                    lineas += ["", "=== PRÓXIMOS COBROS (PAGO) ===",
+                               pagos[cols_c].to_string(index=False) if not pagos.empty else "Sin pagos próximos."]
+            except Exception:
+                pass
 
-        # Inversiones activas
-        try:
-            if df_inv is not None and not df_inv.empty:
-                cols = [c for c in ["inversor","nombre_activo","capital_invertido",
-                                    "interes_inversor_anual","fecha_inversion","fecha_final_inversion","tipo_operacion"] if c in df_inv.columns]
-                lineas += ["", "=== INVERSIONES ===", df_inv[cols].to_string(index=False)]
-        except Exception:
-            pass
+        # ── Inversiones: solo si pregunta por inversor, capital, interés ──────
+        keywords_inv = ["inversor","capital","interes","interés","biscafe","crowe","chaparro","jordi","yuri","alan","gholden","roberto","quien","quién","cuanto","cuánto"]
+        if any(k in p for k in keywords_inv):
+            try:
+                if df_inv is not None and not df_inv.empty:
+                    cols = [c for c in ["inversor","nombre_activo","capital_invertido",
+                                        "interes_inversor_anual","fecha_inversion","fecha_final_inversion","tipo_operacion"] if c in df_inv.columns]
+                    # Solo activas (sin fecha_final o fecha_final futura)
+                    df_act = df_inv.copy()
+                    df_act["fecha_final_inversion"] = pd.to_datetime(df_act.get("fecha_final_inversion"), errors="coerce")
+                    activas = df_act[df_act["fecha_final_inversion"].isna() | (df_act["fecha_final_inversion"] >= hoy)]
+                    lineas += ["", "=== INVERSIONES ACTIVAS ===", activas[cols].to_string(index=False)]
+            except Exception:
+                pass
+
+        # ── Beneficios / totales desde inicio ────────────────────────────────
+        keywords_ben = ["beneficio","ingres","total","motoclick","futbol","fútbol","paraguay"]
+        if any(k in p for k in keywords_ben):
+            try:
+                lineas.append("\n=== TOTALES DESDE INICIO ===")
+                for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),("motoclick",TASA_ANUAL_MOTOCLICK)]:
+                    ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
+                    pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
+                    lineas.append(f"{activo}: ingresado ${ing:,.2f} | pagado ${pag:,.2f} | beneficio ${ing-pag:,.2f}")
+            except Exception:
+                pass
 
         return "\n".join(lineas)
 
@@ -4701,7 +4717,7 @@ def seccion_asistente_ia_fondo():
                         yr = int(m_fecha.group(3)) if m_fecha.group(3) else pd.Timestamp.today().year
                         fecha_limite = f"{yr}-{mo:02d}-{d:02d}"
 
-                    ctx = _contexto_excel(fecha_limite)
+                    ctx = _contexto_excel(ultima, fecha_limite)
 
                     # Seleccionar PDFs relevantes (máx 2 para no superar tokens)
                     nums = _re_ia.findall(r"nota[_\s]*(\d+)", ultima.lower())
