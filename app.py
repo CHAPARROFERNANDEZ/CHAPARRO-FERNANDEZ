@@ -2928,9 +2928,9 @@ def seccion_notas():
 
 def _cargar_pdfs_notas() -> dict:
     """Lee todos los PDFs de la carpeta notas_pdfs/ y los devuelve en base64."""
-    import os, base64
+    import os, base64, tempfile
     pdfs = {}
-    carpeta = os.path.join(os.path.dirname(__file__), "notas_pdfs")
+    carpeta = os.path.join(tempfile.gettempdir(), "notas_pdfs_cf")
     if not os.path.exists(carpeta):
         return pdfs
     for fname in sorted(os.listdir(carpeta)):
@@ -2947,8 +2947,8 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
     """Pestaña: chat IA especializado en los PDFs de las notas estructuradas."""
     st.caption("Pregúntame cualquier cosa sobre las notas: cobros, calls, barreras, vencimientos...")
 
-    import os
-    carpeta_pdfs = os.path.join(os.path.dirname(__file__), "notas_pdfs")
+    import os, tempfile
+    carpeta_pdfs = os.path.join(tempfile.gettempdir(), "notas_pdfs_cf")
     os.makedirs(carpeta_pdfs, exist_ok=True)
     pdfs_existentes = sorted([f for f in os.listdir(carpeta_pdfs) if f.lower().endswith(".pdf")])
 
@@ -3028,8 +3028,9 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                         historial.append({"role": m["role"], "content": m["content"]})
                     historial.append({"role": "user", "content": contenido})
 
+                    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
                     resp = _req.post("https://api.anthropic.com/v1/messages",
-                        headers={"Content-Type": "application/json"},
+                        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
                               "system": "Eres un asistente financiero especializado en notas estructuradas para Chaparro Fernández Wealth. Tienes los term sheets oficiales del banco y los datos del Excel. Responde siempre en español, con precisión. Fechas en DD/MM/YYYY, importes con $ y 2 decimales.",
                               "messages": historial}, timeout=60)
@@ -4593,8 +4594,9 @@ def seccion_asistente_ia_fondo():
                         historial.append({"role": m["role"], "content": m["content"]})
                     historial.append({"role": "user", "content": f"DATOS DEL FONDO:\n\n{contexto}\n\n---\nPREGUNTA: {ultima}"})
 
+                    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
                     resp = _req.post("https://api.anthropic.com/v1/messages",
-                        headers={"Content-Type": "application/json"},
+                        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
                               "system": "Eres un asistente financiero experto de Chaparro Fernández Wealth. Tienes acceso completo a todos los datos del fondo. Responde siempre en español, con precisión. Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026. Fechas en DD/MM/YYYY, importes con $ y 2 decimales. Muestra los cálculos paso a paso.",
                               "messages": historial}, timeout=60)
