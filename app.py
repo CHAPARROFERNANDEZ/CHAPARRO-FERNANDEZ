@@ -1353,7 +1353,7 @@ def pago_inversores_notas_mes(df_inv: pd.DataFrame, anio: int, mes: int) -> floa
 
     df_notas = df_inv[
         (df_inv["tipo_inversion"].apply(limpiar_texto) == "nota") &
-        (df_inv.get("activo_generador_interes", pd.Series("SI", index=df_inv.index)).apply(limpiar_texto).str.upper() == "si") &
+        (df_inv.get("activo_generador_interes", pd.Series("SI", index=df_inv.index)).apply(limpiar_texto).str.upper() == "SI") &
         (df_inv["fecha_inversion"].notna()) &
         (df_inv["fecha_inversion"] <= fin_mes) &
         (df_inv["fecha_final_inversion"].isna() | (df_inv["fecha_final_inversion"] >= inicio_mes))
