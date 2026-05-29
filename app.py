@@ -1294,14 +1294,15 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
             cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
 
             # Tratamiento especial Chaparro Fernández:
+            # - CF es la sociedad gestora, no un inversor externo.
+            # - Su interes_inversor_anual es siempre 0% porque no se pagan a sí mismos.
+            # - Todo el cobro de la nota es beneficio íntegro de la empresa.
             # - Si se excluye Chaparro, la fila ya no llega aquí porque se filtra antes.
-            # - Si se incluye Chaparro, se considera una operación interna: el pago al
-            #   inversionista debe ser igual al cobro de la nota y el beneficio debe ser 0.
             es_chaparro = bool(fila.get("es_chaparro_fernandez", False)) or es_chaparro_fernandez_row(fila)
             if es_chaparro:
-                pago_inversor = cobro_compania
-                beneficio_empresa = 0.0
-                tratamiento_chaparro = "INTERNO: pago = cobro nota"
+                pago_inversor = 0.0
+                beneficio_empresa = cobro_compania
+                tratamiento_chaparro = "INTERNO: pago = 0, beneficio = cobro nota"
             else:
                 pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12 * periodicidad
                 beneficio_empresa = cobro_compania - pago_inversor
