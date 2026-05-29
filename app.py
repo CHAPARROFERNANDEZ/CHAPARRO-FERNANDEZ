@@ -1332,12 +1332,77 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
     return pd.DataFrame(filas)
 
 
+def pago_inversores_notas_mes(df_inv: pd.DataFrame, anio: int, mes: int) -> float:
+    """Calcula el pago a inversores de notas por DEVENGO MENSUAL.
+
+    Lógica correcta:
+    - El pago al inversor es fijo: capital × tasa_inversor / 12, cada mes.
+    - No depende del calendario de pagos (que es para el cobro de la compañía).
+    - Incluye todas las posiciones activas: nueva + reinversión.
+    - Excluye Chaparro Fernández (tasa 0%, no reciben pago).
+    - Aplica pro-rata de días para el primer y último mes de cada posición.
+    - Aplica tramo de tipos para Biscafe/Crowe Bolivia (5% hasta ene2026, 7.5% desde feb2026).
+    """
+    import calendar as _cal
+    dias_mes = _cal.monthrange(anio, mes)[1]
+    inicio_mes = pd.Timestamp(anio, mes, 1)
+    fin_mes = pd.Timestamp(anio, mes, dias_mes)
+
+    INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+    CORTE_TRAMO = pd.Timestamp("2026-02-01")
+
+    df_notas = df_inv[
+        (df_inv["tipo_inversion"].apply(limpiar_texto) == "nota") &
+        (df_inv.get("activo_generador_interes", pd.Series("SI", index=df_inv.index)).apply(limpiar_texto).str.upper() == "si") &
+        (df_inv["fecha_inversion"].notna()) &
+        (df_inv["fecha_inversion"] <= fin_mes) &
+        (df_inv["fecha_final_inversion"].isna() | (df_inv["fecha_final_inversion"] >= inicio_mes))
+    ].copy()
+
+    total_pago = 0.0
+    for _, row in df_notas.iterrows():
+        if es_chaparro_fernandez_row(row):
+            continue
+        capital = float(row.get("capital_invertido", 0) or 0)
+        inicio_calc = max(row["fecha_inversion"], inicio_mes)
+        fin_calc = fin_mes if pd.isna(row["fecha_final_inversion"]) else min(row["fecha_final_inversion"], fin_mes)
+        if inicio_calc > fin_calc:
+            continue
+        dias = (fin_calc - inicio_calc).days + 1
+        inv_upper = str(row.get("inversor", "")).strip().upper()
+        if inv_upper in INVERSORES_TRAMO:
+            pago = 0.0
+            fin_t1 = pd.Timestamp("2026-01-31")
+            if inicio_calc <= fin_t1:
+                d1 = (min(fin_calc, fin_t1) - inicio_calc).days + 1
+                pago += (capital * 0.05 / 12) * d1 / dias_mes
+            if fin_calc >= CORTE_TRAMO:
+                ini_t2 = max(inicio_calc, CORTE_TRAMO)
+                d2 = (fin_calc - ini_t2).days + 1
+                pago += (capital * 0.075 / 12) * d2 / dias_mes
+        else:
+            tasa = float(row.get("interes_inversor_anual", 0) or 0)
+            pago = (capital * tasa / 12) * dias / dias_mes
+        total_pago += pago
+
+    return total_pago
+
+
 def resumen_notas_mes(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
+    """Devuelve cobro compañía (calendario), pago inversores (devengo mensual) y beneficio.
+
+    - cobro_compania: calculado desde CALENDARIO_NOTAS (eventos PAGO del mes).
+    - pago_inversores: calculado por devengo mensual (capital × tasa / 12), igual que fijos.
+      Esto garantiza que el pago al inversor es siempre correcto independientemente
+      de si hay o no eventos PAGO en el calendario ese mes.
+    """
     pagos = pagos_notas_mes(df_cal, anio, mes)
     detalle = preparar_detalle_notas(df_inv, pagos, df_cal=df_cal, df_control=df_control)
-    if detalle.empty:
-        return 0.0, 0.0, 0.0, detalle, pagos
-    return float(detalle["cobro_compania"].sum()), float(detalle["pago_inversor"].sum()), float(detalle["beneficio_empresa"].sum()), detalle, pagos
+    cobro_compania = float(detalle["cobro_compania"].sum()) if not detalle.empty else 0.0
+    # Pago al inversor por devengo mensual (lógica correcta)
+    pago_inversores = pago_inversores_notas_mes(df_inv, anio, mes)
+    beneficio = cobro_compania - pago_inversores
+    return cobro_compania, pago_inversores, beneficio, detalle, pagos
 
 
 def resumen_por_cuenta_cobro(detalle: pd.DataFrame) -> pd.DataFrame:
