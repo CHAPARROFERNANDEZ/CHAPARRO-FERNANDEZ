@@ -231,12 +231,12 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
 
     styles = getSampleStyleSheet()
     _style_cache = {}
-    def S(name, fontSize=9, textColor=TEXTO, alignment=TA_LEFT, bold=False, spaceAfter=2, leading=None):
-        key = f"{name}_{fontSize}_{bold}_{alignment}"
+    def S(fontSize=9, textColor=TEXTO, alignment=TA_LEFT, bold=False, spaceAfter=2, leading=None):
+        key = f"{fontSize}_{bold}_{alignment}_{id(textColor)}"
         if key not in _style_cache:
             fn = "Helvetica-Bold" if bold else "Helvetica"
             _style_cache[key] = ParagraphStyle(
-                key, parent=styles["Normal"], fontSize=fontSize,
+                f"s_{key}", parent=styles["Normal"], fontSize=fontSize,
                 textColor=textColor, alignment=alignment,
                 fontName=fn, spaceAfter=spaceAfter,
                 leading=leading or fontSize * 1.35
