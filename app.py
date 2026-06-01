@@ -260,22 +260,41 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
         for r in det_rows
     )
 
-    # ── Calcular totales ──────────────────────────────────────────────────────
-    total_intereses_calc = sum(float(r.get("interes_mes", 0) or 0) for r in det_rows)
+    # ── Leer KPIs directamente de la PORTADA del Excel (fuente de verdad) ──────
+    capital_total        = 0.0
+    total_intereses_calc = 0.0
+
+    if "PORTADA" in wb.sheetnames:
+        ws_port = wb["PORTADA"]
+        port_rows = list(ws_port.iter_rows(values_only=True))
+        for i, row in enumerate(port_rows):
+            etiq = [str(v).strip().upper() for v in row if v is not None]
+            if "CAPITAL ACTIVO" in etiq:
+                if i + 1 < len(port_rows):
+                    nums = []
+                    for v in port_rows[i+1]:
+                        try: nums.append(float(v))
+                        except Exception: pass
+                    if len(nums) >= 1: capital_total        = nums[0]
+                    if len(nums) >= 2: total_intereses_calc = nums[1]
+                break
+
+    # Fallback si no se encontró en PORTADA
+    if capital_total == 0.0 and total_intereses_calc == 0.0:
+        total_intereses_calc = sum(float(r.get("interes_mes", 0) or 0)
+                                   for r in det_rows if r.get("tipo_fila") == "OP")
+        if tot_rows:
+            ultimo_mes_str = tot_rows[-1].get("mes", "")
+            for r in det_rows:
+                if str(r.get("mes","")) == ultimo_mes_str and r.get("tipo_fila") == "OP":
+                    capital_total += float(r.get("capital_invertido", 0) or 0)
+
     total_pagado = sum(
         float(r.get("interes_mes", 0) or 0)
         for r in det_rows
         if str(r.get("pago_intereses", "")).strip().upper() == "PAGA"
     )
     saldo_pendiente = total_intereses_calc - total_pagado
-
-    # Capital activo: suma de capital de operaciones del último mes del extracto
-    capital_total = 0.0
-    if tot_rows:
-        ultimo_mes_str = tot_rows[-1].get("mes", "")
-        for r in det_rows:
-            if str(r.get("mes", "")) == ultimo_mes_str:
-                capital_total += float(r.get("capital_invertido", 0) or 0)
 
     # Pagado por mes (para inversores PAGA)
     pagado_por_mes: dict = {}
