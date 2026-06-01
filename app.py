@@ -125,29 +125,29 @@ def _construir_cuerpo_html_email(inversor: str, mes: int, anio: int, total_inter
 def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
                   total_intereses: float) -> bytes:
     """
-    Convierte el extracto Excel en un PDF profesional usando reportlab.
-    Lee las hojas TOTALES_MES y DETALLE del Excel y genera un PDF con:
-    - Portada con logo CF, inversor, mes/año y total de intereses
-    - Tabla de resumen mensual
-    - Tabla de detalle de operaciones
+    Convierte el extracto Excel en PDF replicando exactamente la PORTADA del Excel:
+    - Banner CF + subtítulo
+    - Nombre del inversor + fecha de corte
+    - 3 KPIs dinámicos (PAGA: capital / pendiente / total  |  REINVIERTE: capital / generado / acumulado)
+    - Resumen mensual con columnas según tipo (PAGA: generado/pagado/saldo  |  REINVIERTE: intereses/acumulado)
+    - Detalle de operaciones con cierres de mes resaltados
+    - Pie confidencial
     """
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib import colors
         from reportlab.lib.units import mm
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, PageBreak
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
         from openpyxl import load_workbook as _lw
+        import calendar as _cal
     except ImportError:
         return b""
 
-    mes_str = MESES_ES_EMAIL.get(mes, str(mes)).capitalize()
-    fecha_str = f"{mes_str} {anio}"
-    total_fmt = f"${total_intereses:,.2f}"
-
     # ── Leer datos del Excel ──────────────────────────────────────────────────
     wb = _lw(BytesIO(extracto_bytes))
+
     tot_rows = []
     det_rows = []
 
@@ -156,8 +156,15 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
         headers_t = [c.value for c in next(ws_t.iter_rows(min_row=1, max_row=1))]
         for row in ws_t.iter_rows(min_row=2, values_only=True):
             if row and row[0]:
-                d = dict(zip(headers_t, row))
-                tot_rows.append(d)
+                tot_rows.append(dict(zip(headers_t, row)))
+        # ordenar cronológicamente
+        def _mes_key(r):
+            try:
+                p = str(r.get("mes","")).split("/")
+                return (int(p[1]), int(p[0]))
+            except Exception:
+                return (9999, 99)
+        tot_rows.sort(key=_mes_key)
 
     if "DETALLE" in wb.sheetnames:
         ws_d = wb["DETALLE"]
@@ -166,189 +173,346 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
             if any(v for v in row if v is not None):
                 det_rows.append(dict(zip(headers_d, row)))
 
-    # ── Colores corporativos CF ───────────────────────────────────────────────
-    AZUL_OSC   = colors.HexColor("#0e2338")
-    AZUL_MED   = colors.HexColor("#173b5c")
-    DORADO     = colors.HexColor("#bf9a5f")
-    DORADO_CLR = colors.HexColor("#FFF2CC")
-    GRIS_CLR   = colors.HexColor("#f5f8fc")
-    BLANCO     = colors.white
-    TEXTO      = colors.HexColor("#334155")
-    VERDE_CLR  = colors.HexColor("#D9EAD3")
-    NARANJA_CLR= colors.HexColor("#FCE5CD")
+    # ── Detectar tipo de inversor: PAGA o REINVIERTE ──────────────────────────
+    tiene_pago = any(
+        str(r.get("pago_intereses", "REINVIERTE")).strip().upper() == "PAGA"
+        for r in det_rows
+    )
+
+    # ── Calcular totales ──────────────────────────────────────────────────────
+    total_intereses_calc = sum(float(r.get("interes_mes", 0) or 0) for r in det_rows)
+    total_pagado = sum(
+        float(r.get("interes_mes", 0) or 0)
+        for r in det_rows
+        if str(r.get("pago_intereses", "")).strip().upper() == "PAGA"
+    )
+    saldo_pendiente = total_intereses_calc - total_pagado
+
+    # Capital activo: suma de capital de operaciones del último mes del extracto
+    capital_total = 0.0
+    if tot_rows:
+        ultimo_mes_str = tot_rows[-1].get("mes", "")
+        for r in det_rows:
+            if str(r.get("mes", "")) == ultimo_mes_str:
+                capital_total += float(r.get("capital_invertido", 0) or 0)
+
+    # Pagado por mes (para inversores PAGA)
+    pagado_por_mes: dict = {}
+    if tiene_pago:
+        for r in det_rows:
+            if str(r.get("pago_intereses", "")).strip().upper() == "PAGA":
+                mk = str(r.get("mes", ""))
+                pagado_por_mes[mk] = pagado_por_mes.get(mk, 0.0) + float(r.get("interes_mes", 0) or 0)
+
+    mes_str_label = MESES_ES_EMAIL.get(mes, str(mes)).capitalize()
+    fecha_str = f"{mes_str_label} {anio}"
+    fecha_corte_str = f"30/{mes:02d}/{anio}"
+
+    # ── Colores corporativos ──────────────────────────────────────────────────
+    AZUL_OSC    = colors.HexColor("#0D2137")
+    AZUL_MED    = colors.HexColor("#1A3F5C")
+    AZUL_CLARO  = colors.HexColor("#D6E9F8")
+    DORADO      = colors.HexColor("#BF9A5F")
+    DORADO_CLR  = colors.HexColor("#FFF2CC")
+    VERDE_CLR   = colors.HexColor("#D9EAD3")
+    NARANJA_CLR = colors.HexColor("#FCE5CD")
+    GRIS_CLR    = colors.HexColor("#F7F9FC")
+    GRIS_MED    = colors.HexColor("#D9D9D9")
+    BLANCO      = colors.white
+    TEXTO       = colors.HexColor("#334155")
+    ROJO        = colors.HexColor("#C00000")
 
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
-        leftMargin=18*mm, rightMargin=18*mm,
-        topMargin=14*mm, bottomMargin=14*mm,
+        leftMargin=16*mm, rightMargin=16*mm,
+        topMargin=12*mm, bottomMargin=12*mm,
     )
 
     styles = getSampleStyleSheet()
-    def estilo(name, parent="Normal", fontSize=10, textColor=TEXTO,
-               alignment=TA_LEFT, fontName="Helvetica", bold=False, spaceAfter=4):
-        fn = "Helvetica-Bold" if bold else fontName
-        return ParagraphStyle(name, parent=styles[parent], fontSize=fontSize,
-                              textColor=textColor, alignment=alignment,
-                              fontName=fn, spaceAfter=spaceAfter, leading=fontSize*1.4)
+    _style_cache = {}
+    def S(name, fontSize=9, textColor=TEXTO, alignment=TA_LEFT, bold=False, spaceAfter=2, leading=None):
+        key = f"{name}_{fontSize}_{bold}_{alignment}"
+        if key not in _style_cache:
+            fn = "Helvetica-Bold" if bold else "Helvetica"
+            _style_cache[key] = ParagraphStyle(
+                key, parent=styles["Normal"], fontSize=fontSize,
+                textColor=textColor, alignment=alignment,
+                fontName=fn, spaceAfter=spaceAfter,
+                leading=leading or fontSize * 1.35
+            )
+        return _style_cache[key]
+
+    def P(text, **kwargs):
+        return Paragraph(text, S(**kwargs))
+
+    def fmt_usd(v):
+        try: return f"${float(v):,.2f}"
+        except Exception: return "—"
 
     story = []
 
-    # ── PORTADA ───────────────────────────────────────────────────────────────
-    # Banner azul marino simulado con tabla
-    banner_data = [[Paragraph(
-        f'<font color="white" size="18"><b>CF — Chaparro Fernández Wealth</b></font><br/>'
-        f'<font color="#bf9a5f" size="11">Extracto de inversiones · {fecha_str}</font>',
-        estilo("banner", fontSize=18, textColor=BLANCO, alignment=TA_CENTER)
-    )]]
-    banner = Table(banner_data, colWidths=[174*mm])
+    # ════════════════════════════════════════════════════════════════════
+    # PÁGINA 1 — PORTADA
+    # ════════════════════════════════════════════════════════════════════
+
+    # Banner principal
+    banner = Table([[P(
+        f'<font color="white" size="20"><b>CF</b></font>'
+        f'<font color="white" size="13">  —  Chaparro Fernández Wealth</font><br/>'
+        f'<font color="#BF9A5F" size="10">Extracto de inversiones  ·  {fecha_str}</font>',
+        fontSize=13, textColor=BLANCO, alignment=TA_CENTER, bold=False
+    )]], colWidths=[178*mm])
     banner.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), AZUL_OSC),
-        ("ALIGN",      (0,0), (-1,-1), "CENTER"),
-        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
-        ("TOPPADDING", (0,0), (-1,-1), 18),
+        ("BACKGROUND",    (0,0), (-1,-1), AZUL_OSC),
+        ("TOPPADDING",    (0,0), (-1,-1), 18),
         ("BOTTOMPADDING", (0,0), (-1,-1), 18),
-        ("ROUNDEDCORNERS", [6]),
+        ("ROUNDEDCORNERS",[6]),
     ]))
     story.append(banner)
-    story.append(Spacer(1, 8*mm))
+    story.append(Spacer(1, 5*mm))
 
-    # Bloque inversor + KPI
-    info_data = [[
-        Paragraph(f'<b>Inversor</b><br/><font size="13">{inversor}</font>',
-                  estilo("inv", fontSize=11, textColor=AZUL_OSC)),
-        Paragraph(f'<b>Periodo</b><br/><font size="13">{fecha_str}</font>',
-                  estilo("per", fontSize=11, textColor=AZUL_OSC, alignment=TA_CENTER)),
-        Paragraph(f'<b>Total intereses</b><br/><font size="16" color="#0e2338"><b>{total_fmt}</b></font>',
-                  estilo("tot", fontSize=11, textColor=AZUL_OSC, alignment=TA_RIGHT)),
-    ]]
-    info_t = Table(info_data, colWidths=[58*mm, 58*mm, 58*mm])
-    info_t.setStyle(TableStyle([
-        ("BACKGROUND",    (0,0), (-1,-1), GRIS_CLR),
-        ("BOX",           (0,0), (-1,-1), 0.8, DORADO),
-        ("INNERGRID",     (0,0), (-1,-1), 0.4, colors.HexColor("#e2d5be")),
-        ("TOPPADDING",    (0,0), (-1,-1), 10),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 10),
-        ("LEFTPADDING",   (0,0), (-1,-1), 8),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 8),
-        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+    # Franja dorada
+    franja = Table([[""]], colWidths=[178*mm], rowHeights=[3])
+    franja.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,-1), DORADO)]))
+    story.append(franja)
+    story.append(Spacer(1, 6*mm))
+
+    # Nombre inversor + fecha corte
+    inv_block = Table([[
+        P("INVERSOR", fontSize=8, textColor=colors.HexColor("#888888"), bold=True),
+        P("FECHA DE CORTE", fontSize=8, textColor=colors.HexColor("#888888"), bold=True, alignment=TA_RIGHT),
+    ],[
+        P(f"<b>{inversor.upper()}</b>", fontSize=18, textColor=AZUL_OSC, bold=True),
+        P(f"<b>{fecha_corte_str}</b>", fontSize=12, textColor=AZUL_OSC, bold=True, alignment=TA_RIGHT),
+    ]], colWidths=[110*mm, 68*mm])
+    inv_block.setStyle(TableStyle([
+        ("VALIGN",        (0,0), (-1,-1), "BOTTOM"),
+        ("BOTTOMPADDING", (0,1), (-1,1), 6),
     ]))
-    story.append(info_t)
+    story.append(inv_block)
+    story.append(Spacer(1, 5*mm))
+
+    # Separador dorado
+    story.append(HRFlowable(width="100%", thickness=1.5, color=DORADO, spaceAfter=6))
+
+    # ── 3 KPIs dinámicos ──────────────────────────────────────────────────────
+    if tiene_pago:
+        kpis = [
+            ("CAPITAL ACTIVO",          capital_total,               AZUL_CLARO,  AZUL_OSC),
+            ("INTERESES PENDIENTES",     saldo_pendiente,             VERDE_CLR,   colors.HexColor("#1E4620")),
+            ("TOTAL (Cap. + Pendiente)", capital_total + saldo_pendiente, DORADO_CLR, colors.HexColor("#4A3000")),
+        ]
+    else:
+        kpis = [
+            ("CAPITAL ACTIVO",    capital_total,                    AZUL_CLARO,  AZUL_OSC),
+            ("INTERESES GENERADOS", total_intereses_calc,           VERDE_CLR,   colors.HexColor("#1E4620")),
+            ("TOTAL ACUMULADO",   capital_total + total_intereses_calc, DORADO_CLR, colors.HexColor("#4A3000")),
+        ]
+
+    kpi_cells = []
+    for lbl, val, bg, tc in kpis:
+        kpi_cells.append(Table([[
+            P(lbl, fontSize=7.5, textColor=tc, bold=True, alignment=TA_CENTER),
+            P(f"<b>{fmt_usd(val)}</b>", fontSize=13, textColor=tc, bold=True, alignment=TA_CENTER),
+        ]], colWidths=[57*mm], rowHeights=[14, 24]))
+    kpi_row = [kpi_cells]
+
+    # Construir tabla KPI
+    kpi_t = Table([[cell] for cell in kpi_cells], colWidths=[57*mm])
+    # En horizontal
+    kpi_t = Table([kpi_cells], colWidths=[57*mm, 57*mm, 57*mm])
+    for i, (_, _, bg, tc) in enumerate(kpis):
+        pass  # aplicamos estilos individuales abajo
+
+    kpi_data = []
+    kpi_lbl_row = []
+    kpi_val_row = []
+    for lbl, val, bg, tc in kpis:
+        kpi_lbl_row.append(P(lbl, fontSize=7.5, textColor=tc, bold=True, alignment=TA_CENTER))
+        kpi_val_row.append(P(f"<b>{fmt_usd(val)}</b>", fontSize=14, textColor=tc, bold=True, alignment=TA_CENTER))
+    kpi_data = [kpi_lbl_row, kpi_val_row]
+    kpi_t = Table(kpi_data, colWidths=[57*mm, 57*mm, 57*mm])
+    ts_kpi = TableStyle([
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+        ("TOPPADDING",    (0,0), (-1,-1), 8),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+        ("GRID",          (0,0), (-1,-1), 0.5, GRIS_MED),
+        ("BOX",           (0,0), (-1,-1), 1.0, DORADO),
+    ])
+    for i, (_, _, bg, _) in enumerate(kpis):
+        ts_kpi.add("BACKGROUND", (i,0), (i,1), bg)
+    kpi_t.setStyle(ts_kpi)
+    story.append(kpi_t)
     story.append(Spacer(1, 7*mm))
 
-    # ── RESUMEN MENSUAL ───────────────────────────────────────────────────────
+    # ── Nota descriptiva ──────────────────────────────────────────────────────
+    nota = Table([[P(
+        "Este extracto incluye el detalle de todas sus posiciones activas, los intereses devengados "
+        "mes a mes y el acumulado histórico desde el inicio de su inversión.",
+        fontSize=8.5, textColor=colors.HexColor("#555555"), alignment=TA_CENTER
+    )]], colWidths=[178*mm])
+    nota.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), GRIS_CLR),
+        ("TOPPADDING",    (0,0), (-1,-1), 8),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+        ("BOX",           (0,0), (-1,-1), 0.5, GRIS_MED),
+    ]))
+    story.append(nota)
+    story.append(Spacer(1, 7*mm))
+
+    # ── Resumen mensual de intereses ──────────────────────────────────────────
     if tot_rows:
-        story.append(Paragraph("Resumen mensual de intereses",
-                                estilo("h2", fontSize=12, textColor=AZUL_OSC, bold=True, spaceAfter=4)))
+        story.append(P("Resumen mensual de intereses", fontSize=11, textColor=AZUL_OSC,
+                       bold=True, spaceAfter=3))
         story.append(HRFlowable(width="100%", thickness=1.5, color=DORADO, spaceAfter=4))
 
-        cab_tot = [
-            Paragraph("<b>Mes</b>", estilo("th", fontSize=9, textColor=BLANCO, alignment=TA_CENTER)),
-            Paragraph("<b>Intereses del mes ($)</b>", estilo("th2", fontSize=9, textColor=BLANCO, alignment=TA_RIGHT)),
-            Paragraph("<b>Acumulado ($)</b>", estilo("th3", fontSize=9, textColor=BLANCO, alignment=TA_RIGHT)),
-        ]
-        tabla_tot = [cab_tot]
+        if tiene_pago:
+            hdrs = ["MES", "GENERADO ($)", "PAGADO ($)", "SALDO ($)"]
+            anchos = [40*mm, 44*mm, 44*mm, 44*mm]
+        else:
+            hdrs = ["MES", "INTERESES ($)", "ACUMULADO ($)"]
+            anchos = [50*mm, 62*mm, 62*mm]
+
+        cab = [P(f"<b>{h}</b>", fontSize=8.5, textColor=BLANCO,
+                 bold=True, alignment=TA_CENTER) for h in hdrs]
+        tabla_tot = [cab]
         acum = 0.0
+        acum_pagado = 0.0
+
         for idx, r in enumerate(tot_rows):
             val = float(r.get("total_mes", 0) or 0)
+            mes_k = str(r.get("mes", ""))
+            pagado_mes = pagado_por_mes.get(mes_k, 0.0) if tiene_pago else 0.0
+            saldo_mes = val - pagado_mes
             acum += val
+            acum_pagado += pagado_mes
             fondo = GRIS_CLR if idx % 2 == 0 else BLANCO
-            tabla_tot.append([
-                Paragraph(str(r.get("mes", "")), estilo(f"tc{idx}", fontSize=9, alignment=TA_CENTER)),
-                Paragraph(f"${val:,.2f}", estilo(f"tv{idx}", fontSize=9, alignment=TA_RIGHT)),
-                Paragraph(f"${acum:,.2f}", estilo(f"ta{idx}", fontSize=9, alignment=TA_RIGHT)),
-            ])
-        # Fila total
-        tabla_tot.append([
-            Paragraph("<b>TOTAL</b>", estilo("tfm", fontSize=9, textColor=AZUL_OSC, bold=True, alignment=TA_CENTER)),
-            Paragraph(f"<b>${acum:,.2f}</b>", estilo("tfv", fontSize=9, textColor=AZUL_OSC, bold=True, alignment=TA_RIGHT)),
-            Paragraph(f"<b>${acum:,.2f}</b>", estilo("tfa", fontSize=9, textColor=AZUL_OSC, bold=True, alignment=TA_RIGHT)),
-        ])
-        t_tot = Table(tabla_tot, colWidths=[58*mm, 58*mm, 58*mm])
+
+            if tiene_pago:
+                fila = [
+                    P(mes_k, fontSize=8.5, alignment=TA_CENTER),
+                    P(fmt_usd(val), fontSize=8.5, alignment=TA_RIGHT),
+                    P(f'<font color="#C00000">{fmt_usd(-pagado_mes)}</font>' if pagado_mes else "—",
+                      fontSize=8.5, alignment=TA_RIGHT),
+                    P(f'<font color="#1E4620"><b>{fmt_usd(saldo_mes)}</b></font>',
+                      fontSize=8.5, alignment=TA_RIGHT),
+                ]
+            else:
+                fila = [
+                    P(mes_k, fontSize=8.5, alignment=TA_CENTER),
+                    P(fmt_usd(val), fontSize=8.5, alignment=TA_RIGHT),
+                    P(fmt_usd(acum), fontSize=8.5, alignment=TA_RIGHT),
+                ]
+            tabla_tot.append(fila)
+
+        # Fila TOTAL
+        acum_saldo = acum - acum_pagado
+        if tiene_pago:
+            fila_tot = [
+                P("<b>TOTAL</b>", fontSize=9, textColor=colors.HexColor("#4A3000"), bold=True, alignment=TA_CENTER),
+                P(f"<b>{fmt_usd(acum)}</b>", fontSize=9, textColor=colors.HexColor("#4A3000"), bold=True, alignment=TA_RIGHT),
+                P(f'<font color="#C00000"><b>{fmt_usd(-acum_pagado)}</b></font>', fontSize=9, alignment=TA_RIGHT),
+                P(f"<b>{fmt_usd(acum_saldo)}</b>", fontSize=9, textColor=colors.HexColor("#1E4620"), bold=True, alignment=TA_RIGHT),
+            ]
+        else:
+            fila_tot = [
+                P("<b>TOTAL</b>", fontSize=9, textColor=colors.HexColor("#4A3000"), bold=True, alignment=TA_CENTER),
+                P(f"<b>{fmt_usd(acum)}</b>", fontSize=9, textColor=colors.HexColor("#4A3000"), bold=True, alignment=TA_RIGHT),
+                P(f"<b>{fmt_usd(acum)}</b>", fontSize=9, textColor=colors.HexColor("#4A3000"), bold=True, alignment=TA_RIGHT),
+            ]
+        tabla_tot.append(fila_tot)
+
+        t_tot = Table(tabla_tot, colWidths=anchos)
         ts_tot = TableStyle([
             ("BACKGROUND",    (0,0), (-1,0), AZUL_MED),
             ("BACKGROUND",    (0,-1),(-1,-1), DORADO_CLR),
-            ("ALIGN",         (0,0), (-1,-1), "CENTER"),
             ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
             ("TOPPADDING",    (0,0), (-1,-1), 5),
             ("BOTTOMPADDING", (0,0), (-1,-1), 5),
             ("GRID",          (0,0), (-1,-1), 0.4, colors.HexColor("#d0dce8")),
             ("BOX",           (0,0), (-1,-1), 0.8, AZUL_MED),
+            ("LINEABOVE",     (0,-1),(-1,-1), 1.2, DORADO),
         ])
         for idx in range(1, len(tabla_tot)-1):
             if idx % 2 == 0:
                 ts_tot.add("BACKGROUND", (0,idx), (-1,idx), GRIS_CLR)
         t_tot.setStyle(ts_tot)
         story.append(t_tot)
-        story.append(Spacer(1, 7*mm))
 
-    # ── DETALLE DE OPERACIONES ────────────────────────────────────────────────
-    # Solo columnas visibles (las que no son ocultas en el Excel)
-    cols_visibles = ["mes", "fecha_inversion", "capital_invertido", "interes_mes"]
-    etiquetas_vis = ["Mes", "Fecha inversión", "Capital ($)", "Interés mes ($)"]
-    anchos_vis    = [28*mm, 40*mm, 50*mm, 50*mm]
+    # ════════════════════════════════════════════════════════════════════
+    # PÁGINA 2 — DETALLE DE OPERACIONES
+    # ════════════════════════════════════════════════════════════════════
+    story.append(PageBreak())
 
-    det_filtrado = []
-    for r in det_rows:
-        fila = {k: r.get(k, "") for k in cols_visibles}
-        # Formatear moneda
-        for col_m in ["capital_invertido", "interes_mes"]:
-            try:
-                fila[col_m] = f"${float(fila[col_m]):,.2f}" if fila[col_m] not in ("", None) else "—"
-            except Exception:
-                fila[col_m] = str(fila[col_m]) if fila[col_m] else "—"
-        det_filtrado.append(fila)
+    story.append(P("Detalle de operaciones", fontSize=11, textColor=AZUL_OSC,
+                   bold=True, spaceAfter=3))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=DORADO, spaceAfter=4))
 
-    if det_filtrado:
-        story.append(Paragraph("Detalle de operaciones",
-                                estilo("h2d", fontSize=12, textColor=AZUL_OSC, bold=True, spaceAfter=4)))
-        story.append(HRFlowable(width="100%", thickness=1.5, color=DORADO, spaceAfter=4))
+    # Columnas visibles — mismas que en el Excel
+    cols_vis    = ["mes", "fecha_inversion", "capital_invertido", "interes_mes"]
+    etiquetas   = ["Mes", "Fecha inversión", "Capital ($)", "Interés mes ($)"]
+    anchos_det  = [28*mm, 40*mm, 52*mm, 52*mm]
+    aligns_det  = [TA_CENTER, TA_LEFT, TA_RIGHT, TA_RIGHT]
 
-        cab_det = [Paragraph(f"<b>{e}</b>", estilo(f"dh{i}", fontSize=8, textColor=BLANCO, alignment=TA_CENTER))
-                   for i, e in enumerate(etiquetas_vis)]
-        tabla_det = [cab_det]
+    cab_det = [P(f"<b>{e}</b>", fontSize=8, textColor=BLANCO, bold=True, alignment=aligns_det[i])
+               for i, e in enumerate(etiquetas)]
+    tabla_det = [cab_det]
 
-        mes_anterior = None
-        for idx, r in enumerate(det_filtrado):
-            mes_actual = str(r.get("mes", ""))
-            fondo = NARANJA_CLR if mes_actual != mes_anterior and mes_anterior is not None else (GRIS_CLR if idx % 2 == 0 else BLANCO)
-            mes_anterior = mes_actual
-            fila_pdf = []
-            for ci, col in enumerate(cols_visibles):
-                aln = TA_RIGHT if col in ("capital_invertido", "interes_mes") else (TA_CENTER if col == "mes" else TA_LEFT)
-                fila_pdf.append(Paragraph(str(r.get(col, "") or ""), estilo(f"dd{idx}{ci}", fontSize=7.5, alignment=aln)))
-            tabla_det.append(fila_pdf)
+    mes_anterior = None
+    for idx, r in enumerate(det_rows):
+        mes_actual = str(r.get("mes", "") or "")
+        es_cierre  = "CIERRE" in str(r.get("tipo_fila", "") or "").upper()
 
-        t_det = Table(tabla_det, colWidths=anchos_vis, repeatRows=1)
-        ts_det = TableStyle([
-            ("BACKGROUND",    (0,0), (-1,0), AZUL_MED),
-            ("ALIGN",         (0,0), (-1,-1), "CENTER"),
-            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-            ("TOPPADDING",    (0,0), (-1,-1), 4),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-            ("GRID",          (0,0), (-1,-1), 0.3, colors.HexColor("#d0dce8")),
-            ("BOX",           (0,0), (-1,-1), 0.8, AZUL_MED),
-        ])
-        for idx in range(1, len(tabla_det)):
-            if idx % 2 == 0:
-                ts_det.add("BACKGROUND", (0,idx), (-1,idx), GRIS_CLR)
-        t_det.setStyle(ts_det)
-        story.append(t_det)
-        story.append(Spacer(1, 6*mm))
+        if es_cierre:
+            fondo = NARANJA_CLR
+        elif mes_actual != mes_anterior and mes_anterior is not None:
+            fondo = NARANJA_CLR
+        else:
+            fondo = GRIS_CLR if idx % 2 == 0 else BLANCO
+        mes_anterior = mes_actual
 
-    # ── PIE ───────────────────────────────────────────────────────────────────
-    pie_data = [[Paragraph(
-        '<font color="white" size="8">Chaparro Fernández Wealth · Documento confidencial · '
-        'Generado automáticamente · No responda a este correo</font>',
-        estilo("pie", fontSize=8, textColor=BLANCO, alignment=TA_CENTER)
-    )]]
-    pie_t = Table(pie_data, colWidths=[174*mm])
-    pie_t.setStyle(TableStyle([
+        fila = []
+        for ci, col in enumerate(cols_vis):
+            val = r.get(col, "") or ""
+            if col in ("capital_invertido", "interes_mes"):
+                try:
+                    txt = fmt_usd(float(val)) if val not in ("", None) else "—"
+                except Exception:
+                    txt = str(val) if val else "—"
+            else:
+                txt = str(val) if val else ""
+            fila.append(P(txt, fontSize=7.5, alignment=aligns_det[ci]))
+        tabla_det.append(fila)
+
+    t_det = Table(tabla_det, colWidths=anchos_det, repeatRows=1)
+    ts_det = TableStyle([
+        ("BACKGROUND",    (0,0), (-1,0), AZUL_MED),
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+        ("TOPPADDING",    (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("GRID",          (0,0), (-1,-1), 0.3, colors.HexColor("#d0dce8")),
+        ("BOX",           (0,0), (-1,-1), 0.8, AZUL_MED),
+    ])
+    for idx in range(1, len(tabla_det)):
+        if idx % 2 == 0:
+            ts_det.add("BACKGROUND", (0,idx), (-1,idx), GRIS_CLR)
+    t_det.setStyle(ts_det)
+    story.append(t_det)
+    story.append(Spacer(1, 6*mm))
+
+    # ── PIE ──────────────────────────────────────────────────────────────────
+    pie = Table([[P(
+        '<font color="white" size="7.5">Chaparro Fernández Wealth  ·  Documento confidencial  ·  '
+        'Generado automáticamente  ·  No responda a este correo</font>',
+        fontSize=7.5, textColor=BLANCO, alignment=TA_CENTER
+    )]], colWidths=[178*mm])
+    pie.setStyle(TableStyle([
         ("BACKGROUND",    (0,0), (-1,-1), AZUL_OSC),
-        ("TOPPADDING",    (0,0), (-1,-1), 8),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+        ("TOPPADDING",    (0,0), (-1,-1), 7),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 7),
     ]))
-    story.append(pie_t)
+    story.append(pie)
 
     doc.build(story)
     return buf.getvalue()
