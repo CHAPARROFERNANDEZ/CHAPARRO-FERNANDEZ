@@ -151,12 +151,37 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
     tot_rows = []
     det_rows = []
 
-    if "TOTALES_MES" in wb.sheetnames:
-        ws_t = wb["TOTALES_MES"]
-        headers_t = [c.value for c in next(ws_t.iter_rows(min_row=1, max_row=1))]
-        for row in ws_t.iter_rows(min_row=2, values_only=True):
-            if row and row[0]:
-                tot_rows.append(dict(zip(headers_t, row)))
+    # Hoja RESUMEN MENSUAL (nuevo formato) o TOTALES_MES (formato antiguo)
+    hoja_resumen = None
+    for nombre_hoja in ["RESUMEN MENSUAL", "RESUMEN_MENSUAL", "TOTALES_MES"]:
+        if nombre_hoja in wb.sheetnames:
+            hoja_resumen = nombre_hoja
+            break
+
+    if hoja_resumen:
+        ws_t = wb[hoja_resumen]
+        all_rows = list(ws_t.iter_rows(values_only=True))
+        # Buscar fila de cabeceras (contiene "MES")
+        header_row_idx = None
+        for i, row in enumerate(all_rows):
+            vals = [str(v).strip().upper() if v else "" for v in row]
+            if "MES" in vals:
+                header_row_idx = i
+                break
+        if header_row_idx is not None:
+            headers_t = [str(v).strip() if v else "" for v in all_rows[header_row_idx]]
+            # Normalizar nombres de columna
+            col_mes = next((i for i,h in enumerate(headers_t) if h.upper() == "MES"), 0)
+            col_int = next((i for i,h in enumerate(headers_t) if "INTER" in h.upper()), 1)
+            for row in all_rows[header_row_idx+1:]:
+                if not row or not row[col_mes]: continue
+                mes_val = str(row[col_mes]).strip()
+                if mes_val.upper() in ("TOTAL", ""): continue
+                try:
+                    int_val = float(row[col_int]) if row[col_int] else 0.0
+                except Exception:
+                    int_val = 0.0
+                tot_rows.append({"mes": mes_val, "total_mes": int_val})
         # ordenar cronológicamente
         def _mes_key(r):
             try:
@@ -166,12 +191,68 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
                 return (9999, 99)
         tot_rows.sort(key=_mes_key)
 
+    # Hoja DETALLE — cabeceras reales en fila 3 (índice 2)
     if "DETALLE" in wb.sheetnames:
         ws_d = wb["DETALLE"]
-        headers_d = [c.value for c in next(ws_d.iter_rows(min_row=1, max_row=1))]
-        for row in ws_d.iter_rows(min_row=2, values_only=True):
-            if any(v for v in row if v is not None):
-                det_rows.append(dict(zip(headers_d, row)))
+        all_det = list(ws_d.iter_rows(values_only=True))
+        # Buscar fila de cabeceras (contiene "Mes" o "mes" o "ID")
+        header_det_idx = None
+        for i, row in enumerate(all_det):
+            vals = [str(v).strip().upper() if v else "" for v in row]
+            if any(k in vals for k in ["MES", "ID", "CAPITAL ($)"]):
+                header_det_idx = i
+                break
+        if header_det_idx is None:
+            header_det_idx = 2  # fallback: fila 3
+
+        headers_d = [str(v).strip() if v else f"col{i}"
+                     for i, v in enumerate(all_det[header_det_idx])]
+        # Normalizar nombres clave
+        col_map = {}
+        for i, h in enumerate(headers_d):
+            hu = h.upper()
+            if hu in ("ID", ""):
+                if i == 0: col_map[i] = "id_op"
+            if "MES" == hu: col_map[i] = "mes"
+            if "FECHA" in hu and "INV" in hu: col_map[i] = "fecha_inversion"
+            if "CAPITAL" in hu: col_map[i] = "capital_invertido"
+            if "INTER" in hu and "MES" in hu: col_map[i] = "interes_mes"
+            if "PAGO" in hu: col_map[i] = "pago_intereses"
+            if "FIN" in hu or "FECHA FIN" in hu: col_map[i] = "fecha_fin_op"
+        # Aplicar mapeo
+        headers_norm = [col_map.get(i, h) for i, h in enumerate(headers_d)]
+
+        for row in all_det[header_det_idx+1:]:
+            if not row or all(v is None for v in row): continue
+            d = dict(zip(headers_norm, row))
+            # Detectar tipo de fila
+            id_val = str(d.get("id_op", "") or "").strip()
+            if not id_val and row[0]:
+                id_val = str(row[0]).strip()
+            if not id_val: continue
+            # Marcar filas de cierre
+            id_upper = id_val.upper()
+            if any(k in id_upper for k in ["CIERRE", "CAPITAL + INTER", "TOTAL ACUM"]):
+                d["tipo_fila"] = "CIERRE"
+                d["id_op"] = id_val
+                # El interés está en la última columna con valor numérico
+                for v in reversed(row):
+                    try:
+                        d["interes_mes"] = float(v)
+                        break
+                    except Exception:
+                        continue
+                # Capital en col capital_invertido
+                try:
+                    cap_idx = next(i for i,h in enumerate(headers_norm) if h == "capital_invertido")
+                    d["capital_invertido"] = float(row[cap_idx]) if row[cap_idx] else 0.0
+                except Exception:
+                    d["capital_invertido"] = 0.0
+            else:
+                d["tipo_fila"] = "OP"
+                d["id_op"] = id_val
+            det_rows.append(d)
+
 
     # ── Detectar tipo de inversor: PAGA o REINVIERTE ──────────────────────────
     tiene_pago = any(
@@ -442,46 +523,85 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
                for i, e in enumerate(etiquetas)]
     tabla_det = [cab_det]
 
+    ts_det_extra = []  # estilos de color por fila
+
     mes_anterior = None
     for idx, r in enumerate(det_rows):
-        mes_actual = str(r.get("mes", "") or "")
-        es_cierre  = "CIERRE" in str(r.get("tipo_fila", "") or "").upper()
+        id_op    = str(r.get("id_op", "") or "").strip().upper()
+        tipo_f   = str(r.get("tipo_fila", "") or "").upper()
+        mes_act  = str(r.get("mes", "") or "")
 
-        if es_cierre:
+        # Determinar tipo de fila y color
+        es_cierre_anual  = "CIERRE 20" in id_op and "/" not in id_op  # CIERRE 2025, CIERRE 2026
+        es_cap_int       = "CAPITAL + INTER" in id_op
+        es_cierre_final  = "CIERRE FINAL" in id_op or "TOTAL ACUM" in id_op
+        es_cierre_mens   = tipo_f == "CIERRE" and not es_cierre_anual and not es_cierre_final and not es_cap_int
+
+        if es_cierre_final or es_cap_int:
+            fondo = DORADO_CLR
+            bold_fila = True
+        elif es_cierre_anual:
+            fondo = VERDE_CLR
+            bold_fila = True
+        elif es_cierre_mens:
             fondo = NARANJA_CLR
-        elif mes_actual != mes_anterior and mes_anterior is not None:
-            fondo = NARANJA_CLR
+            bold_fila = True
         else:
             fondo = GRIS_CLR if idx % 2 == 0 else BLANCO
-        mes_anterior = mes_actual
+            bold_fila = False
 
+        fila_num = idx + 1  # +1 por la cabecera
+        ts_det_extra.append(("BACKGROUND", (0, fila_num), (-1, fila_num), fondo))
+
+        # Construir columnas de la fila
         fila = []
         for ci, col in enumerate(cols_vis):
-            val = r.get(col, "") or ""
-            if col in ("capital_invertido", "interes_mes"):
-                try:
-                    txt = fmt_usd(float(val)) if val not in ("", None) else "—"
-                except Exception:
-                    txt = str(val) if val else "—"
+            if es_cierre_mens or es_cierre_anual or es_cierre_final or es_cap_int:
+                # Filas especiales: mostrar etiqueta en col 0 y valor en última col
+                if ci == 0:
+                    # Etiqueta del cierre: usar id_op original con capitalización
+                    etiq = str(r.get("id_op", "") or "").strip()
+                    txt = etiq
+                    aln_use = TA_LEFT
+                elif ci == len(cols_vis) - 1:
+                    # Interés/valor en última columna
+                    val = r.get("interes_mes", "") or ""
+                    try:
+                        txt = fmt_usd(float(val)) if val not in ("", None) else "—"
+                    except Exception:
+                        txt = str(val) if val else "—"
+                    aln_use = TA_RIGHT
+                else:
+                    txt = ""
+                    aln_use = TA_CENTER
             else:
-                txt = str(val) if val else ""
-            fila.append(P(txt, fontSize=7.5, alignment=aligns_det[ci]))
+                val = r.get(col, "") or ""
+                if col in ("capital_invertido", "interes_mes"):
+                    try:
+                        txt = fmt_usd(float(val)) if val not in ("", None) else "—"
+                    except Exception:
+                        txt = str(val) if val else "—"
+                else:
+                    txt = str(val) if val else ""
+                aln_use = aligns_det[ci]
+
+            fila.append(P(txt, fontSize=7.5, bold=bold_fila, alignment=aln_use))
+
         tabla_det.append(fila)
 
     t_det = Table(tabla_det, colWidths=anchos_det, repeatRows=1)
     ts_det = TableStyle([
         ("BACKGROUND",    (0,0), (-1,0), AZUL_MED),
         ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-        ("TOPPADDING",    (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING",    (0,0), (-1,-1), 3),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
         ("GRID",          (0,0), (-1,-1), 0.3, colors.HexColor("#d0dce8")),
         ("BOX",           (0,0), (-1,-1), 0.8, AZUL_MED),
-    ])
-    for idx in range(1, len(tabla_det)):
-        if idx % 2 == 0:
-            ts_det.add("BACKGROUND", (0,idx), (-1,idx), GRIS_CLR)
+    ] + ts_det_extra)
     t_det.setStyle(ts_det)
     story.append(t_det)
+    story.append(Spacer(1, 6*mm))
+
     story.append(Spacer(1, 6*mm))
 
     # ── PIE ──────────────────────────────────────────────────────────────────
