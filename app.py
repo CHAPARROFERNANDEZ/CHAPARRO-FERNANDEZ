@@ -310,29 +310,12 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
             ("TOTAL ACUMULADO",   capital_total + total_intereses_calc, DORADO_CLR, colors.HexColor("#4A3000")),
         ]
 
-    kpi_cells = []
-    for lbl, val, bg, tc in kpis:
-        kpi_cells.append(Table([[
-            P(lbl, fontSize=7.5, textColor=tc, bold=True, alignment=TA_CENTER),
-            P(f"<b>{fmt_usd(val)}</b>", fontSize=13, textColor=tc, bold=True, alignment=TA_CENTER),
-        ]], colWidths=[57*mm], rowHeights=[14, 24]))
-    kpi_row = [kpi_cells]
-
-    # Construir tabla KPI
-    kpi_t = Table([[cell] for cell in kpi_cells], colWidths=[57*mm])
-    # En horizontal
-    kpi_t = Table([kpi_cells], colWidths=[57*mm, 57*mm, 57*mm])
-    for i, (_, _, bg, tc) in enumerate(kpis):
-        pass  # aplicamos estilos individuales abajo
-
-    kpi_data = []
-    kpi_lbl_row = []
-    kpi_val_row = []
-    for lbl, val, bg, tc in kpis:
-        kpi_lbl_row.append(P(lbl, fontSize=7.5, textColor=tc, bold=True, alignment=TA_CENTER))
-        kpi_val_row.append(P(f"<b>{fmt_usd(val)}</b>", fontSize=14, textColor=tc, bold=True, alignment=TA_CENTER))
-    kpi_data = [kpi_lbl_row, kpi_val_row]
-    kpi_t = Table(kpi_data, colWidths=[57*mm, 57*mm, 57*mm])
+    # Tabla KPI: fila etiquetas + fila valores
+    kpi_lbl_row = [P(lbl, fontSize=7.5, textColor=tc, bold=True, alignment=TA_CENTER)
+                   for lbl, val, bg, tc in kpis]
+    kpi_val_row = [P(f"<b>{fmt_usd(val)}</b>", fontSize=14, textColor=tc, bold=True, alignment=TA_CENTER)
+                   for lbl, val, bg, tc in kpis]
+    kpi_t = Table([kpi_lbl_row, kpi_val_row], colWidths=[57*mm, 57*mm, 57*mm])
     ts_kpi = TableStyle([
         ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
         ("TOPPADDING",    (0,0), (-1,-1), 8),
@@ -341,7 +324,7 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
         ("BOX",           (0,0), (-1,-1), 1.0, DORADO),
     ])
     for i, (_, _, bg, _) in enumerate(kpis):
-        ts_kpi.add("BACKGROUND", (i,0), (i,1), bg)
+        ts_kpi.add("BACKGROUND", (i, 0), (i, 1), bg)
     kpi_t.setStyle(ts_kpi)
     story.append(kpi_t)
     story.append(Spacer(1, 7*mm))
