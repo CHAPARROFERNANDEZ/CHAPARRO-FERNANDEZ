@@ -3849,12 +3849,26 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
 
     ws_p.row_dimensions[13].height = 12
 
-    # Tres KPIs
-    kpi_data = [
-        ("CAPITAL ACTIVO",        capital_total,                    C_AZUL_OSC,   C_AZUL_CLARO),
-        ("INTERESES GENERADOS",   total_intereses,                  "1E4620",     C_VERDE),
-        ("TOTAL ACUMULADO",       capital_total + total_intereses,  "4A3000",     C_DORADO),
-    ]
+    # ── Calcular totales pagado/saldo para lógica de portada y cierres ──
+    total_pagado_global = sum(
+        float(r.get("interes_mes", 0) or 0)
+        for r in det_rows if str(r.get("pago_intereses", "")).strip().upper() == "PAGA"
+    )
+    saldo_pendiente_global = total_intereses - total_pagado_global
+
+    # Tres KPIs — distintos según si el inversor paga o reinvierte
+    if tiene_pago:
+        kpi_data = [
+            ("CAPITAL ACTIVO",            capital_total,                         C_AZUL_OSC, C_AZUL_CLARO),
+            ("INTERESES PENDIENTES",       saldo_pendiente_global,               "1E4620",   C_VERDE),
+            ("TOTAL (Cap. + Pendiente)",   capital_total + saldo_pendiente_global, "4A3000", C_DORADO),
+        ]
+    else:
+        kpi_data = [
+            ("CAPITAL ACTIVO",        capital_total,                    C_AZUL_OSC, C_AZUL_CLARO),
+            ("INTERESES GENERADOS",   total_intereses,                  "1E4620",   C_VERDE),
+            ("TOTAL ACUMULADO",       capital_total + total_intereses,  "4A3000",   C_DORADO),
+        ]
     for ki, (lbl_k, val_k, txt_k, bg_k) in enumerate(kpi_data):
         col_k = ki + 2  # columnas B, C, D
         c_lk = ws_p.cell(row=14, column=col_k, value=lbl_k)
@@ -3886,7 +3900,23 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
 
     # Mini tabla resumen mensual en portada
     if tot_rows:
-        ws_p.merge_cells("B19:D19")
+        # Precomputar pagado por mes para inversores con PAGA
+        pagado_por_mes: dict = {}
+        if tiene_pago:
+            for r in det_rows:
+                if str(r.get("pago_intereses", "")).strip().upper() == "PAGA":
+                    mk_str = str(r.get("mes", ""))
+                    pagado_por_mes[mk_str] = pagado_por_mes.get(mk_str, 0.0) + float(r.get("interes_mes", 0) or 0)
+
+        if tiene_pago:
+            hdrs_portada = ["MES", "GENERADO ($)", "PAGADO ($)", "SALDO ($)"]
+            n_cols_portada = 4
+            ws_p.merge_cells("B19:E19")
+        else:
+            hdrs_portada = ["MES", "INTERESES ($)", "ACUMULADO ($)"]
+            n_cols_portada = 3
+            ws_p.merge_cells("B19:D19")
+
         c_hres = ws_p["B19"]
         c_hres.value = "RESUMEN MENSUAL DE INTERESES"
         c_hres.font = Font(name="Calibri", size=10, bold=True, color=C_BLANCO)
@@ -3894,7 +3924,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         c_hres.alignment = aln(h="center")
         ws_p.row_dimensions[19].height = 22
 
-        for ci_h, hdr_h in enumerate(["MES", "INTERESES ($)", "ACUMULADO ($)"], 2):
+        for ci_h, hdr_h in enumerate(hdrs_portada, 2):
             c_hh = ws_p.cell(row=20, column=ci_h, value=hdr_h)
             c_hh.font = Font(name="Calibri", size=9, bold=True, color=C_AZUL_OSC)
             c_hh.fill = fill(C_AZUL_CLARO)
@@ -3903,32 +3933,64 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         ws_p.row_dimensions[20].height = 20
 
         acum_p = 0.0
+        acum_pagado_p = 0.0
         for ri_p, tr_p in enumerate(tot_rows, 21):
             fondo_p = C_GRIS_CLARO if ri_p % 2 == 0 else C_BLANCO
             val_p = float(tr_p["total_mes"] or 0)
+            mes_str_p = str(tr_p["mes"])
+            pagado_mes_p = pagado_por_mes.get(mes_str_p, 0.0) if tiene_pago else 0.0
+            saldo_mes_p = val_p - pagado_mes_p
             acum_p += val_p
+            acum_pagado_p += pagado_mes_p
             ws_p.row_dimensions[ri_p].height = 18
-            c_m = ws_p.cell(row=ri_p, column=2, value=tr_p["mes"])
+
+            c_m = ws_p.cell(row=ri_p, column=2, value=mes_str_p)
             c_m.font = font(size=9); c_m.fill = fill(fondo_p)
             c_m.alignment = aln(h="center"); c_m.border = borde_std
-            c_v2 = ws_p.cell(row=ri_p, column=3, value=val_p)
-            c_v2.font = font(size=9); c_v2.fill = fill(fondo_p)
-            c_v2.number_format = fmt_usd; c_v2.alignment = aln(h="right"); c_v2.border = borde_std
-            c_a2 = ws_p.cell(row=ri_p, column=4, value=acum_p)
-            c_a2.font = font(size=9); c_a2.fill = fill(fondo_p)
-            c_a2.number_format = fmt_usd; c_a2.alignment = aln(h="right"); c_a2.border = borde_std
+
+            if tiene_pago:
+                c_gen = ws_p.cell(row=ri_p, column=3, value=val_p)
+                c_gen.font = font(size=9); c_gen.fill = fill(fondo_p)
+                c_gen.number_format = fmt_usd; c_gen.alignment = aln(h="right"); c_gen.border = borde_std
+                c_pag = ws_p.cell(row=ri_p, column=4, value=-pagado_mes_p)
+                c_pag.font = Font(name="Calibri", size=9, color="C00000")
+                c_pag.fill = fill(fondo_p)
+                c_pag.number_format = fmt_usd; c_pag.alignment = aln(h="right"); c_pag.border = borde_std
+                c_sal = ws_p.cell(row=ri_p, column=5, value=saldo_mes_p)
+                c_sal.font = Font(name="Calibri", size=9, bold=True, color="1E4620")
+                c_sal.fill = fill(C_VERDE if saldo_mes_p == 0 else fondo_p)
+                c_sal.number_format = fmt_usd; c_sal.alignment = aln(h="right"); c_sal.border = borde_std
+            else:
+                c_v2 = ws_p.cell(row=ri_p, column=3, value=val_p)
+                c_v2.font = font(size=9); c_v2.fill = fill(fondo_p)
+                c_v2.number_format = fmt_usd; c_v2.alignment = aln(h="right"); c_v2.border = borde_std
+                c_a2 = ws_p.cell(row=ri_p, column=4, value=acum_p)
+                c_a2.font = font(size=9); c_a2.fill = fill(fondo_p)
+                c_a2.number_format = fmt_usd; c_a2.alignment = aln(h="right"); c_a2.border = borde_std
 
         fila_tot_p = 21 + len(tot_rows)
         ws_p.row_dimensions[fila_tot_p].height = 22
-        for ci_t, val_t in [(2, "TOTAL"), (3, acum_p), (4, acum_p)]:
-            c_t = ws_p.cell(row=fila_tot_p, column=ci_t,
-                            value=val_t if ci_t > 2 else "TOTAL")
-            c_t.font = Font(name="Calibri", size=10, bold=True, color=C_DORADO_OSC)
-            c_t.fill = fill(C_DORADO)
-            c_t.alignment = aln(h="center" if ci_t == 2 else "right")
-            if ci_t > 2:
-                c_t.number_format = fmt_usd
-            c_t.border = borde_top
+        acum_saldo_p = acum_p - acum_pagado_p
+        if tiene_pago:
+            tot_vals = [("TOTAL", None), (acum_p, fmt_usd), (-acum_pagado_p, fmt_usd), (acum_saldo_p, fmt_usd)]
+            for ci_t, (val_t, fmt_t) in enumerate(tot_vals, 2):
+                c_t = ws_p.cell(row=fila_tot_p, column=ci_t, value=val_t)
+                c_t.font = Font(name="Calibri", size=10, bold=True, color=C_DORADO_OSC)
+                c_t.fill = fill(C_DORADO)
+                c_t.alignment = aln(h="center" if ci_t == 2 else "right")
+                if fmt_t:
+                    c_t.number_format = fmt_t
+                c_t.border = borde_top
+        else:
+            for ci_t, val_t in [(2, "TOTAL"), (3, acum_p), (4, acum_p)]:
+                c_t = ws_p.cell(row=fila_tot_p, column=ci_t,
+                                value=val_t if ci_t > 2 else "TOTAL")
+                c_t.font = Font(name="Calibri", size=10, bold=True, color=C_DORADO_OSC)
+                c_t.fill = fill(C_DORADO)
+                c_t.alignment = aln(h="center" if ci_t == 2 else "right")
+                if ci_t > 2:
+                    c_t.number_format = fmt_usd
+                c_t.border = borde_top
 
         fila_pie_p = fila_tot_p + 2
     else:
@@ -4315,7 +4377,9 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
 
     ws_d.row_dimensions[fila_excel].height = 30
     ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
-    cfa = ws_d.cell(row=fila_excel, column=1, value="   TOTAL ACUMULADO  (Capital + Intereses)")
+    cfa = ws_d.cell(row=fila_excel, column=1,
+                    value="   TOTAL ACUMULADO  (Capital + Intereses)" if not tiene_pago
+                    else "   TOTAL (Capital + Intereses pendientes)")
     cfa.font = Font(name="Calibri", size=12, bold=True, color=C_DORADO_OSC)
     cfa.fill = fill(C_DORADO)
     cfa.alignment = aln(h="right")
@@ -4323,7 +4387,8 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     cx = ws_d.cell(row=fila_excel, column=9, value="")
     cx.fill = fill(C_DORADO)
     cx.border = borde_std
-    total_cf = ws_d.cell(row=fila_excel, column=10, value=capital_total + total_intereses)
+    total_final_valor = (capital_total + saldo_pendiente_global) if tiene_pago else (capital_total + total_intereses)
+    total_cf = ws_d.cell(row=fila_excel, column=10, value=total_final_valor)
     total_cf.font = Font(name="Calibri", size=12, bold=True, color=C_DORADO_OSC)
     total_cf.fill = fill(C_DORADO)
     total_cf.number_format = fmt_usd
@@ -4340,23 +4405,46 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     # ═══════════════════════════════════════════════════════════════
     ws_m = wb.create_sheet("RESUMEN MENSUAL")
     ws_m.sheet_view.showGridLines = False
-    ws_m.column_dimensions["A"].width = 16
-    ws_m.column_dimensions["B"].width = 22
-    ws_m.column_dimensions["C"].width = 22
 
-    ws_m.merge_cells("A1:C1")
-    tm = ws_m["A1"]
-    tm.value = "RESUMEN DE INTERESES POR MES"
-    tm.font = Font(name="Calibri", size=16, bold=True, color=C_BLANCO)
-    tm.fill = fill(C_AZUL_OSC)
-    tm.alignment = aln(h="center", v="center")
+    # Precomputar pagado por mes (para inversores PAGA)
+    pagado_por_mes_m: dict = {}
+    if tiene_pago:
+        for r in det_rows:
+            if str(r.get("pago_intereses", "")).strip().upper() == "PAGA":
+                mk_str = str(r.get("mes", ""))
+                pagado_por_mes_m[mk_str] = pagado_por_mes_m.get(mk_str, 0.0) + float(r.get("interes_mes", 0) or 0)
+
+    if tiene_pago:
+        ws_m.column_dimensions["A"].width = 16
+        ws_m.column_dimensions["B"].width = 20
+        ws_m.column_dimensions["C"].width = 20
+        ws_m.column_dimensions["D"].width = 20
+        ws_m.merge_cells("A1:D1")
+        titulo_m = ws_m["A1"]
+    else:
+        ws_m.column_dimensions["A"].width = 16
+        ws_m.column_dimensions["B"].width = 22
+        ws_m.column_dimensions["C"].width = 22
+        ws_m.merge_cells("A1:C1")
+        titulo_m = ws_m["A1"]
+
+    titulo_m.value = "RESUMEN DE INTERESES POR MES"
+    titulo_m.font = Font(name="Calibri", size=16, bold=True, color=C_BLANCO)
+    titulo_m.fill = fill(C_AZUL_OSC)
+    titulo_m.alignment = aln(h="center", v="center")
     ws_m.row_dimensions[1].height = 42
 
-    ws_m.merge_cells("A2:C2")
+    last_col_m = "D" if tiene_pago else "C"
+    ws_m.merge_cells(f"A2:{last_col_m}2")
     ws_m["A2"].fill = fill("2E86C1")
     ws_m.row_dimensions[2].height = 5
 
-    for ci, hdr in enumerate(["MES", "INTERESES ($)", "ACUMULADO ($)"], 1):
+    if tiene_pago:
+        hdrs_m = ["MES", "GENERADO ($)", "PAGADO ($)", "SALDO ($)"]
+    else:
+        hdrs_m = ["MES", "INTERESES ($)", "ACUMULADO ($)"]
+
+    for ci, hdr in enumerate(hdrs_m, 1):
         c = ws_m.cell(row=3, column=ci, value=hdr)
         c.font = Font(name="Calibri", size=11, bold=True, color=C_BLANCO)
         c.fill = fill(C_AZUL_MED)
@@ -4364,52 +4452,81 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         c.border = borde_std
     ws_m.row_dimensions[3].height = 28
 
-    acum = 0.0
+    acum_m = 0.0
+    acum_pagado_m = 0.0
     for ri, tr in enumerate(tot_rows, 4):
         fondo = C_AZUL_CLARO if ri % 2 == 0 else C_GRIS_CLARO
         ws_m.row_dimensions[ri].height = 26
-        c1 = ws_m.cell(row=ri, column=1, value=tr["mes"])
-        c1.font = font(size=10)
-        c1.fill = fill(fondo)
-        c1.alignment = aln(h="center")
-        c1.border = borde_std
-
+        mes_str_m = str(tr["mes"])
         val = float(tr["total_mes"] or 0)
-        acum += val
-        c2 = ws_m.cell(row=ri, column=2, value=val)
-        c2.font = font(size=10)
-        c2.fill = fill(fondo)
-        c2.number_format = fmt_usd
-        c2.alignment = aln(h="right")
-        c2.border = borde_std
+        pagado_m = pagado_por_mes_m.get(mes_str_m, 0.0) if tiene_pago else 0.0
+        saldo_m = val - pagado_m
+        acum_m += val
+        acum_pagado_m += pagado_m
 
-        c3 = ws_m.cell(row=ri, column=3, value=acum)
-        c3.font = font(size=10)
-        c3.fill = fill(fondo)
-        c3.number_format = fmt_usd
-        c3.alignment = aln(h="right")
-        c3.border = borde_std
+        c1 = ws_m.cell(row=ri, column=1, value=mes_str_m)
+        c1.font = font(size=10); c1.fill = fill(fondo)
+        c1.alignment = aln(h="center"); c1.border = borde_std
+
+        if tiene_pago:
+            c_gen = ws_m.cell(row=ri, column=2, value=val)
+            c_gen.font = font(size=10); c_gen.fill = fill(fondo)
+            c_gen.number_format = fmt_usd; c_gen.alignment = aln(h="right"); c_gen.border = borde_std
+
+            c_pag = ws_m.cell(row=ri, column=3, value=-pagado_m)
+            c_pag.font = Font(name="Calibri", size=10, color="C00000")
+            c_pag.fill = fill(fondo)
+            c_pag.number_format = fmt_usd; c_pag.alignment = aln(h="right"); c_pag.border = borde_std
+
+            c_sal = ws_m.cell(row=ri, column=4, value=saldo_m)
+            c_sal.font = Font(name="Calibri", size=10, bold=True, color="1E4620")
+            c_sal.fill = fill(C_VERDE if saldo_m == 0 else fondo)
+            c_sal.number_format = fmt_usd; c_sal.alignment = aln(h="right"); c_sal.border = borde_std
+        else:
+            acum_rein = acum_m  # para reinversores el acumulado es el total generado
+            c2 = ws_m.cell(row=ri, column=2, value=val)
+            c2.font = font(size=10); c2.fill = fill(fondo)
+            c2.number_format = fmt_usd; c2.alignment = aln(h="right"); c2.border = borde_std
+            c3 = ws_m.cell(row=ri, column=3, value=acum_m)
+            c3.font = font(size=10); c3.fill = fill(fondo)
+            c3.number_format = fmt_usd; c3.alignment = aln(h="right"); c3.border = borde_std
 
     # Fila total
     fila_tot = 4 + len(tot_rows)
     ws_m.row_dimensions[fila_tot].height = 30
+    acum_saldo_m = acum_m - acum_pagado_m
+
     ct = ws_m.cell(row=fila_tot, column=1, value="TOTAL")
     ct.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
-    ct.fill = fill(C_DORADO)
-    ct.alignment = aln(h="center")
-    ct.border = borde_top
-    ct2 = ws_m.cell(row=fila_tot, column=2, value=acum)
-    ct2.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
-    ct2.fill = fill(C_DORADO)
-    ct2.number_format = fmt_usd
-    ct2.alignment = aln(h="right")
-    ct2.border = borde_top
-    ct3 = ws_m.cell(row=fila_tot, column=3, value=acum)
-    ct3.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
-    ct3.fill = fill(C_DORADO)
-    ct3.number_format = fmt_usd
-    ct3.alignment = aln(h="right")
-    ct3.border = borde_top
+    ct.fill = fill(C_DORADO); ct.alignment = aln(h="center"); ct.border = borde_top
+
+    if tiene_pago:
+        for col_i, val_i in [(2, acum_m), (3, -acum_pagado_m), (4, acum_saldo_m)]:
+            c_ti = ws_m.cell(row=fila_tot, column=col_i, value=val_i)
+            c_ti.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
+            c_ti.fill = fill(C_DORADO); c_ti.number_format = fmt_usd
+            c_ti.alignment = aln(h="right"); c_ti.border = borde_top
+        # Fila "Pendiente de pago"
+        fila_pend = fila_tot + 1
+        ws_m.row_dimensions[fila_pend].height = 24
+        ws_m.merge_cells(f"A{fila_pend}:C{fila_pend}")
+        c_pend_lbl = ws_m[f"A{fila_pend}"]
+        c_pend_lbl.value = "TOTAL PENDIENTE DE PAGO"
+        c_pend_lbl.font = Font(name="Calibri", size=11, bold=True, color="C00000")
+        c_pend_lbl.fill = fill("FFE0E0"); c_pend_lbl.alignment = aln(h="right"); c_pend_lbl.border = borde_top
+        c_pend_val = ws_m.cell(row=fila_pend, column=4, value=acum_saldo_m)
+        c_pend_val.font = Font(name="Calibri", size=11, bold=True, color="C00000")
+        c_pend_val.fill = fill("FFE0E0"); c_pend_val.number_format = fmt_usd
+        c_pend_val.alignment = aln(h="right"); c_pend_val.border = borde_top
+    else:
+        ct2 = ws_m.cell(row=fila_tot, column=2, value=acum_m)
+        ct2.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
+        ct2.fill = fill(C_DORADO); ct2.number_format = fmt_usd
+        ct2.alignment = aln(h="right"); ct2.border = borde_top
+        ct3 = ws_m.cell(row=fila_tot, column=3, value=acum_m)
+        ct3.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
+        ct3.fill = fill(C_DORADO); ct3.number_format = fmt_usd
+        ct3.alignment = aln(h="right"); ct3.border = borde_top
 
     out = BytesIO()
     wb.save(out)
