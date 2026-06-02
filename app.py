@@ -630,7 +630,7 @@ Luego recarga el Excel desde el menú Gestión de Excel.
 
             t = archivos[0]
             nombre_archivo   = t[0]
-            extracto_bytes   = t[2] if len(t) == 3 else t[1]
+            extracto_bytes   = t[1]  # t[1] = Excel formateado (PORTADA/DETALLE/RESUMEN)
             email_dest       = mapa_emails.get(inversor, "")
 
             total_intereses_email = 0.0
