@@ -143,7 +143,13 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
                 '--outdir', tmp_dir, xlsx_path
             ], capture_output=True, text=True, timeout=60)
 
+            # DIAGNÓSTICO TEMPORAL: mostrar error detallado en Streamlit
             if result.returncode != 0:
+                st.error(f"⚠️ LibreOffice falló (returncode={result.returncode})")
+                if result.stderr:
+                    st.code(f"STDERR:\n{result.stderr}", language=None)
+                if result.stdout:
+                    st.code(f"STDOUT:\n{result.stdout}", language=None)
                 return b""
 
             # Leer el PDF generado
@@ -151,9 +157,20 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
             if os.path.exists(pdf_path):
                 with open(pdf_path, 'rb') as f:
                     return f.read()
+
+            # DIAGNÓSTICO TEMPORAL: PDF no encontrado
+            st.error(f"⚠️ LibreOffice ejecutó OK pero no generó el PDF.")
+            st.code(f"Ruta esperada: {pdf_path}\nArchivos en tmp: {os.listdir(tmp_dir)}", language=None)
             return b""
 
-    except Exception:
+    except FileNotFoundError:
+        st.error("⚠️ LibreOffice no encontrado. Asegúrate de que `packages.txt` contiene `libreoffice` y que la app se ha redesplegado tras añadirlo.")
+        return b""
+    except subprocess.TimeoutExpired:
+        st.error("⚠️ LibreOffice tardó más de 60 segundos y fue cancelado.")
+        return b""
+    except Exception as e:
+        st.error(f"⚠️ Excepción inesperada en _excel_a_pdf: {e}")
         return b""
 
 
