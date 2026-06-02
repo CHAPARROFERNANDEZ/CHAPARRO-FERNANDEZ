@@ -337,69 +337,66 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str = "", mes: int = 0, anio: 
             story.append(Paragraph(subtitulo_det, ParagraphStyle('sd', fontName='Helvetica', fontSize=8,
                 textColor=rl_colors.Color(0.27,0.27,0.27), spaceAfter=4, spaceBefore=3)))
 
-            # Cabecera columnas (fila 4, índice 3)
+            # Columnas visibles en el PDF: solo Mes(4), Fecha inversión(5), Capital(6), Interés mes(9)
+            # El resto (ID, tipo, subtipo, activo, días...) es información interna — no se muestra al inversor
+            COLS_VISIBLES = [4, 5, 6, 9]
             if len(det_rows) > 3:
-                col_hdr = [str(v) if v else '' for v in det_rows[3]]
-                n_cols_d = len(col_hdr)
-                raw_w = [14,18,20,18,14,22,22,16,16,20,18]
-                if len(raw_w) < n_cols_d:
-                    raw_w += [18] * (n_cols_d - len(raw_w))
-                raw_w = raw_w[:n_cols_d]
-                total_rw = sum(raw_w)
-                cw_d = [w * 180*mm / total_rw for w in raw_w]
+                full_hdr = [str(v) if v else '' for v in det_rows[3]]
+                col_hdr = [full_hdr[ci] if ci < len(full_hdr) else '' for ci in COLS_VISIBLES]
+                cw_d = [35*mm, 50*mm, 50*mm, 45*mm]
 
                 hdr_d_t = Table([col_hdr], colWidths=cw_d)
                 hdr_d_t.setStyle(TableStyle([
                     ('BACKGROUND',(0,0),(-1,-1), C_AZUL_MED),
                     ('TEXTCOLOR', (0,0),(-1,-1), C_BLANCO),
                     ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
-                    ('FONTSIZE',  (0,0),(-1,-1), 6.5),
+                    ('FONTSIZE',  (0,0),(-1,-1), 9),
                     ('ALIGN',     (0,0),(-1,-1), 'CENTER'),
-                    ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
+                    ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
                     ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
                 ]))
                 story.append(hdr_d_t)
 
-                MONEY_COLS = {6, 9}
                 for ri, row in enumerate(det_rows[4:], 4):
                     bg_c, fc_c, is_bold = det_styles[ri]
                     if bg_c is None: bg_c = C_BLANCO
                     if fc_c is None: fc_c = rl_colors.black
                     fn = 'Helvetica-Bold' if is_bold else 'Helvetica'
 
-                    row_data = []
-                    for ci, v in enumerate(row):
-                        if v is None:
-                            row_data.append('')
-                        elif ci in MONEY_COLS and isinstance(v, (int, float)):
-                            row_data.append(f'${float(v):,.2f}')
-                        else:
-                            row_data.append(str(v))
+                    def fmt_cell(ci, v):
+                        if v is None: return ''
+                        if ci in (6, 9) and isinstance(v, (int, float)): return f'${float(v):,.2f}'
+                        return str(v)
 
                     is_cierre = str(row[0] or '').startswith('CIERRE') or str(row[0] or '').startswith('   ')
                     if is_cierre:
-                        val6 = row_data[6] if len(row_data) > 6 else ''
-                        val9 = row_data[9] if len(row_data) > 9 else ''
-                        t_row = Table([[row_data[0], val6, val9]], colWidths=[120*mm, 32*mm, 28*mm])
+                        label   = str(row[0] or '')
+                        val_cap = fmt_cell(6, row[6] if len(row) > 6 else None)
+                        val_int = fmt_cell(9, row[9] if len(row) > 9 else None)
+                        t_row = Table([[label, '', val_cap, val_int]], colWidths=cw_d)
                         t_row.setStyle(TableStyle([
+                            ('SPAN',       (0,0),(1,0)),
                             ('BACKGROUND', (0,0),(-1,-1), bg_c),
                             ('TEXTCOLOR',  (0,0),(-1,-1), fc_c),
                             ('FONTNAME',   (0,0),(-1,-1), fn),
-                            ('FONTSIZE',   (0,0),(-1,-1), 7.5),
-                            ('ALIGN',      (1,0),(-1,-1), 'RIGHT'),
+                            ('FONTSIZE',   (0,0),(-1,-1), 8.5),
+                            ('ALIGN',      (2,0),(-1,-1), 'RIGHT'),
+                            ('ALIGN',      (0,0),(1,0),   'LEFT'),
                             ('LEFTPADDING',(0,0),(0,-1), 6),
                             ('TOPPADDING', (0,0),(-1,-1), 3),('BOTTOMPADDING',(0,0),(-1,-1),3),
                             ('BOX',(0,0),(-1,-1),0.3,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
                         ]))
                     else:
+                        row_data = [fmt_cell(ci, row[ci] if ci < len(row) else None) for ci in COLS_VISIBLES]
                         t_row = Table([row_data], colWidths=cw_d)
                         t_row.setStyle(TableStyle([
                             ('BACKGROUND',(0,0),(-1,-1), bg_c),
                             ('TEXTCOLOR', (0,0),(-1,-1), fc_c),
                             ('FONTNAME',  (0,0),(-1,-1), fn),
-                            ('FONTSIZE',  (0,0),(-1,-1), 7),
-                            ('ALIGN',     (6,0),(-1,-1), 'RIGHT'),
-                            ('TOPPADDING',(0,0),(-1,-1),2.5),('BOTTOMPADDING',(0,0),(-1,-1),2.5),
+                            ('FONTSIZE',  (0,0),(-1,-1), 9),
+                            ('ALIGN',     (0,0),(-1,-1), 'CENTER'),
+                            ('ALIGN',     (2,0),(-1,-1), 'RIGHT'),
+                            ('TOPPADDING',(0,0),(-1,-1),3),('BOTTOMPADDING',(0,0),(-1,-1),3),
                             ('BOX',(0,0),(-1,-1),0.3,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
                         ]))
                     story.append(t_row)
