@@ -122,55 +122,353 @@ def _construir_cuerpo_html_email(inversor: str, mes: int, anio: int, total_inter
 </html>"""
 
 
-def _excel_a_pdf(extracto_bytes: bytes, inversor: str, mes: int, anio: int,
-                  total_intereses: float) -> bytes:
+def _excel_a_pdf(extracto_bytes: bytes, inversor: str = "", mes: int = 0, anio: int = 0,
+                  total_intereses: float = 0.0) -> bytes:
     """
-    Convierte el extracto Excel a PDF usando LibreOffice headless.
-    El PDF es una conversión exacta del Excel — mismo contenido, mismo diseño.
+    Convierte el extracto Excel a PDF usando reportlab.
+    Lee las hojas PORTADA, DETALLE y RESUMEN MENSUAL del Excel generado
+    y reproduce fielmente colores, tipografía y estructura. Sin dependencias externas.
     """
-    import subprocess, tempfile, os
-
     try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            # Guardar el Excel en disco temporalmente
-            xlsx_path = os.path.join(tmp_dir, f"extracto_{inversor}_{mes:02d}{anio}.xlsx")
-            with open(xlsx_path, 'wb') as f:
-                f.write(extracto_bytes)
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors as rl_colors
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                         Paragraph, Spacer, PageBreak)
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
-            # Convertir con LibreOffice headless
-            result = subprocess.run([
-                'libreoffice', '--headless', '--convert-to', 'pdf',
-                '--outdir', tmp_dir, xlsx_path
-            ], capture_output=True, text=True, timeout=60)
+        def _hex_color(hex_str):
+            if not hex_str or hex_str in ('00000000', '000000', 'FF000000'):
+                return None
+            h = hex_str.lstrip('#')
+            if len(h) == 8:
+                h = h[2:]
+            if len(h) == 6:
+                try:
+                    return rl_colors.Color(int(h[0:2],16)/255, int(h[2:4],16)/255, int(h[4:6],16)/255)
+                except Exception:
+                    return None
+            return None
 
-            # DIAGNÓSTICO TEMPORAL: mostrar error detallado en Streamlit
-            if result.returncode != 0:
-                st.error(f"⚠️ LibreOffice falló (returncode={result.returncode})")
-                if result.stderr:
-                    st.code(f"STDERR:\n{result.stderr}", language=None)
-                if result.stdout:
-                    st.code(f"STDOUT:\n{result.stdout}", language=None)
-                return b""
+        wb = load_workbook(BytesIO(extracto_bytes), data_only=True)
+        output = BytesIO()
+        doc = SimpleDocTemplate(output, pagesize=A4,
+                                 leftMargin=15*mm, rightMargin=15*mm,
+                                 topMargin=15*mm, bottomMargin=15*mm)
+        story = []
 
-            # Leer el PDF generado
-            pdf_path = xlsx_path.replace('.xlsx', '.pdf')
-            if os.path.exists(pdf_path):
-                with open(pdf_path, 'rb') as f:
-                    return f.read()
+        # Paleta corporativa
+        C_AZUL_OSC = rl_colors.Color(13/255,  33/255,  55/255)
+        C_AZUL_MED = rl_colors.Color(26/255,  63/255,  92/255)
+        C_AZUL_CL  = rl_colors.Color(214/255, 233/255, 248/255)
+        C_VERDE    = rl_colors.Color(217/255, 234/255, 211/255)
+        C_DORADO   = rl_colors.Color(255/255, 242/255, 204/255)
+        C_NARANJA  = rl_colors.Color(252/255, 229/255, 205/255)
+        C_GRIS     = rl_colors.Color(0.97, 0.98, 0.99)
+        C_BLANCO   = rl_colors.white
+        C_BORDE    = rl_colors.Color(0.80, 0.80, 0.80)
+        C_BORDE_L  = rl_colors.Color(0.88, 0.88, 0.88)
 
-            # DIAGNÓSTICO TEMPORAL: PDF no encontrado
-            st.error(f"⚠️ LibreOffice ejecutó OK pero no generó el PDF.")
-            st.code(f"Ruta esperada: {pdf_path}\nArchivos en tmp: {os.listdir(tmp_dir)}", language=None)
-            return b""
+        def _tbl_style_base():
+            return [
+                ('TOPPADDING',    (0,0), (-1,-1), 3),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+                ('BOX',           (0,0), (-1,-1), 0.5, C_BORDE),
+                ('INNERGRID',     (0,0), (-1,-1), 0.3, C_BORDE_L),
+            ]
 
-    except FileNotFoundError:
-        st.error("⚠️ LibreOffice no encontrado. Asegúrate de que `packages.txt` contiene `libreoffice` y que la app se ha redesplegado tras añadirlo.")
-        return b""
-    except subprocess.TimeoutExpired:
-        st.error("⚠️ LibreOffice tardó más de 60 segundos y fue cancelado.")
-        return b""
+        # ── PORTADA ──────────────────────────────────────────────────────────
+        ws_p = wb['PORTADA'] if 'PORTADA' in wb.sheetnames else None
+        if ws_p:
+            rows_p = list(ws_p.iter_rows(min_row=1, max_row=ws_p.max_row, values_only=True))
+            inv_nombre = ''; fecha_corte = ''; kpi_labels = []; kpi_values = []
+            mes_rows = []; tot_row = None; nota_desc = ''; footer_txt = ''
+
+            for i, row in enumerate(rows_p, 1):
+                vals = [v for v in row if v is not None]
+                if i == 8  and vals: inv_nombre  = str(vals[0])
+                elif i == 10 and vals: fecha_corte = str(vals[0])
+                elif i == 14: kpi_labels = [str(v) for v in row if v is not None]
+                elif i == 15: kpi_values = [v     for v in row if v is not None]
+                elif i == 17 and vals: nota_desc  = str(vals[0])
+                elif 21 <= i <= 29:
+                    r = [v for v in row if v is not None]
+                    if r: mes_rows.append(r)
+                elif i == 30:
+                    r = [v for v in row if v is not None]
+                    if r: tot_row = r
+                elif i == 32 and vals: footer_txt = str(vals[0])
+
+            # Header
+            hdr = Table([[
+                Paragraph('<b>CF</b>', ParagraphStyle('cf', fontName='Helvetica-Bold', fontSize=20, textColor=C_BLANCO, alignment=TA_CENTER)),
+                Paragraph('Chaparro Fernández Wealth  ·  Extracto de inversiones',
+                          ParagraphStyle('ht', fontName='Helvetica', fontSize=11, textColor=C_BLANCO))
+            ]], colWidths=[22*mm, 158*mm])
+            hdr.setStyle(TableStyle([
+                ('BACKGROUND',(0,0),(-1,-1), C_AZUL_OSC),
+                ('VALIGN',   (0,0),(-1,-1), 'MIDDLE'),
+                ('TOPPADDING',(0,0),(-1,-1), 10), ('BOTTOMPADDING',(0,0),(-1,-1), 10),
+                ('LEFTPADDING',(0,0),(-1,-1), 8),
+            ]))
+            story.append(hdr)
+            story.append(Spacer(1, 5*mm))
+
+            # Nombre inversor + fecha
+            story.append(Paragraph(inv_nombre, ParagraphStyle('inv', fontName='Helvetica-Bold', fontSize=18, textColor=C_AZUL_OSC, spaceAfter=2)))
+            story.append(Paragraph(fecha_corte, ParagraphStyle('fc', fontName='Helvetica', fontSize=9, textColor=rl_colors.Color(0.33,0.33,0.33), spaceAfter=5)))
+
+            # KPIs
+            if kpi_labels and kpi_values:
+                bg_map = [C_AZUL_CL, C_VERDE, C_DORADO]
+                tc_map = [C_AZUL_OSC, rl_colors.Color(30/255,70/255,32/255), rl_colors.Color(74/255,48/255,0)]
+                cw = 180*mm / max(len(kpi_labels[:3]), 1)
+                lbl_row = [Paragraph(f'<b>{lbl}</b>', ParagraphStyle(f'kl{i}', fontName='Helvetica-Bold', fontSize=7, textColor=tc_map[i], alignment=TA_CENTER)) for i, lbl in enumerate(kpi_labels[:3])]
+                val_row = [Paragraph(f'<b>${float(v):,.2f}</b>', ParagraphStyle(f'kv{i}', fontName='Helvetica-Bold', fontSize=14, textColor=tc_map[i], alignment=TA_CENTER)) for i, v in enumerate(kpi_values[:3])]
+                n = len(kpi_labels[:3])
+                kpi_lbl_t = Table([lbl_row], colWidths=[cw]*n)
+                kpi_val_t = Table([val_row], colWidths=[cw]*n)
+                for kt, pad_b in [(kpi_lbl_t, 3), (kpi_val_t, 8)]:
+                    style_kpi = _tbl_style_base()
+                    for ki in range(n):
+                        style_kpi.append(('BACKGROUND', (ki,0), (ki,0), bg_map[ki]))
+                    style_kpi.append(('BOTTOMPADDING', (0,0), (-1,-1), pad_b))
+                    kt.setStyle(TableStyle(style_kpi))
+                story.append(kpi_lbl_t)
+                story.append(kpi_val_t)
+                story.append(Spacer(1, 4*mm))
+
+            # Nota descriptiva
+            if nota_desc:
+                story.append(Paragraph(f'<i>{nota_desc}</i>',
+                    ParagraphStyle('nd', fontName='Helvetica-Oblique', fontSize=8,
+                                   textColor=rl_colors.Color(0.33,0.33,0.33), spaceAfter=5)))
+
+            # Resumen mensual en portada
+            if mes_rows:
+                res_hdr_t = Table([[Paragraph('<b>RESUMEN MENSUAL DE INTERESES</b>',
+                    ParagraphStyle('rh', fontName='Helvetica-Bold', fontSize=9, textColor=C_BLANCO, alignment=TA_CENTER))]], colWidths=[180*mm])
+                res_hdr_t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1), C_AZUL_MED),
+                    ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
+                story.append(res_hdr_t)
+
+                n_cols_r = len(mes_rows[0]) if mes_rows else 3
+                if n_cols_r == 4:
+                    hdrs_r = ['MES','GENERADO ($)','PAGADO ($)','SALDO ($)']
+                    cw_r = [45*mm,45*mm,45*mm,45*mm]
+                else:
+                    hdrs_r = ['MES','INTERESES ($)','ACUMULADO ($)']
+                    cw_r = [60*mm,60*mm,60*mm]
+
+                col_hdr_t = Table([hdrs_r], colWidths=cw_r)
+                col_hdr_t.setStyle(TableStyle([
+                    ('BACKGROUND',(0,0),(-1,-1), C_AZUL_CL),
+                    ('TEXTCOLOR', (0,0),(-1,-1), C_AZUL_OSC),
+                    ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
+                    ('FONTSIZE',  (0,0),(-1,-1), 8),
+                    ('ALIGN',     (0,0),(-1,-1), 'CENTER'),
+                    ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
+                    ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
+                ]))
+                story.append(col_hdr_t)
+
+                data_r = []
+                for mr in mes_rows:
+                    row_r = [str(mr[0])] + [f'${float(v):,.2f}' for v in mr[1:n_cols_r]]
+                    data_r.append(row_r)
+                if data_r:
+                    t_data_r = Table(data_r, colWidths=cw_r)
+                    s = _tbl_style_base()
+                    s += [('ROWBACKGROUNDS',(0,0),(-1,-1),[C_BLANCO, C_GRIS]),
+                          ('FONTNAME',(0,0),(-1,-1),'Helvetica'),('FONTSIZE',(0,0),(-1,-1),8),
+                          ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(1,0),(-1,-1),'RIGHT')]
+                    t_data_r.setStyle(TableStyle(s))
+                    story.append(t_data_r)
+
+                if tot_row:
+                    row_t = [str(tot_row[0])] + [f'${float(v):,.2f}' for v in tot_row[1:n_cols_r]]
+                    t_tot_r = Table([row_t], colWidths=cw_r)
+                    t_tot_r.setStyle(TableStyle([
+                        ('BACKGROUND',(0,0),(-1,-1), C_DORADO),
+                        ('TEXTCOLOR', (0,0),(-1,-1), rl_colors.Color(74/255,48/255,0)),
+                        ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
+                        ('FONTSIZE',  (0,0),(-1,-1), 9),
+                        ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(1,0),(-1,-1),'RIGHT'),
+                        ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+                        ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
+                    ]))
+                    story.append(t_tot_r)
+
+            story.append(Spacer(1, 5*mm))
+            if footer_txt:
+                ft = Table([[Paragraph(footer_txt, ParagraphStyle('ft', fontName='Helvetica', fontSize=7,
+                    textColor=rl_colors.Color(0.67,0.67,0.67), alignment=TA_CENTER))]], colWidths=[180*mm])
+                ft.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1), C_AZUL_OSC),
+                    ('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
+                story.append(ft)
+
+        # ── PÁGINA 2: DETALLE ─────────────────────────────────────────────────
+        story.append(PageBreak())
+        ws_d = wb['DETALLE'] if 'DETALLE' in wb.sheetnames else None
+        if ws_d:
+            det_rows   = list(ws_d.iter_rows(min_row=1, max_row=ws_d.max_row, values_only=True))
+            det_styles = []
+            for row in ws_d.iter_rows(min_row=1, max_row=ws_d.max_row):
+                first = row[0]
+                bg = fc = None
+                bold = False
+                if first.fill and first.fill.fgColor and first.fill.fgColor.type == 'rgb':
+                    bg = _hex_color(first.fill.fgColor.rgb)
+                if first.font:
+                    if first.font.color and first.font.color.type == 'rgb':
+                        fc = _hex_color(first.font.color.rgb)
+                    bold = bool(first.font.bold)
+                det_styles.append((bg, fc, bold))
+
+            titulo_det    = str(det_rows[0][0])  if det_rows and det_rows[0][0]  else ''
+            subtitulo_det = str(det_rows[1][0])  if len(det_rows) > 1 and det_rows[1][0] else ''
+
+            t_hdr_d = Table([[Paragraph(f'<b>{titulo_det}</b>',
+                ParagraphStyle('thd', fontName='Helvetica-Bold', fontSize=11, textColor=C_BLANCO))]], colWidths=[180*mm])
+            t_hdr_d.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1), C_AZUL_OSC),
+                ('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('LEFTPADDING',(0,0),(-1,-1),8)]))
+            story.append(t_hdr_d)
+            story.append(Paragraph(subtitulo_det, ParagraphStyle('sd', fontName='Helvetica', fontSize=8,
+                textColor=rl_colors.Color(0.27,0.27,0.27), spaceAfter=4, spaceBefore=3)))
+
+            # Cabecera columnas (fila 4, índice 3)
+            if len(det_rows) > 3:
+                col_hdr = [str(v) if v else '' for v in det_rows[3]]
+                n_cols_d = len(col_hdr)
+                raw_w = [14,18,20,18,14,22,22,16,16,20,18]
+                if len(raw_w) < n_cols_d:
+                    raw_w += [18] * (n_cols_d - len(raw_w))
+                raw_w = raw_w[:n_cols_d]
+                total_rw = sum(raw_w)
+                cw_d = [w * 180*mm / total_rw for w in raw_w]
+
+                hdr_d_t = Table([col_hdr], colWidths=cw_d)
+                hdr_d_t.setStyle(TableStyle([
+                    ('BACKGROUND',(0,0),(-1,-1), C_AZUL_MED),
+                    ('TEXTCOLOR', (0,0),(-1,-1), C_BLANCO),
+                    ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
+                    ('FONTSIZE',  (0,0),(-1,-1), 6.5),
+                    ('ALIGN',     (0,0),(-1,-1), 'CENTER'),
+                    ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
+                    ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
+                ]))
+                story.append(hdr_d_t)
+
+                MONEY_COLS = {6, 9}
+                for ri, row in enumerate(det_rows[4:], 4):
+                    bg_c, fc_c, is_bold = det_styles[ri]
+                    if bg_c is None: bg_c = C_BLANCO
+                    if fc_c is None: fc_c = rl_colors.black
+                    fn = 'Helvetica-Bold' if is_bold else 'Helvetica'
+
+                    row_data = []
+                    for ci, v in enumerate(row):
+                        if v is None:
+                            row_data.append('')
+                        elif ci in MONEY_COLS and isinstance(v, (int, float)):
+                            row_data.append(f'${float(v):,.2f}')
+                        else:
+                            row_data.append(str(v))
+
+                    is_cierre = str(row[0] or '').startswith('CIERRE') or str(row[0] or '').startswith('   ')
+                    if is_cierre:
+                        val6 = row_data[6] if len(row_data) > 6 else ''
+                        val9 = row_data[9] if len(row_data) > 9 else ''
+                        t_row = Table([[row_data[0], val6, val9]], colWidths=[120*mm, 32*mm, 28*mm])
+                        t_row.setStyle(TableStyle([
+                            ('BACKGROUND', (0,0),(-1,-1), bg_c),
+                            ('TEXTCOLOR',  (0,0),(-1,-1), fc_c),
+                            ('FONTNAME',   (0,0),(-1,-1), fn),
+                            ('FONTSIZE',   (0,0),(-1,-1), 7.5),
+                            ('ALIGN',      (1,0),(-1,-1), 'RIGHT'),
+                            ('LEFTPADDING',(0,0),(0,-1), 6),
+                            ('TOPPADDING', (0,0),(-1,-1), 3),('BOTTOMPADDING',(0,0),(-1,-1),3),
+                            ('BOX',(0,0),(-1,-1),0.3,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
+                        ]))
+                    else:
+                        t_row = Table([row_data], colWidths=cw_d)
+                        t_row.setStyle(TableStyle([
+                            ('BACKGROUND',(0,0),(-1,-1), bg_c),
+                            ('TEXTCOLOR', (0,0),(-1,-1), fc_c),
+                            ('FONTNAME',  (0,0),(-1,-1), fn),
+                            ('FONTSIZE',  (0,0),(-1,-1), 7),
+                            ('ALIGN',     (6,0),(-1,-1), 'RIGHT'),
+                            ('TOPPADDING',(0,0),(-1,-1),2.5),('BOTTOMPADDING',(0,0),(-1,-1),2.5),
+                            ('BOX',(0,0),(-1,-1),0.3,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
+                        ]))
+                    story.append(t_row)
+
+        # ── PÁGINA 3: RESUMEN MENSUAL ─────────────────────────────────────────
+        story.append(PageBreak())
+        ws_r = wb['RESUMEN MENSUAL'] if 'RESUMEN MENSUAL' in wb.sheetnames else (wb['RESUMEN_MENSUAL'] if 'RESUMEN_MENSUAL' in wb.sheetnames else None)
+        if ws_r:
+            res_rows = list(ws_r.iter_rows(min_row=1, max_row=ws_r.max_row, values_only=True))
+
+            t_hdr_rm = Table([[Paragraph('<b>RESUMEN DE INTERESES POR MES</b>',
+                ParagraphStyle('hrm', fontName='Helvetica-Bold', fontSize=11, textColor=C_BLANCO))]], colWidths=[180*mm])
+            t_hdr_rm.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1), C_AZUL_OSC),
+                ('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('LEFTPADDING',(0,0),(-1,-1),8)]))
+            story.append(t_hdr_rm)
+            story.append(Spacer(1, 3*mm))
+
+            # Buscar fila de cabecera (fila 3)
+            hdr_rm = [str(v) if v else '' for v in res_rows[2]] if len(res_rows) > 2 else ['MES','INTERESES ($)','ACUMULADO ($)']
+            n_cols_rm = len(hdr_rm)
+            cw_rm = [180*mm / n_cols_rm] * n_cols_rm
+
+            col_hdr_rm = Table([hdr_rm], colWidths=cw_rm)
+            col_hdr_rm.setStyle(TableStyle([
+                ('BACKGROUND',(0,0),(-1,-1), C_AZUL_CL),
+                ('TEXTCOLOR', (0,0),(-1,-1), C_AZUL_OSC),
+                ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
+                ('FONTSIZE',  (0,0),(-1,-1), 9),
+                ('ALIGN',     (0,0),(-1,-1), 'CENTER'),
+                ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+                ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
+            ]))
+            story.append(col_hdr_rm)
+
+            data_rm = []; tot_rm = None
+            for row in res_rows[3:]:
+                if not any(v is not None for v in row):
+                    continue
+                if str(row[0] or '') == 'TOTAL':
+                    tot_rm = row
+                else:
+                    r = [str(row[0]) if row[0] else ''] + [f'${float(v):,.2f}' if v is not None else '' for v in row[1:n_cols_rm]]
+                    data_rm.append(r)
+            if data_rm:
+                t_data_rm = Table(data_rm, colWidths=cw_rm)
+                s = _tbl_style_base()
+                s += [('ROWBACKGROUNDS',(0,0),(-1,-1),[C_BLANCO, C_GRIS]),
+                      ('FONTNAME',(0,0),(-1,-1),'Helvetica'),('FONTSIZE',(0,0),(-1,-1),9),
+                      ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(1,0),(-1,-1),'RIGHT')]
+                t_data_rm.setStyle(TableStyle(s))
+                story.append(t_data_rm)
+            if tot_rm is not None:
+                r_tot = [str(tot_rm[0])] + [f'${float(v):,.2f}' if v is not None else '' for v in tot_rm[1:n_cols_rm]]
+                t_tot_rm = Table([r_tot], colWidths=cw_rm)
+                t_tot_rm.setStyle(TableStyle([
+                    ('BACKGROUND',(0,0),(-1,-1), C_DORADO),
+                    ('TEXTCOLOR', (0,0),(-1,-1), rl_colors.Color(74/255,48/255,0)),
+                    ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
+                    ('FONTSIZE',  (0,0),(-1,-1), 9),
+                    ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(1,0),(-1,-1),'RIGHT'),
+                    ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+                    ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
+                ]))
+                story.append(t_tot_rm)
+
+        doc.build(story)
+        return output.getvalue()
+
     except Exception as e:
-        st.error(f"⚠️ Excepción inesperada en _excel_a_pdf: {e}")
         return b""
 
 
