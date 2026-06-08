@@ -45,6 +45,7 @@ HOJA_CONTROL = "CONTROL_NOTAS"
 TASA_ANUAL_FUTBOL = 0.15
 TASA_ANUAL_MOTOCLICK = 0.25
 TASA_ANUAL_PARAGUAY = 0.15
+TASA_ANUAL_BOLIVIA = 0.15
 
 MESES_ES_EMAIL = {
     1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
@@ -1552,7 +1553,7 @@ def detectar_activo(row):
     nombre = limpiar_texto(row.get("nombre_activo", ""))
     if tipo == "nota" or nombre.startswith("nota"):
         return "notas"
-    for activo in ["paraguay", "motoclick", "futbol", "fútbol"]:
+    for activo in ["paraguay", "bolivia", "motoclick", "futbol", "fútbol"]:
         if activo in subtipo or activo in nombre:
             return "futbol" if activo == "fútbol" else activo
     return "otros"
@@ -1816,7 +1817,7 @@ def calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio: int,
             })
 
     # Activos con rentabilidad fija / operativa
-    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
         det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
         if det is None or det.empty:
             continue
@@ -2040,7 +2041,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
     c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, int(anio), int(mes))
     detalles_fijos = []
-    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
         det = detalle_activo_mes(df_inv, activo, tasa, int(anio), int(mes))
         if not det.empty:
             det["activo"] = activo
@@ -2167,7 +2168,7 @@ def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control):
         anio, mes = fecha.year, fecha.month
         _, _, b_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
         detalles_fijos = []
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if not det.empty:
                 detalles_fijos.append(det)
@@ -2454,7 +2455,7 @@ def construir_movimientos_historico_proyeccion(df_inv: pd.DataFrame, df_cal: pd.
                 })
 
         # 2) Activos con ingreso fijo o operativo.
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if det is None or det.empty:
                 continue
@@ -2582,7 +2583,7 @@ def seccion_historico_y_proyecciones():
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
     fecha_inicio = pd.Timestamp(c1.date_input("Desde", value=fecha_inicio_default.date(), key="hist_proj_desde")).normalize()
     fecha_fin = pd.Timestamp(c2.date_input("Hasta", value=fecha_fin_default.date(), key="hist_proj_hasta")).normalize()
-    activo_filtro = c3.selectbox("Activo", ["Todos", "notas", "paraguay", "motoclick", "futbol"], key="hist_proj_activo")
+    activo_filtro = c3.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol"], key="hist_proj_activo")
     incluir_chaparro = c4.checkbox(
         "Incluir Chaparro Fernández",
         value=False,
@@ -2919,7 +2920,7 @@ def centro_control_inversiones():
     st.markdown("## Centro de control de inversiones")
     st.caption("Consulta profesional por filtros.")
     c1, c2, c3 = st.columns(3)
-    activo = c1.selectbox("Activo", ["Todos", "notas", "paraguay", "motoclick", "futbol", "otros"])
+    activo = c1.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol", "otros"])
     inversores = ["Todos"] + sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
     inversor = c2.selectbox("Inversor", inversores)
     fecha = pd.Timestamp(c3.date_input("Fecha de análisis", value=pd.Timestamp.today().date())).normalize()
@@ -3247,7 +3248,7 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
+                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
                               "messages": historial}, timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
@@ -3729,7 +3730,7 @@ def seccion_sistema_fondo():
         mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month))
         c_notas, p_notas, b_notas, d_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
         detalles = []
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if not det.empty:
                 det["activo"] = activo; detalles.append(det)
@@ -5177,7 +5178,7 @@ def seccion_asistente_ia_fondo():
         try:
             cap_total = capital_activo_en_fecha(df_inv, hoy)
             lineas.append(f"Capital total activo: ${cap_total:,.2f}")
-            for activo in ["notas","futbol","paraguay","motoclick"]:
+            for activo in ["notas","futbol","paraguay","bolivia","motoclick"]:
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
                 lineas.append(f"Capital {activo}: ${cap:,.2f}")
         except Exception:
@@ -5216,11 +5217,11 @@ def seccion_asistente_ia_fondo():
                 pass
 
         # ── Beneficios / totales desde inicio ────────────────────────────────
-        keywords_ben = ["beneficio","ingres","total","motoclick","futbol","fútbol","paraguay"]
+        keywords_ben = ["beneficio","ingres","total","motoclick","futbol","fútbol","paraguay","bolivia"]
         if any(k in p for k in keywords_ben):
             try:
                 lineas.append("\n=== TOTALES DESDE INICIO ===")
-                for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),("motoclick",TASA_ANUAL_MOTOCLICK)]:
+                for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK)]:
                     ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
                     pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
                     lineas.append(f"{activo}: ingresado ${ing:,.2f} | pagado ${pag:,.2f} | beneficio ${ing-pag:,.2f}")
@@ -5303,7 +5304,7 @@ def seccion_asistente_ia_fondo():
                     resp = _req_ia.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
                         json={"model":"claude-sonnet-4-5","max_tokens":600,
-                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
+                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
                               "messages":historial},timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
@@ -5336,7 +5337,7 @@ elif menu == "Centro de control":
 elif menu == "Consultas":
     tipo_consulta = st.selectbox(
         "¿Qué quieres consultar?",
-        ["Notas", "Fútbol", "Paraguay", "MotoClick"],
+        ["Notas", "Fútbol", "Paraguay", "Bolivia", "MotoClick"],
         key="consultas_selector"
     )
     if tipo_consulta == "Notas":
@@ -5345,6 +5346,8 @@ elif menu == "Consultas":
         seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
     elif tipo_consulta == "Paraguay":
         seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
+    elif tipo_consulta == "Bolivia":
+        seccion_activo("Bolivia", "bolivia", TASA_ANUAL_BOLIVIA, incluir_ingresado_desde_inicio=True)
     elif tipo_consulta == "MotoClick":
         seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
 elif menu == "Notas estructuradas":
