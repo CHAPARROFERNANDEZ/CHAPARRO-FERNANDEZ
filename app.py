@@ -46,6 +46,7 @@ TASA_ANUAL_FUTBOL = 0.15
 TASA_ANUAL_MOTOCLICK = 0.25
 TASA_ANUAL_PARAGUAY = 0.15
 TASA_ANUAL_BOLIVIA = 0.15
+TASA_ANUAL_BITCOIN = 0.20
 
 MESES_ES_EMAIL = {
     1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
@@ -1553,7 +1554,7 @@ def detectar_activo(row):
     nombre = limpiar_texto(row.get("nombre_activo", ""))
     if tipo == "nota" or nombre.startswith("nota"):
         return "notas"
-    for activo in ["paraguay", "bolivia", "motoclick", "futbol", "fútbol"]:
+    for activo in ["paraguay", "bolivia", "motoclick", "futbol", "fútbol", "bitcoin"]:
         if activo in subtipo or activo in nombre:
             return "futbol" if activo == "fútbol" else activo
     return "otros"
@@ -1817,7 +1818,7 @@ def calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio: int,
             })
 
     # Activos con rentabilidad fija / operativa
-    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
         det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
         if det is None or det.empty:
             continue
@@ -2041,7 +2042,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
     c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, int(anio), int(mes))
     detalles_fijos = []
-    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
         det = detalle_activo_mes(df_inv, activo, tasa, int(anio), int(mes))
         if not det.empty:
             det["activo"] = activo
@@ -2082,6 +2083,8 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
         "Fútbol": "futbol",
         "MotoClick": "motoclick",
         "Paraguay": "paraguay",
+        "Bolivia": "bolivia",
+        "Bitcoin": "bitcoin",
     }
     activo_filtrado = mapa_vista_activo.get(str(vista_activo), None)
     if activo_filtrado:
@@ -2168,7 +2171,7 @@ def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control):
         anio, mes = fecha.year, fecha.month
         _, _, b_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
         detalles_fijos = []
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if not det.empty:
                 detalles_fijos.append(det)
@@ -2455,7 +2458,7 @@ def construir_movimientos_historico_proyeccion(df_inv: pd.DataFrame, df_cal: pd.
                 })
 
         # 2) Activos con ingreso fijo o operativo.
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if det is None or det.empty:
                 continue
@@ -2583,7 +2586,7 @@ def seccion_historico_y_proyecciones():
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
     fecha_inicio = pd.Timestamp(c1.date_input("Desde", value=fecha_inicio_default.date(), key="hist_proj_desde")).normalize()
     fecha_fin = pd.Timestamp(c2.date_input("Hasta", value=fecha_fin_default.date(), key="hist_proj_hasta")).normalize()
-    activo_filtro = c3.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol"], key="hist_proj_activo")
+    activo_filtro = c3.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol", "bitcoin"], key="hist_proj_activo")
     incluir_chaparro = c4.checkbox(
         "Incluir Chaparro Fernández",
         value=False,
@@ -2781,7 +2784,7 @@ def dashboard_financiero():
     col_activo, col_periodo_1, col_periodo_2, col_chaparro = st.columns([1.4, 1, 1, 1.2])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
-        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay"],
+        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin"],
         key="dashboard_vista_activo",
     )
     incluir_chaparro = col_chaparro.checkbox(
@@ -2919,12 +2922,18 @@ def centro_control_inversiones():
     df_inv, _, _ = cargar_excel_completo()
     st.markdown("## Centro de control de inversiones")
     st.caption("Consulta profesional por filtros.")
-    c1, c2, c3 = st.columns(3)
-    activo = c1.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol", "otros"])
+    hoy = pd.Timestamp.today().normalize()
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    activo = c1.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol", "bitcoin", "otros"])
     inversores = ["Todos"] + sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
     inversor = c2.selectbox("Inversor", inversores)
-    fecha = pd.Timestamp(c3.date_input("Fecha de análisis", value=pd.Timestamp.today().date())).normalize()
-    activas = inversiones_activas_global(df_inv, fecha)
+    anio_cc = int(c3.number_input("Año", min_value=2020, max_value=2100, value=hoy.year, key="cc_anio"))
+    mes_cc = int(c4.number_input("Mes", min_value=1, max_value=12, value=hoy.month, key="cc_mes"))
+    incluir_chaparro = c5.checkbox("Incluir Chaparro Fernández", value=False, key="cc_incluir_chaparro")
+    fecha = pd.Timestamp(anio_cc, mes_cc, ultimo_dia_mes(anio_cc, mes_cc)).normalize()
+    c6.markdown(f"<br><small>📅 Cierre: **{fecha.strftime('%d/%m/%Y')}**</small>", unsafe_allow_html=True)
+    df_inv_filtrado = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
+    activas = inversiones_activas_global(df_inv_filtrado, fecha)
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
     if activo != "Todos":
@@ -3730,7 +3739,7 @@ def seccion_sistema_fondo():
         mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month))
         c_notas, p_notas, b_notas, d_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
         detalles = []
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL)]:
+        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if not det.empty:
                 det["activo"] = activo; detalles.append(det)
@@ -5178,7 +5187,7 @@ def seccion_asistente_ia_fondo():
         try:
             cap_total = capital_activo_en_fecha(df_inv, hoy)
             lineas.append(f"Capital total activo: ${cap_total:,.2f}")
-            for activo in ["notas","futbol","paraguay","bolivia","motoclick"]:
+            for activo in ["notas","futbol","paraguay","bolivia","motoclick","bitcoin"]:
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
                 lineas.append(f"Capital {activo}: ${cap:,.2f}")
         except Exception:
@@ -5217,11 +5226,11 @@ def seccion_asistente_ia_fondo():
                 pass
 
         # ── Beneficios / totales desde inicio ────────────────────────────────
-        keywords_ben = ["beneficio","ingres","total","motoclick","futbol","fútbol","paraguay","bolivia"]
+        keywords_ben = ["beneficio","ingres","total","motoclick","futbol","fútbol","paraguay","bolivia","bitcoin"]
         if any(k in p for k in keywords_ben):
             try:
                 lineas.append("\n=== TOTALES DESDE INICIO ===")
-                for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK)]:
+                for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),("bitcoin",TASA_ANUAL_BITCOIN)]:
                     ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
                     pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
                     lineas.append(f"{activo}: ingresado ${ing:,.2f} | pagado ${pag:,.2f} | beneficio ${ing-pag:,.2f}")
@@ -5337,7 +5346,7 @@ elif menu == "Centro de control":
 elif menu == "Consultas":
     tipo_consulta = st.selectbox(
         "¿Qué quieres consultar?",
-        ["Notas", "Fútbol", "Paraguay", "Bolivia", "MotoClick"],
+        ["Notas", "Fútbol", "Paraguay", "Bolivia", "MotoClick", "Bitcoin"],
         key="consultas_selector"
     )
     if tipo_consulta == "Notas":
@@ -5348,6 +5357,8 @@ elif menu == "Consultas":
         seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
     elif tipo_consulta == "Bolivia":
         seccion_activo("Bolivia", "bolivia", TASA_ANUAL_BOLIVIA, incluir_ingresado_desde_inicio=True)
+    elif tipo_consulta == "Bitcoin":
+        seccion_activo("Bitcoin", "bitcoin", TASA_ANUAL_BITCOIN, incluir_ingresado_desde_inicio=True)
     elif tipo_consulta == "MotoClick":
         seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
 elif menu == "Notas estructuradas":
