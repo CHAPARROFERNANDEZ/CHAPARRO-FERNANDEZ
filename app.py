@@ -1584,12 +1584,12 @@ def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame
     if activas.empty:
         return activas
 
-    es_nota = activas["tipo_inversion"].apply(limpiar_texto) == "nota"
     es_cancelada = activas["tipo_operacion"].apply(limpiar_texto) == "cancelada"
 
-    # Notas: todas las activas (cualquier tipo_operacion)
-    # No-notas: excluir canceladas
-    resultado = activas[es_nota | (~es_nota & ~es_cancelada)].copy()
+    # Excluir canceladas en todos los tipos (notas y empresprivada).
+    # Las CANCELADAS no cuentan como capital activo aunque la fecha_final sea futura,
+    # porque el inversor ya salió. Esto alinea el Dashboard con la suma de extractos.
+    resultado = activas[~es_cancelada].copy()
     return resultado
 
 
