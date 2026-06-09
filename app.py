@@ -4611,7 +4611,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     return out.getvalue()
 
 
-def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int):
+def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int, solo_notas: bool = False):
     """Genera extractos para inversores.
 
     REGLA DEFINITIVA PARA EXTRACTOS:
@@ -4650,6 +4650,10 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     # CANCELADA: incluir, calcular hasta fecha_final_inversion
     # REINVERSION y cualquier otro: excluir
     df = df[df["tipo_operacion_normalizada"].isin(["NUEVA", "CANCELADA"])].copy()
+
+    # Filtro solo notas (subtipo estructurada)
+    if solo_notas:
+        df = df[df["subtipo_inversion"].str.upper() == "ESTRUCTURADA"].copy()
 
     if df.empty:
         return []
@@ -4823,25 +4827,43 @@ def seccion_extractos():
 
     with tab_descargar:
         st.caption("Genera el extracto en Excel y descárgalo directamente.")
-        if st.button("Generar extracto(s)", type="primary", key="ext_btn_descargar"):
-            archivos = generar_extractos(df_inv, "Un inversor" if inversor else "Todos", inversor, anio, mes)
+
+        col_btn1, col_btn2 = st.columns(2)
+        btn_completo = col_btn1.button("📄 Generar extracto completo", type="primary", key="ext_btn_descargar")
+        btn_notas    = col_btn2.button("📑 Generar extracto solo notas", type="secondary", key="ext_btn_notas")
+
+        def _descargar_extractos(solo_notas: bool):
+            modo_gen = "Un inversor" if inversor else "Todos"
+            archivos = generar_extractos(df_inv, modo_gen, inversor, anio, mes, solo_notas=solo_notas)
+            sufijo = "_NOTAS" if solo_notas else ""
             if not archivos:
                 st.warning("No se han generado extractos. Revisa el Excel o la fecha seleccionada.")
             elif len(archivos) == 1:
-                t = archivos[0]; nombre, contenido = t[0], t[1]
+                t = archivos[0]
+                nombre = t[0].replace(".xlsx", f"{sufijo}.xlsx")
+                contenido = t[1]
                 st.success(f"Extracto generado: {nombre}")
-                st.download_button("⬇️ Descargar extracto", contenido, file_name=nombre,
+                key_dl = f"ext_dl_uno{'_notas' if solo_notas else ''}"
+                st.download_button("⬇️ Descargar", contenido, file_name=nombre,
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   key="ext_dl_uno")
+                                   key=key_dl)
             else:
                 zip_buffer = BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                     for t in archivos:
-                        zf.writestr(t[0], t[1])
+                        nombre_zip = t[0].replace(".xlsx", f"{sufijo}.xlsx")
+                        zf.writestr(nombre_zip, t[1])
                 st.success(f"Se han generado {len(archivos)} extractos.")
+                key_zip = f"ext_dl_zip{'_notas' if solo_notas else ''}"
+                zip_name = f"extractos{'_notas' if solo_notas else ''}_{mes}_{anio}.zip"
                 st.download_button("⬇️ Descargar todos en ZIP", zip_buffer.getvalue(),
-                                   file_name=f"extractos_{mes}_{anio}.zip",
-                                   mime="application/zip", key="ext_dl_zip")
+                                   file_name=zip_name,
+                                   mime="application/zip", key=key_zip)
+
+        if btn_completo:
+            _descargar_extractos(solo_notas=False)
+        if btn_notas:
+            _descargar_extractos(solo_notas=True)
 
     with tab_email:
         st.caption("Genera el extracto en PDF y envíalo directamente al email del inversor.")
