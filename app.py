@@ -339,13 +339,13 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str = "", mes: int = 0, anio: 
             story.append(Paragraph(subtitulo_det, ParagraphStyle('sd', fontName='Helvetica', fontSize=8,
                 textColor=rl_colors.Color(0.27,0.27,0.27), spaceAfter=4, spaceBefore=3)))
 
-            # Columnas visibles en el PDF: solo Mes(4), Fecha inversión(5), Capital(6), Interés mes(9)
-            # El resto (ID, tipo, subtipo, activo, días...) es información interna — no se muestra al inversor
-            COLS_VISIBLES = [4, 5, 6, 9]
+            # Columnas visibles en el PDF: Activo(0), Mes(1), Fecha inversión(2), Capital(3), Interés mes(4)
+            # Ya no hay columnas ocultas — el Excel contiene exactamente lo que se muestra
+            COLS_VISIBLES = [0, 1, 2, 3, 4]
             if len(det_rows) > 3:
                 full_hdr = [str(v) if v else '' for v in det_rows[3]]
                 col_hdr = [full_hdr[ci] if ci < len(full_hdr) else '' for ci in COLS_VISIBLES]
-                cw_d = [35*mm, 50*mm, 50*mm, 45*mm]
+                cw_d = [38*mm, 22*mm, 28*mm, 46*mm, 46*mm]
 
                 hdr_d_t = Table([col_hdr], colWidths=cw_d)
                 hdr_d_t.setStyle(TableStyle([
@@ -367,17 +367,18 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str = "", mes: int = 0, anio: 
 
                     def fmt_cell(ci, v):
                         if v is None: return ''
-                        if ci in (6, 9) and isinstance(v, (int, float)): return f'${float(v):,.2f}'
+                        if ci in (3, 4) and isinstance(v, (int, float)): return f'${float(v):,.2f}'
                         return str(v)
 
                     is_cierre = str(row[0] or '').startswith('CIERRE') or str(row[0] or '').startswith('   ')
                     if is_cierre:
                         label   = str(row[0] or '')
-                        val_cap = fmt_cell(6, row[6] if len(row) > 6 else None)
-                        val_int = fmt_cell(9, row[9] if len(row) > 9 else None)
-                        t_row = Table([[label, '', val_cap, val_int]], colWidths=cw_d)
+                        val_cap = fmt_cell(3, row[3] if len(row) > 3 else None)
+                        val_int = fmt_cell(4, row[4] if len(row) > 4 else None)
+                        t_row = Table([[label, '', val_cap, val_int, '']], colWidths=cw_d)
                         t_row.setStyle(TableStyle([
                             ('SPAN',       (0,0),(1,0)),
+                            ('SPAN',       (3,0),(4,0)),
                             ('BACKGROUND', (0,0),(-1,-1), bg_c),
                             ('TEXTCOLOR',  (0,0),(-1,-1), fc_c),
                             ('FONTNAME',   (0,0),(-1,-1), fn),
@@ -4138,37 +4139,30 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     ws_d.sheet_view.showGridLines = False
     ws_d.freeze_panes = "A5"
 
-    # Columnas: si el inversor tiene pagos efectivos, mostrar columna Estado intereses
+    # Columnas visibles: solo las que necesita ver el inversor (sin ocultar nada)
+    # COL_CAP = columna del capital, COL_INT = columna del interés
     if tiene_pago:
-        col_names  = ["ID", "Tipo inversión", "Subtipo", "Activo", "Mes",
-                      "Fecha inversión", "Capital ($)", "Días devengados", "Días mes",
-                      "Interés mes ($)", "Estado intereses", "Fecha fin"]
-        col_widths = [14, 16, 16, 18, 18, 12, 14, 16, 14, 14, 18, 14]
+        col_names  = ["Activo", "Mes", "Fecha inversión", "Capital ($)", "Interés mes ($)", "Estado intereses"]
+        col_widths = [22, 14, 16, 16, 16, 28]
         col_map = {
-            "id_inversion": 1, "tipo_inversion": 2, "subtipo_inversion": 3,
-            "nombre_activo": 4, "mes": 5, "fecha_inversion": 6,
-            "capital_invertido": 7, "dias_devengados": 8, "dias_mes": 9, "interes_mes": 10,
-            "pago_intereses": 11, "fecha_fin_op": 12,
+            "nombre_activo": 1, "mes": 2, "fecha_inversion": 3,
+            "capital_invertido": 4, "interes_mes": 5, "pago_intereses": 6,
         }
-        col_ocultas = [1, 2, 3, 4, 8, 9, 12]
     else:
-        col_names  = ["ID", "Tipo inversión", "Subtipo", "Activo", "Mes",
-                      "Fecha inversión", "Capital ($)", "Días devengados", "Días mes",
-                      "Interés mes ($)", "Fecha fin"]
-        col_widths = [14, 16, 16, 18, 18, 12, 14, 16, 14, 14, 14]
+        col_names  = ["Activo", "Mes", "Fecha inversión", "Capital ($)", "Interés mes ($)"]
+        col_widths = [22, 14, 16, 16, 16]
         col_map = {
-            "id_inversion": 1, "tipo_inversion": 2, "subtipo_inversion": 3,
-            "nombre_activo": 4, "mes": 5, "fecha_inversion": 6,
-            "capital_invertido": 7, "dias_devengados": 8, "dias_mes": 9, "interes_mes": 10,
-            "fecha_fin_op": 11,
+            "nombre_activo": 1, "mes": 2, "fecha_inversion": 3,
+            "capital_invertido": 4, "interes_mes": 5,
         }
-        col_ocultas = [1, 2, 3, 4, 8, 9, 11]
+
+    COL_CAP = 4   # columna Capital ($)
+    COL_INT = 5   # columna Interés mes ($)
+    COL_PAGO = 6  # columna Estado intereses (solo si tiene_pago)
 
     num_cols = len(col_names)
     for i, w in enumerate(col_widths[:num_cols], 1):
         ws_d.column_dimensions[get_column_letter(i)].width = w
-    for col_oculta in col_ocultas:
-        ws_d.column_dimensions[get_column_letter(col_oculta)].hidden = True
 
     # Título
     ws_d.merge_cells(f"A1:{get_column_letter(num_cols)}1")
@@ -4231,26 +4225,21 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         if anio_actual is not None and anio_mk != anio_actual:
             # CIERRE ANUAL
             ws_d.row_dimensions[fila_excel].height = 24
-            ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+            ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=COL_CAP - 1)
             c = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {anio_actual}")
             c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
             c.fill = fill(C_VERDE)
             c.alignment = aln(h="center")
             c.border = borde_top
 
-            cap_c = ws_d.cell(row=fila_excel, column=7, value=capital_anio)
+            cap_c = ws_d.cell(row=fila_excel, column=COL_CAP, value=capital_anio)
             cap_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
             cap_c.fill = fill(C_VERDE)
             cap_c.number_format = fmt_usd
             cap_c.alignment = aln(h="right")
             cap_c.border = borde_top
 
-            for col_v in [8, 9]:
-                cx = ws_d.cell(row=fila_excel, column=col_v, value="")
-                cx.fill = fill(C_VERDE)
-                cx.border = borde_top
-
-            int_c = ws_d.cell(row=fila_excel, column=10, value=intereses_acum_anio)
+            int_c = ws_d.cell(row=fila_excel, column=COL_INT, value=intereses_acum_anio)
             int_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
             int_c.fill = fill(C_VERDE)
             int_c.number_format = fmt_usd
@@ -4258,35 +4247,27 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
             int_c.border = borde_top
 
             if tiene_pago:
-                cx11 = ws_d.cell(row=fila_excel, column=11, value="")
+                cx11 = ws_d.cell(row=fila_excel, column=COL_PAGO, value="")
                 cx11.fill = fill(C_VERDE); cx11.border = borde_top
-                cx12 = ws_d.cell(row=fila_excel, column=12, value="")
-                cx12.fill = fill(C_VERDE); cx12.border = borde_top
 
             fila_excel += 1
             # Fila acumulado anual
             ws_d.row_dimensions[fila_excel].height = 20
-            ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
+            ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=COL_INT - 1)
             ca = ws_d.cell(row=fila_excel, column=1, value=f"   Capital + Intereses acumulados {anio_actual}")
             ca.font = Font(name="Calibri", size=10, italic=True, color=C_VERDE_OSC)
             ca.fill = fill(C_VERDE)
             ca.alignment = aln(h="right")
             ca.border = borde_std
-            for col_v in [9]:
-                cx = ws_d.cell(row=fila_excel, column=col_v, value="")
-                cx.fill = fill(C_VERDE)
-                cx.border = borde_std
-            total_anio_c = ws_d.cell(row=fila_excel, column=10, value=capital_anio + intereses_acum_anio)
+            total_anio_c = ws_d.cell(row=fila_excel, column=COL_INT, value=capital_anio + intereses_acum_anio)
             total_anio_c.font = Font(name="Calibri", size=10, bold=True, italic=True, color=C_VERDE_OSC)
             total_anio_c.fill = fill(C_VERDE)
             total_anio_c.number_format = fmt_usd
             total_anio_c.alignment = aln(h="right")
             total_anio_c.border = borde_std
             if tiene_pago:
-                cx11 = ws_d.cell(row=fila_excel, column=11, value="")
+                cx11 = ws_d.cell(row=fila_excel, column=COL_PAGO, value="")
                 cx11.fill = fill(C_VERDE); cx11.border = borde_std
-                cx12 = ws_d.cell(row=fila_excel, column=12, value="")
-                cx12.fill = fill(C_VERDE); cx12.border = borde_std
             fila_excel += 1
             intereses_acum_anio = 0.0
 
@@ -4318,10 +4299,10 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
                     c.font = Font(name="Calibri", size=10, color="222222")
                     c.fill = fill(fondo)
                 c.border = borde_std
-                c.alignment = aln(h="right" if col_idx in [7, 10] else "center" if col_idx in [8, 9, 11 if tiene_pago else -1] else "left")
-                if col_idx == 7:
+                c.alignment = aln(h="right" if col_idx in [COL_CAP, COL_INT] else "center" if (tiene_pago and col_idx == COL_PAGO) else "left")
+                if col_idx == COL_CAP:
                     c.number_format = fmt_usd
-                if col_idx == 10:
+                if col_idx == COL_INT:
                     c.number_format = fmt_usd
             v_cap = row.get("capital_invertido", 0) or 0
             v_int = row.get("interes_mes", 0) or 0
@@ -4358,26 +4339,21 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         # CIERRE MENSUAL
         ws_d.row_dimensions[fila_excel].height = 28
         mes_label = f"{mes_mk:02d}/{anio_mk}"
-        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=COL_CAP - 1)
         cm = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {mes_label}")
         cm.font = Font(name="Calibri", size=10, bold=True, color=C_NARANJA_OSC)
         cm.fill = fill(C_NARANJA)
         cm.alignment = aln(h="center")
         cm.border = borde_top
 
-        cap_cm = ws_d.cell(row=fila_excel, column=7, value=capital_mes_real)
+        cap_cm = ws_d.cell(row=fila_excel, column=COL_CAP, value=capital_mes_real)
         cap_cm.font = Font(name="Calibri", size=10, bold=True, color=C_NARANJA_OSC)
         cap_cm.fill = fill(C_NARANJA)
         cap_cm.number_format = fmt_usd
         cap_cm.alignment = aln(h="right")
         cap_cm.border = borde_top
 
-        for col_v in [8, 9]:
-            cx = ws_d.cell(row=fila_excel, column=col_v, value="")
-            cx.fill = fill(C_NARANJA)
-            cx.border = borde_top
-
-        int_cm = ws_d.cell(row=fila_excel, column=10, value=intereses_mes_real)
+        int_cm = ws_d.cell(row=fila_excel, column=COL_INT, value=intereses_mes_real)
         int_cm.font = Font(name="Calibri", size=10, bold=True, color=C_NARANJA_OSC)
         int_cm.fill = fill(C_NARANJA)
         int_cm.number_format = fmt_usd
@@ -4391,14 +4367,12 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
                 for r in rows_mes if str(r.get("pago_intereses", "")).strip().upper() == "PAGA"
             )
             intereses_rein_mes = intereses_mes_real - intereses_paga_mes
-            lbl_pago_cm = ws_d.cell(row=fila_excel, column=11,
+            lbl_pago_cm = ws_d.cell(row=fila_excel, column=COL_PAGO,
                 value=f"✅ Pagado: ${intereses_paga_mes:,.2f}  |  🔄 Reinvertido: ${intereses_rein_mes:,.2f}")
             lbl_pago_cm.font = Font(name="Calibri", size=9, bold=True, color=C_NARANJA_OSC)
             lbl_pago_cm.fill = fill(C_NARANJA)
             lbl_pago_cm.alignment = aln(h="center")
             lbl_pago_cm.border = borde_top
-            cx12 = ws_d.cell(row=fila_excel, column=12, value="")
-            cx12.fill = fill(C_NARANJA); cx12.border = borde_top
 
         fila_excel += 1
         intereses_acum_anio += intereses_mes_real
@@ -4408,78 +4382,63 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     # CIERRE ANUAL del último año
     if anio_actual is not None:
         ws_d.row_dimensions[fila_excel].height = 30
-        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=COL_CAP - 1)
         c = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE {anio_actual}")
         c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
         c.fill = fill(C_VERDE)
         c.alignment = aln(h="center")
         c.border = borde_top
-        cap_c = ws_d.cell(row=fila_excel, column=7, value=capital_anio)
+        cap_c = ws_d.cell(row=fila_excel, column=COL_CAP, value=capital_anio)
         cap_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
         cap_c.fill = fill(C_VERDE)
         cap_c.number_format = fmt_usd
         cap_c.alignment = aln(h="right")
         cap_c.border = borde_top
-        for col_v in [8, 9]:
-            cx = ws_d.cell(row=fila_excel, column=col_v, value="")
-            cx.fill = fill(C_VERDE)
-            cx.border = borde_top
-        int_c = ws_d.cell(row=fila_excel, column=10, value=intereses_acum_anio)
+        int_c = ws_d.cell(row=fila_excel, column=COL_INT, value=intereses_acum_anio)
         int_c.font = Font(name="Calibri", size=11, bold=True, color=C_VERDE_OSC)
         int_c.fill = fill(C_VERDE)
         int_c.number_format = fmt_usd
         int_c.alignment = aln(h="right")
         int_c.border = borde_top
         if tiene_pago:
-            cx11 = ws_d.cell(row=fila_excel, column=11, value="")
+            cx11 = ws_d.cell(row=fila_excel, column=COL_PAGO, value="")
             cx11.fill = fill(C_VERDE); cx11.border = borde_top
-            cx12 = ws_d.cell(row=fila_excel, column=12, value="")
-            cx12.fill = fill(C_VERDE); cx12.border = borde_top
         fila_excel += 1
 
         ws_d.row_dimensions[fila_excel].height = 20
-        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
+        ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=COL_INT - 1)
         ca = ws_d.cell(row=fila_excel, column=1, value=f"   Capital + Intereses acumulados {anio_actual}")
         ca.font = Font(name="Calibri", size=10, italic=True, color=C_VERDE_OSC)
         ca.fill = fill(C_VERDE)
         ca.alignment = aln(h="right")
         ca.border = borde_std
-        cx = ws_d.cell(row=fila_excel, column=9, value="")
-        cx.fill = fill(C_VERDE)
-        cx.border = borde_std
-        total_anio_c = ws_d.cell(row=fila_excel, column=10, value=capital_anio + intereses_acum_anio)
+        total_anio_c = ws_d.cell(row=fila_excel, column=COL_INT, value=capital_anio + intereses_acum_anio)
         total_anio_c.font = Font(name="Calibri", size=10, bold=True, italic=True, color=C_VERDE_OSC)
         total_anio_c.fill = fill(C_VERDE)
         total_anio_c.number_format = fmt_usd
         total_anio_c.alignment = aln(h="right")
         total_anio_c.border = borde_std
         if tiene_pago:
-            cx11 = ws_d.cell(row=fila_excel, column=11, value="")
+            cx11 = ws_d.cell(row=fila_excel, column=COL_PAGO, value="")
             cx11.fill = fill(C_VERDE); cx11.border = borde_std
-            cx12 = ws_d.cell(row=fila_excel, column=12, value="")
-            cx12.fill = fill(C_VERDE); cx12.border = borde_std
         fila_excel += 1
         intereses_acum_anio = 0.0
 
     # CIERRE FINAL
     ws_d.row_dimensions[fila_excel].height = 36
-    ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=6)
+    ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=COL_CAP - 1)
     cf = ws_d.cell(row=fila_excel, column=1, value=f"CIERRE FINAL  {fecha_corte.strftime('%d/%m/%Y')}")
     cf.font = Font(name="Calibri", size=13, bold=True, color=C_DORADO_OSC)
     cf.fill = fill(C_DORADO)
     cf.alignment = aln(h="center")
     cf.border = borde_top
-    cap_cf = ws_d.cell(row=fila_excel, column=7, value=capital_total)
+    cap_cf = ws_d.cell(row=fila_excel, column=COL_CAP, value=capital_total)
     cap_cf.font = Font(name="Calibri", size=13, bold=True, color=C_DORADO_OSC)
     cap_cf.fill = fill(C_DORADO)
     cap_cf.number_format = fmt_usd
     cap_cf.alignment = aln(h="right")
     cap_cf.border = borde_top
-    for col_v in [8, 9]:
-        cx = ws_d.cell(row=fila_excel, column=col_v, value="")
-        cx.fill = fill(C_DORADO)
-        cx.border = borde_top
-    int_cf = ws_d.cell(row=fila_excel, column=10, value=total_intereses)
+    int_cf = ws_d.cell(row=fila_excel, column=COL_INT, value=total_intereses)
     int_cf.font = Font(name="Calibri", size=13, bold=True, color=C_DORADO_OSC)
     int_cf.fill = fill(C_DORADO)
     int_cf.number_format = fmt_usd
@@ -4491,18 +4450,16 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
             for r in det_rows if str(r.get("pago_intereses", "")).strip().upper() == "PAGA"
         )
         total_rein_global = total_intereses - total_paga_global
-        cf11 = ws_d.cell(row=fila_excel, column=11,
+        cf11 = ws_d.cell(row=fila_excel, column=COL_PAGO,
             value=f"✅ Total pagado: ${total_paga_global:,.2f}  |  🔄 Total reinvertido: ${total_rein_global:,.2f}")
         cf11.font = Font(name="Calibri", size=10, bold=True, color=C_DORADO_OSC)
         cf11.fill = fill(C_DORADO)
         cf11.alignment = aln(h="center")
         cf11.border = borde_top
-        cf12 = ws_d.cell(row=fila_excel, column=12, value="")
-        cf12.fill = fill(C_DORADO); cf12.border = borde_top
     fila_excel += 1
 
     ws_d.row_dimensions[fila_excel].height = 30
-    ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=8)
+    ws_d.merge_cells(start_row=fila_excel, start_column=1, end_row=fila_excel, end_column=COL_INT - 1)
     cfa = ws_d.cell(row=fila_excel, column=1,
                     value="   TOTAL ACUMULADO  (Capital + Intereses)" if not tiene_pago
                     else "   TOTAL (Capital + Intereses pendientes)")
@@ -4510,21 +4467,16 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     cfa.fill = fill(C_DORADO)
     cfa.alignment = aln(h="right")
     cfa.border = borde_std
-    cx = ws_d.cell(row=fila_excel, column=9, value="")
-    cx.fill = fill(C_DORADO)
-    cx.border = borde_std
     total_final_valor = (capital_total + saldo_pendiente_global) if tiene_pago else (capital_total + total_intereses)
-    total_cf = ws_d.cell(row=fila_excel, column=10, value=total_final_valor)
+    total_cf = ws_d.cell(row=fila_excel, column=COL_INT, value=total_final_valor)
     total_cf.font = Font(name="Calibri", size=12, bold=True, color=C_DORADO_OSC)
     total_cf.fill = fill(C_DORADO)
     total_cf.number_format = fmt_usd
     total_cf.alignment = aln(h="right")
     total_cf.border = borde_std
     if tiene_pago:
-        cx11 = ws_d.cell(row=fila_excel, column=11, value="")
+        cx11 = ws_d.cell(row=fila_excel, column=COL_PAGO, value="")
         cx11.fill = fill(C_DORADO); cx11.border = borde_std
-        cx12 = ws_d.cell(row=fila_excel, column=12, value="")
-        cx12.fill = fill(C_DORADO); cx12.border = borde_std
 
     # ═══════════════════════════════════════════════════════════════
     # HOJA 3: RESUMEN MENSUAL
