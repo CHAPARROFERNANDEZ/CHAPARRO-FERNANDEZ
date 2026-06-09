@@ -1454,12 +1454,11 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
 def pago_inversores_notas_mes(df_inv: pd.DataFrame, anio: int, mes: int) -> float:
     """Calcula el pago a inversores de notas por DEVENGO MENSUAL.
 
-    Lógica correcta:
-    - El pago al inversor es fijo: capital × tasa_inversor / 12, cada mes.
-    - No depende del calendario de pagos (que es para el cobro de la compañía).
-    - Incluye todas las posiciones activas: nueva + reinversión.
-    - Excluye Chaparro Fernández (tasa 0%, no reciben pago).
-    - Aplica pro-rata de días para el primer y último mes de cada posición.
+    Logica alineada con extractos:
+    - Solo cuenta tipo_operacion NUEVA y CANCELADA (igual que generar_extractos).
+    - Las REINVERSIONES no generan pago propio: el interes ya esta en la operacion NUEVA origen.
+    - Excluye Chaparro Fernandez (tasa 0%, no reciben pago).
+    - Aplica pro-rata de dias para el primer y ultimo mes de cada posicion.
     - Aplica tramo de tipos para Biscafe/Crowe Bolivia (5% hasta ene2026, 7.5% desde feb2026).
     """
     import calendar as _cal
@@ -1472,7 +1471,7 @@ def pago_inversores_notas_mes(df_inv: pd.DataFrame, anio: int, mes: int) -> floa
 
     df_notas = df_inv[
         (df_inv["tipo_inversion"].apply(limpiar_texto) == "nota") &
-        (df_inv.get("activo_generador_interes", pd.Series("SI", index=df_inv.index)).apply(limpiar_texto).str.upper() == "SI") &
+        (df_inv["tipo_operacion"].apply(limpiar_texto).str.upper().isin(["NUEVA", "CANCELADA"])) &
         (df_inv["fecha_inversion"].notna()) &
         (df_inv["fecha_inversion"] <= fin_mes) &
         (df_inv["fecha_final_inversion"].isna() | (df_inv["fecha_final_inversion"] >= inicio_mes))
