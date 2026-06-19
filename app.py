@@ -5101,6 +5101,198 @@ except Exception as e:
     st.stop()
 
 
+def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fecha_inicio: pd.Timestamp) -> pd.DataFrame:
+    """
+    Calcula la evolución mes a mes de la deuda con Jordi Chaparro.
+
+    Lógica por mes:
+      - RESTA deuda (cobros que reducen la deuda):
+          · beneficio_empresa de Paraguay + Motoclick + Fútbol + Bolivia (activos fijos, excluye Bitcoin y Notas)
+          · cobro_compania de notas con cuenta_cobro == 'JORDI' (cobros que entran por la cuenta de Jordi)
+      - SUMA deuda (lo que se le debería haber pagado a JEP ese mes, que aumenta la deuda):
+          · pago_inversor_mes de todas las inversiones activas de JEP (todos sus activos)
+    """
+    hoy = pd.Timestamp.today().normalize()
+    filas = []
+    saldo = capital_inicial
+
+    anio = fecha_inicio.year
+    mes = fecha_inicio.month
+
+    while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
+        fin_mes = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
+        label = f"{mes:02d}/{anio}"
+
+        # 1) Beneficio empresa de activos fijos SIN bitcoin (Paraguay, Motoclick, Fútbol, Bolivia)
+        beneficio_fijos = 0.0
+        for activo, tasa in [
+            ("paraguay", TASA_ANUAL_PARAGUAY),
+            ("motoclick", TASA_ANUAL_MOTOCLICK),
+            ("futbol", TASA_ANUAL_FUTBOL),
+            ("bolivia", TASA_ANUAL_BOLIVIA),
+        ]:
+            det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
+            if not det.empty:
+                beneficio_fijos += float(det["beneficio_empresa_mes"].sum())
+
+        # 2) Cobros de notas con cuenta_cobro == JORDI (entran en cuenta Jordi → reducen la deuda)
+        cobro_notas_jordi = 0.0
+        try:
+            det_notas = calcular_notas_mes(df_inv, df_cal, df_control, anio, mes)
+            if not det_notas.empty:
+                jordi_notas = det_notas[
+                    det_notas["cuenta_cobro"].astype(str).str.upper() == "JORDI"
+                ]
+                cobro_notas_jordi = float(jordi_notas["cobro_compania"].sum()) if not jordi_notas.empty else 0.0
+        except Exception:
+            cobro_notas_jordi = 0.0
+
+        # 3) Pago mensual a JEP (lo que se le debe pagar → aumenta la deuda)
+        pago_jep = 0.0
+        # JEP en activos fijos (Paraguay, Motoclick, Fútbol, Bolivia, Bitcoin)
+        for activo, tasa in [
+            ("paraguay", TASA_ANUAL_PARAGUAY),
+            ("motoclick", TASA_ANUAL_MOTOCLICK),
+            ("futbol", TASA_ANUAL_FUTBOL),
+            ("bolivia", TASA_ANUAL_BOLIVIA),
+            ("bitcoin", TASA_ANUAL_BITCOIN),
+        ]:
+            det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
+            if not det.empty:
+                jep_rows = det[det["inversor"].astype(str).str.upper().str.strip() == "JEP"]
+                pago_jep += float(jep_rows["pago_inversor_mes"].sum()) if not jep_rows.empty else 0.0
+        # JEP en notas (devengo mensual)
+        try:
+            det_notas_jep = calcular_notas_mes(df_inv, df_cal, df_control, anio, mes)
+            if not det_notas_jep.empty:
+                jep_notas = det_notas_jep[
+                    det_notas_jep["inversor"].astype(str).str.upper().str.strip() == "JEP"
+                ]
+                pago_jep += float(jep_notas["pago_inversor"].sum()) if not jep_notas.empty else 0.0
+        except Exception:
+            pass
+
+        resta = beneficio_fijos + cobro_notas_jordi
+        suma = pago_jep
+        saldo = saldo + suma - resta
+
+        filas.append({
+            "mes": label,
+            "saldo_inicio": saldo - suma + resta,
+            "beneficio_fijos": beneficio_fijos,
+            "cobro_notas_jordi": cobro_notas_jordi,
+            "total_resta": resta,
+            "pago_jep": pago_jep,
+            "total_suma": suma,
+            "variacion_neta": suma - resta,
+            "saldo_fin": saldo,
+        })
+
+        mes += 1
+        if mes == 13:
+            mes = 1
+            anio += 1
+
+    return pd.DataFrame(filas)
+
+
+def seccion_deuda_jordi():
+    """Pantalla de seguimiento de la deuda con Jordi Chaparro."""
+    st.header("🏦 Deuda con Jordi Chaparro")
+
+    df_inv, df_cal, df_control = cargar_excel_completo()
+
+    # Leer hoja DEUDA_JORDI
+    try:
+        df_deuda = pd.read_excel(ARCHIVO, sheet_name="DEUDA_JORDI")
+        df_deuda.columns = [str(c).strip().lower() for c in df_deuda.columns]
+        capital_inicial = float(df_deuda["capital_deuda_inicial"].iloc[0])
+        fecha_inicio = pd.to_datetime(df_deuda["fecha_inicio_deuda"].iloc[0], dayfirst=True)
+    except Exception as e:
+        st.error(f"No se puede leer la hoja DEUDA_JORDI del Excel: {e}")
+        st.info("Asegúrate de que la hoja DEUDA_JORDI tiene las columnas: fecha_inicio_deuda y capital_deuda_inicial")
+        return
+
+    st.caption(f"Deuda inicial: **${capital_inicial:,.2f}** · Fecha inicio: **{fecha_inicio.strftime('%d/%m/%Y')}**")
+    st.caption("La deuda **baja** con: beneficio empresa de Paraguay + Motoclick + Fútbol + Bolivia + cobros de notas en cuenta JORDI.  "
+               "La deuda **sube** con: intereses mensuales de JEP (todos sus activos).")
+
+    with st.spinner("Calculando evolución de la deuda..."):
+        df_evol = calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial, fecha_inicio)
+
+    if df_evol.empty:
+        st.warning("No hay datos para calcular la deuda.")
+        return
+
+    # Saldo actual = último mes calculado
+    ultimo = df_evol.iloc[-1]
+    saldo_actual = ultimo["saldo_fin"]
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💰 Deuda inicial", f"${capital_inicial:,.2f}")
+    col2.metric("📅 Saldo actual (fin mes)", f"${saldo_actual:,.2f}",
+                delta=f"${saldo_actual - capital_inicial:,.2f}")
+    col3.metric("📆 Meses calculados", len(df_evol))
+
+    st.divider()
+
+    # Tabla mes a mes
+    st.subheader("Evolución mensual")
+    tabla = df_evol.copy()
+    tabla = tabla.rename(columns={
+        "mes": "Mes",
+        "saldo_inicio": "Saldo inicio ($)",
+        "beneficio_fijos": "Beneficio fijos ($)",
+        "cobro_notas_jordi": "Cobro notas JORDI ($)",
+        "total_resta": "Total resta ($)",
+        "pago_jep": "Pago JEP ($)",
+        "total_suma": "Total suma ($)",
+        "variacion_neta": "Variación neta ($)",
+        "saldo_fin": "Saldo fin mes ($)",
+    })
+
+    def color_variacion(val):
+        if val < 0:
+            return "color: green"
+        elif val > 0:
+            return "color: red"
+        return ""
+
+    styled = tabla.style.format({
+        "Saldo inicio ($)": "${:,.2f}",
+        "Beneficio fijos ($)": "${:,.2f}",
+        "Cobro notas JORDI ($)": "${:,.2f}",
+        "Total resta ($)": "${:,.2f}",
+        "Pago JEP ($)": "${:,.2f}",
+        "Total suma ($)": "${:,.2f}",
+        "Variación neta ($)": "${:,.2f}",
+        "Saldo fin mes ($)": "${:,.2f}",
+    }).applymap(color_variacion, subset=["Variación neta ($)"])
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # Gráfico evolución saldo
+    st.subheader("Gráfico de evolución")
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_evol["mes"],
+        y=df_evol["saldo_fin"],
+        mode="lines+markers",
+        name="Saldo deuda",
+        line=dict(color="#e63946", width=2),
+        marker=dict(size=7),
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="green", annotation_text="Deuda saldada")
+    fig.update_layout(
+        xaxis_title="Mes",
+        yaxis_title="Saldo ($)",
+        hovermode="x unified",
+        height=400,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def seccion_asistente_ia_fondo():
     """IA única: fondo completo + PDFs de notas estructuradas."""
     df_inv, df_cal, df_control = cargar_excel_completo()
@@ -5307,7 +5499,7 @@ menu = st.sidebar.selectbox(
     [
         "Dashboard financiero", "Centro de control", "Consultas",
         "Notas estructuradas", "Alertas y calendario", "Extractos", "Gestión de Excel",
-        "✨ Asistente IA",
+        "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
     ],
 )
 
@@ -5343,5 +5535,7 @@ elif menu == "Extractos":
     seccion_extractos()
 elif menu == "Gestión de Excel":
     seccion_gestion_excel()
+elif menu == "🏦 Deuda Jordi Chaparro":
+    seccion_deuda_jordi()
 elif menu == "✨ Asistente IA":
     seccion_asistente_ia_fondo()
