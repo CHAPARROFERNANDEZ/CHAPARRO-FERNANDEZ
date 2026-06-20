@@ -5983,6 +5983,52 @@ def seccion_asistente_ia_fondo():
         except Exception as e:
             lineas.append(f"[Error históricos: {e}]")
 
+        # ══════════════════════════════════════════════════════════════════════
+        # 6. EXTRACTO ACUMULADO POR INVERSOR (fuente: generar_extractos — igual que botón de extracto)
+        #    Para responder: ¿cuánto hemos pagado a X hasta esta fecha?
+        # ══════════════════════════════════════════════════════════════════════
+        try:
+            # Detectar inversor mencionado en la pregunta
+            inversores_conocidos = df_inv["inversor"].dropna().unique().tolist() if df_inv is not None and not df_inv.empty else []
+            inversor_pregunta = None
+            p_upper = p.upper()
+            for inv in inversores_conocidos:
+                if inv.upper() in p_upper or any(part in p_upper for part in inv.upper().split() if len(part) > 3):
+                    inversor_pregunta = inv
+                    break
+
+            if inversor_pregunta:
+                filas_ext = generar_extractos(df_inv, "Un inversor", inversor_pregunta, anio_pregunta, mes_pregunta)
+                if filas_ext:
+                    lineas.append(f"\n=== EXTRACTO ACUMULADO {inversor_pregunta} hasta {mes_pregunta}/{anio_pregunta} (fuente: generar_extractos) ===")
+                    total_int_acum = 0.0
+                    capital_actual = 0.0
+                    for fila in filas_ext:
+                        mes_f = fila.get("mes", "")
+                        activo = fila.get("nombre_activo", "")
+                        capital = float(fila.get("capital", 0) or 0)
+                        interes = float(fila.get("interes_mes", 0) or 0)
+                        total_int_acum += interes
+                        if capital > capital_actual:
+                            capital_actual = capital
+                        lineas.append(f"  {mes_f} | {activo} | Capital: ${capital:,.2f} | Interés mes: ${interes:,.2f}")
+                    lineas.append(f"  >> TOTAL INTERESES ACUMULADOS {inversor_pregunta}: ${total_int_acum:,.2f}")
+                    lineas.append(f"  >> CAPITAL ACTUAL {inversor_pregunta}: ${capital_actual:,.2f}")
+            else:
+                # Sin inversor concreto: mostrar totales acumulados por inversor hasta mes_pregunta
+                lineas.append(f"\n=== RESUMEN INTERESES ACUMULADOS POR INVERSOR hasta {mes_pregunta}/{anio_pregunta} ===")
+                filas_todos = generar_extractos(df_inv, "Todos", None, anio_pregunta, mes_pregunta)
+                if filas_todos:
+                    resumen_inv = {}
+                    for fila in filas_todos:
+                        inv = fila.get("inversor", "")
+                        interes = float(fila.get("interes_mes", 0) or 0)
+                        resumen_inv[inv] = resumen_inv.get(inv, 0) + interes
+                    for inv, total in sorted(resumen_inv.items(), key=lambda x: -x[1]):
+                        lineas.append(f"  {inv}: ${total:,.2f}")
+        except Exception as e:
+            lineas.append(f"[Error extracto acumulado: {e}]")
+
         return "\n".join(lineas)
 
     # ── Chat ──────────────────────────────────────────────────────────────────
