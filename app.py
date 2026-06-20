@@ -5880,32 +5880,92 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"[Error ingresos empresa: {e}]")
 
         # ══════════════════════════════════════════════════════════════════════
-        # 4. NOTAS: PRÓXIMOS EVENTOS Y ESTADO DE RIESGO
+        # 4. NOTAS: CALENDARIO COMPLETO + ESTADO DE RIESGO
+        #    Fuente: df_cal (igual que sección Alertas/Calendario de la app)
         # ══════════════════════════════════════════════════════════════════════
         try:
             if df_cal is not None and not df_cal.empty:
                 df_c2 = df_cal.copy()
                 df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-                limite = hoy + pd.Timedelta(days=90)
-                proximos = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["fecha"] <= limite)].sort_values("fecha")
-                cols_c = [c for c in ["fecha","nota","tipo_evento","importe_cobro","importe_pago_inversor"] if c in proximos.columns]
-                lineas.append(f"\n=== PRÓXIMOS EVENTOS NOTAS (próximos 90 días) ===")
-                lineas.append(proximos[cols_c].to_string(index=False) if not proximos.empty else "Sin eventos próximos.")
+                cols_c = [c for c in ["fecha","nota","tipo_evento","importe_cobro","importe_pago_inversor","observacion","resultado"] if c in df_c2.columns]
+
+                # Eventos pasados y futuros del mes de referencia
+                inicio_mes = pd.Timestamp(anio_pregunta, mes_pregunta, 1)
+                fin_mes = inicio_mes + pd.offsets.MonthEnd(0)
+                eventos_mes = df_c2[(df_c2["fecha"] >= inicio_mes) & (df_c2["fecha"] <= fin_mes)].sort_values("fecha")
+                lineas.append(f"\n=== CALENDARIO NOTAS {mes_pregunta}/{anio_pregunta} (fuente: Alertas/Calendario) ===")
+                if not eventos_mes.empty:
+                    lineas.append(eventos_mes[cols_c].to_string(index=False))
+                    # Totales del mes
+                    tot_cobro = pd.to_numeric(eventos_mes.get("importe_cobro", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+                    tot_pago_inv = pd.to_numeric(eventos_mes.get("importe_pago_inversor", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+                    lineas.append(f"  >> TOTAL COBRO COMPAÑÍA EN NOTAS {mes_pregunta}/{anio_pregunta}: ${tot_cobro:,.2f}")
+                    lineas.append(f"  >> TOTAL PAGO INVERSORES NOTAS {mes_pregunta}/{anio_pregunta}: ${tot_pago_inv:,.2f}")
+                else:
+                    lineas.append("Sin eventos de notas en ese mes.")
+
+                # Próximos 180 días (independiente del mes preguntado) — para rangos personalizados
+                limite_180 = hoy + pd.Timedelta(days=180)
+                proximos = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["fecha"] <= limite_180)].sort_values("fecha")
+                lineas.append(f"\n=== TODOS LOS EVENTOS NOTAS PRÓXIMOS 180 DÍAS (para consultas de rango personalizado) ===")
+                if not proximos.empty:
+                    lineas.append(proximos[cols_c].to_string(index=False))
+                    tot_cobro_180 = pd.to_numeric(proximos["importe_cobro"] if "importe_cobro" in proximos.columns else pd.Series(dtype=float), errors="coerce").fillna(0).sum()
+                    lineas.append(f"  >> TOTAL COBRO COMPAÑÍA PRÓXIMOS 180 DÍAS: ${tot_cobro_180:,.2f}")
+                else:
+                    lineas.append("Sin eventos próximos en 180 días.")
         except Exception as e:
             lineas.append(f"[Error calendario notas: {e}]")
 
+        # Estado de riesgo de notas — igual que Alertas/Calendario de la app
+        # Evalúa cada nota con observación pasada usando evaluar_nota_en_fecha
         try:
-            if df_control is not None and not df_control.empty:
-                df_ctrl = df_control.copy()
-                col_obs = next((c for c in df_ctrl.columns if "observ" in c.lower() or "result" in c.lower()), None)
-                if col_obs:
-                    risk_kw = ["riesgo","barrera","knock","vencida","perdida","pérdida","capital en riesgo"]
-                    en_riesgo = df_ctrl[df_ctrl[col_obs].astype(str).str.lower().str.contains("|".join(risk_kw), na=False)]
-                    lineas.append(f"\n=== NOTAS EN RIESGO / BARRERA TOCADA ===")
-                    if not en_riesgo.empty:
-                        lineas.append(en_riesgo.to_string(index=False))
+            lineas.append(f"\n=== ESTADO DE RIESGO DE NOTAS (fuente: evaluar_nota_en_fecha, igual que Alertas) ===")
+            if df_cal is not None and not df_cal.empty and df_control is not None and not df_control.empty:
+                df_c_riesgo = df_cal.copy()
+                df_c_riesgo["fecha"] = pd.to_datetime(df_c_riesgo["fecha"], errors="coerce")
+                # Todas las observaciones (pasadas y futuras)
+                obs_todas = df_c_riesgo[df_c_riesgo["tipo_evento"].astype(str).str.upper() == "OBSERVACION"].copy()
+                # Para cada nota, coger la observación más reciente
+                notas_unicas = obs_todas["nota"].dropna().unique()
+                negativas, pendientes, positivas, sin_dato = [], [], [], []
+                for nota in sorted(notas_unicas):
+                    obs_nota = obs_todas[obs_todas["nota"] == nota].sort_values("fecha")
+                    if obs_nota.empty:
+                        continue
+                    ultima_obs = obs_nota.iloc[-1]
+                    fecha_obs = ultima_obs["fecha"]
+                    importe_cobro = pd.to_numeric(ultima_obs.get("importe_cobro", 0), errors="coerce") or 0
+                    resultado, _ = evaluar_nota_en_fecha(df_control, int(nota), fecha_obs, preferida="contingency")
+                    entry = f"  NOTA_{int(nota):02d} | Obs: {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y')} | Cobro: ${importe_cobro:,.2f} | Estado: {resultado}"
+                    if resultado == "NEGATIVA":
+                        negativas.append(entry)
+                    elif resultado == "PENDIENTE":
+                        pendientes.append(entry)
+                    elif resultado == "POSITIVA":
+                        positivas.append(entry)
                     else:
-                        lineas.append("Ninguna nota marcada con alerta de riesgo.")
+                        sin_dato.append(entry)
+
+                if negativas:
+                    lineas.append(f"🔴 NEGATIVAS / EN RIESGO ({len(negativas)}):")
+                    lineas.extend(negativas)
+                else:
+                    lineas.append("🔴 NEGATIVAS / EN RIESGO: Ninguna")
+
+                if pendientes:
+                    lineas.append(f"🟡 PENDIENTES de observación ({len(pendientes)}):")
+                    lineas.extend(pendientes)
+
+                if positivas:
+                    lineas.append(f"🟢 POSITIVAS ({len(positivas)}):")
+                    lineas.extend(positivas)
+
+                if sin_dato:
+                    lineas.append(f"⚪ SIN DATO ({len(sin_dato)}):")
+                    lineas.extend(sin_dato)
+            else:
+                lineas.append("Sin datos de calendario o control para evaluar riesgo.")
         except Exception as e:
             lineas.append(f"[Error notas en riesgo: {e}]")
 
