@@ -5101,48 +5101,52 @@ except Exception as e:
     st.stop()
 
 
-def _beneficio_notas_jordi_mes(df_inv, df_cal, anio, mes):
-    """Beneficio neto (cobro nota - pago inversores) de notas cuenta JORDI con PAGO en el mes."""
-    import re as _re
-    cal_fechas = df_cal.copy()
-    cal_fechas["_fecha"] = pd.to_datetime(cal_fechas["fecha"], dayfirst=True, errors="coerce")
-    cal_fechas["_nota"] = pd.to_numeric(cal_fechas["nota"], errors="coerce")
-    pagos_mes = cal_fechas[
-        (cal_fechas["tipo_evento"].astype(str).str.upper() == "PAGO") &
-        (cal_fechas["_fecha"].dt.year == anio) &
-        (cal_fechas["_fecha"].dt.month == mes)
+def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
+    """
+    Cobro bruto de la compañía por notas con cuenta_cobro=JORDI que tienen PAGO en el mes.
+    cobro = capital * interes_nota_anual / 12  (por cada nota con PAGO ese mes)
+    Devuelve (total, {nombre_nota: importe})
+    """
+    cal_tmp = df_cal.copy()
+    cal_tmp["_fecha"] = pd.to_datetime(cal_tmp["fecha"], dayfirst=True, errors="coerce")
+    cal_tmp["_nota"] = pd.to_numeric(cal_tmp["nota"], errors="coerce")
+    pagos_mes = cal_tmp[
+        (cal_tmp["tipo_evento"].astype(str).str.upper() == "PAGO") &
+        (cal_tmp["_fecha"].dt.year == anio) &
+        (cal_tmp["_fecha"].dt.month == mes)
     ]
     notas_jordi = df_inv[
         (df_inv["cuenta_cobro"].astype(str).str.strip().str.upper() == "JORDI") &
         (df_inv["activo_generador_interes"].astype(str).str.upper() == "SI") &
-        (df_inv["tipo_operacion"].astype(str).str.lower().isin(["nueva", "cancelada"]))
+        (df_inv["tipo_operacion"].astype(str).str.lower() != "cancelada")
     ]
     notas_en_mes = pagos_mes["_nota"].dropna().astype(int).unique()
     total = 0.0
-    detalle = []
+    por_nota = {}
     for nota_num in notas_en_mes:
         nombre = f"NOTA_{nota_num:02d}"
         activas = notas_jordi[notas_jordi["nombre_activo"].astype(str).str.upper() == nombre]
         if activas.empty:
             continue
+        sub = 0.0
         for _, r in activas.iterrows():
             cap = float(r.get("capital_invertido", 0))
             tasa_nota = float(r.get("interes_nota_anual", 0))
-            tasa_inv = float(r.get("interes_inversor_anual", 0))
             periodicidad = int(r.get("periodicidad_meses", 1) or 1)
             cobro = cap * tasa_nota / 12 * periodicidad
-            pago = cap * tasa_inv / 12 * periodicidad
-            benef = cobro - pago
-            total += benef
-            detalle.append({
-                "concepto": f"{nombre} — {r.get('inversor','')}",
-                "cobro": cobro, "pago_inv": pago, "beneficio": benef,
-            })
-    return total, detalle
+            sub += cobro
+        if sub > 0:
+            por_nota[nombre] = sub
+            total += sub
+    return total, por_nota
 
 
 def _intereses_jep_mes(df_inv, anio, mes):
-    """Intereses devengados a JEP en el mes (igual que el extracto: pro-rata días)."""
+    """
+    Intereses devengados a JEP en el mes, agrupados por tipo de activo.
+    Lógica pro-rata días igual que el extracto.
+    Devuelve (total, {grupo: importe})
+    """
     dias_mes = ultimo_dia_mes(anio, mes)
     inicio_mes = pd.Timestamp(anio, mes, 1)
     fin_mes = pd.Timestamp(anio, mes, dias_mes)
@@ -5153,7 +5157,7 @@ def _intereses_jep_mes(df_inv, anio, mes):
     es_cancelada = jep["tipo_operacion"].astype(str).str.lower() == "cancelada"
     jep = jep[es_nota | (~es_nota & ~es_cancelada)].copy()
     total = 0.0
-    detalle = []
+    por_grupo = {}
     for _, r in jep.iterrows():
         fi, ff = r["_fi"], r["_ff"]
         if pd.isna(fi) or fi > fin_mes: continue
@@ -5166,13 +5170,13 @@ def _intereses_jep_mes(df_inv, anio, mes):
         tasa_inv = float(r.get("interes_inversor_anual", 0))
         interes = cap * tasa_inv / 12 * (dias / dias_mes)
         total += interes
-        nombre_activo = str(r.get("nombre_activo", r.get("subtipo_inversion", "")))
-        detalle.append({
-            "concepto": f"{nombre_activo} ({r.get('id_inversion','')})",
-            "capital": cap, "tasa": tasa_inv,
-            "dias": dias, "dias_mes": dias_mes, "interes": interes,
-        })
-    return total, detalle
+        nombre_activo = str(r.get("nombre_activo", "")).upper()
+        if "NOTA" in nombre_activo:
+            grupo = "Notas"
+        else:
+            grupo = str(r.get("subtipo_inversion", r.get("nombre_activo", ""))).title()
+        por_grupo[grupo] = por_grupo.get(grupo, 0) + interes
+    return total, por_grupo
 
 
 def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fecha_inicio: pd.Timestamp) -> pd.DataFrame:
@@ -5210,13 +5214,15 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
                 if cobro > 0 or benef != 0:
                     detalle_fijos.append({"activo": nombre_act, "cobro": cobro, "pago_inv": pago, "beneficio": benef})
 
-        # 2) Beneficio neto notas cuenta JORDI
-        benef_notas_jordi, detalle_notas_jordi = _beneficio_notas_jordi_mes(df_inv, df_cal, anio, mes)
+        # 2) Cobro compañía notas cuenta JORDI (cobro bruto = capital * tasa_nota / 12)
+        cobro_notas_jordi, por_nota_jordi = _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes)
 
-        # 3) Intereses a JEP
-        pago_jep, detalle_jep = _intereses_jep_mes(df_inv, anio, mes)
+        # 3) Intereses devengados a JEP (pro-rata días, agrupados por tipo)
+        pago_jep, jep_por_grupo = _intereses_jep_mes(df_inv, anio, mes)
 
-        resta = beneficio_fijos_total + benef_notas_jordi
+        # Total ingresos compañía = ingresos fijos + cobro notas JORDI
+        ingreso_fijos_total = sum(d["cobro"] for d in detalle_fijos)
+        resta = ingreso_fijos_total + cobro_notas_jordi
         suma = pago_jep
         saldo_inicio = saldo
         saldo = saldo + suma - resta
@@ -5224,11 +5230,11 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
         filas.append({
             "mes": label,
             "saldo_inicio": saldo_inicio,
-            "detalle_fijos": detalle_fijos,
-            "beneficio_fijos": beneficio_fijos_total,
-            "detalle_notas_jordi": detalle_notas_jordi,
-            "benef_notas_jordi": benef_notas_jordi,
-            "detalle_jep": detalle_jep,
+            "detalle_fijos": detalle_fijos,          # lista con cobro por activo
+            "ingreso_fijos": ingreso_fijos_total,
+            "por_nota_jordi": por_nota_jordi,         # dict nota->cobro
+            "cobro_notas_jordi": cobro_notas_jordi,
+            "jep_por_grupo": jep_por_grupo,           # dict grupo->interes
             "pago_jep": pago_jep,
             "total_resta": resta,
             "total_suma": suma,
@@ -5278,12 +5284,15 @@ def seccion_deuda_jordi():
 
     # ── Mensaje personalizado ──────────────────────────────────────────────
     st.divider()
+    # La deuda inicial es lo que la compañía debe a Jordi.
+    # saldo > 0 → la compañía aún le debe a Jordi
+    # saldo < 0 → Jordi ha devuelto más de lo que debía (la compañía está en positivo)
     if saldo_actual > 0:
         st.markdown(
             f"""
-            <div style="background:#fff3cd;border-left:6px solid #f5a623;padding:18px 24px;border-radius:8px;font-size:1.15rem;">
-            🧾 <b>Señor Chaparro, usted le debe a la compañía:</b>
-            <span style="font-size:1.6rem;font-weight:bold;color:#c0392b;margin-left:12px;">${saldo_actual:,.2f}</span>
+            <div style="background:#d4edda;border-left:6px solid #28a745;padding:18px 24px;border-radius:8px;font-size:1.15rem;">
+            🧾 <b>Señor Chaparro, la compañía le debe a usted:</b>
+            <span style="font-size:1.6rem;font-weight:bold;color:#155724;margin-left:12px;">${saldo_actual:,.2f}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -5291,9 +5300,9 @@ def seccion_deuda_jordi():
     elif saldo_actual < 0:
         st.markdown(
             f"""
-            <div style="background:#d4edda;border-left:6px solid #28a745;padding:18px 24px;border-radius:8px;font-size:1.15rem;">
-            ✅ <b>Señor Chaparro, la compañía le debe a usted:</b>
-            <span style="font-size:1.6rem;font-weight:bold;color:#155724;margin-left:12px;">${abs(saldo_actual):,.2f}</span>
+            <div style="background:#fff3cd;border-left:6px solid #f5a623;padding:18px 24px;border-radius:8px;font-size:1.15rem;">
+            ✅ <b>Señor Chaparro, usted le debe a la compañía:</b>
+            <span style="font-size:1.6rem;font-weight:bold;color:#c0392b;margin-left:12px;">${abs(saldo_actual):,.2f}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -5336,38 +5345,38 @@ def seccion_deuda_jordi():
                 <span style="font-weight:bold;font-size:1rem;">${fila['saldo_inicio']:,.2f}</span>
               </div>"""
 
-            # ── JEP: AUMENTA DEUDA ──
-            det_jep = fila.get("detalle_jep", []) or []
-            if det_jep:
+            # ── JEP: AUMENTA DEUDA ── agrupado por tipo
+            jep_grupos = fila.get("jep_por_grupo", {}) or {}
+            if jep_grupos:
                 html += f"""<div style="background:#fdf0f0;border-left:4px solid #c0392b;padding:8px 12px;margin:8px 0;border-radius:4px;">
-                  <div style="color:#c0392b;font-weight:bold;margin-bottom:4px;">➕ AUMENTA LA DEUDA — Intereses devengados a JEP (${fila['pago_jep']:,.2f})</div>"""
-                for d in det_jep:
+                  <div style="color:#c0392b;font-weight:bold;margin-bottom:4px;">➕ AUMENTA LA DEUDA — Intereses devengados a JEP</div>"""
+                for grupo, importe in jep_grupos.items():
                     html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#7b241c;">
-                      <span>{d['concepto']} &nbsp;|&nbsp; ${d['capital']:,.0f} × {d['tasa']:.0%}/12 × {d['dias']}/{d['dias_mes']}d</span>
-                      <span style="font-weight:bold;">+${d['interes']:,.2f}</span></div>"""
-                html += "</div>"
+                      <span>{grupo}</span><span style="font-weight:bold;">+${importe:,.2f}</span></div>"""
+                html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#c0392b;font-weight:bold;border-top:1px solid #f5c6cb;margin-top:4px;padding-top:4px;">
+                      <span>TOTAL intereses JEP</span><span>+${fila['pago_jep']:,.2f}</span></div></div>"""
 
-            # ── ACTIVOS FIJOS: REDUCE DEUDA ──
+            # ── ACTIVOS FIJOS: REDUCE DEUDA ── cobro bruto por activo
             det_fijos = fila.get("detalle_fijos", []) or []
             if det_fijos:
                 html += f"""<div style="background:#f0fdf4;border-left:4px solid #28a745;padding:8px 12px;margin:8px 0;border-radius:4px;">
-                  <div style="color:#155724;font-weight:bold;margin-bottom:4px;">➖ REDUCE LA DEUDA — Beneficio activos fijos (${fila['beneficio_fijos']:,.2f})</div>"""
+                  <div style="color:#155724;font-weight:bold;margin-bottom:4px;">➖ REDUCE LA DEUDA — Ingresos compañía activos fijos</div>"""
                 for d in det_fijos:
                     html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#1a5c30;">
-                      <span>{d['activo']} &nbsp;|&nbsp; cobro ${d['cobro']:,.2f} − pago inv ${d['pago_inv']:,.2f}</span>
-                      <span style="font-weight:bold;">−${d['beneficio']:,.2f}</span></div>"""
-                html += "</div>"
+                      <span>{d['activo']}</span><span style="font-weight:bold;">−${d['cobro']:,.2f}</span></div>"""
+                html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#155724;font-weight:bold;border-top:1px solid #c3e6cb;margin-top:4px;padding-top:4px;">
+                      <span>TOTAL fijos</span><span>−${fila['ingreso_fijos']:,.2f}</span></div></div>"""
 
-            # ── NOTAS JORDI: REDUCE DEUDA ──
-            det_notas = fila.get("detalle_notas_jordi", []) or []
-            if det_notas:
+            # ── NOTAS JORDI: REDUCE DEUDA ── cobro bruto por nota
+            por_nota = fila.get("por_nota_jordi", {}) or {}
+            if por_nota:
                 html += f"""<div style="background:#f0f8ff;border-left:4px solid #1a73e8;padding:8px 12px;margin:8px 0;border-radius:4px;">
-                  <div style="color:#1a3c6e;font-weight:bold;margin-bottom:4px;">➖ REDUCE LA DEUDA — Beneficio notas cuenta JORDI (${fila['benef_notas_jordi']:,.2f})</div>"""
-                for d in det_notas:
+                  <div style="color:#1a3c6e;font-weight:bold;margin-bottom:4px;">➖ REDUCE LA DEUDA — Cobro notas cuenta JORDI</div>"""
+                for nombre_nota, cobro in por_nota.items():
                     html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#1a3c6e;">
-                      <span>{d['concepto']} &nbsp;|&nbsp; cobro ${d['cobro']:,.2f} − pago inv ${d['pago_inv']:,.2f}</span>
-                      <span style="font-weight:bold;">−${d['beneficio']:,.2f}</span></div>"""
-                html += "</div>"
+                      <span>{nombre_nota}</span><span style="font-weight:bold;">−${cobro:,.2f}</span></div>"""
+                html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#1a3c6e;font-weight:bold;border-top:1px solid #b8daff;margin-top:4px;padding-top:4px;">
+                      <span>TOTAL notas JORDI</span><span>−${fila['cobro_notas_jordi']:,.2f}</span></div></div>"""
 
             html += f"""
               <div style="display:flex;justify-content:space-between;border-top:2px solid #555;margin-top:10px;padding-top:8px;">
@@ -5385,13 +5394,13 @@ def seccion_deuda_jordi():
 
     # ── Tabla resumen mes a mes ────────────────────────────────────────────
     st.subheader("📊 Tabla resumen")
-    cols_tabla = ["mes","saldo_inicio","beneficio_fijos","benef_notas_jordi","total_resta","pago_jep","variacion_neta","saldo_fin"]
+    cols_tabla = ["mes","saldo_inicio","ingreso_fijos","cobro_notas_jordi","total_resta","pago_jep","variacion_neta","saldo_fin"]
     tabla = df_evol[cols_tabla].copy()
     tabla = tabla.rename(columns={
         "mes": "Mes",
         "saldo_inicio": "Saldo inicio ($)",
-        "beneficio_fijos": "Benef. fijos ($)",
-        "benef_notas_jordi": "Benef. notas JORDI ($)",
+        "ingreso_fijos": "Ingreso fijos ($)",
+        "cobro_notas_jordi": "Cobro notas JORDI ($)",
         "total_resta": "Total resta ($)",
         "pago_jep": "Intereses JEP ($)",
         "variacion_neta": "Variación neta ($)",
