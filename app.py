@@ -5686,101 +5686,227 @@ def seccion_asistente_ia_fondo():
 
     # ── Contexto del Excel ────────────────────────────────────────────────────
     def _contexto_excel(pregunta: str = "", fecha_limite=None) -> str:
-        """Contexto COMPLETO del fondo: siempre calcula todo sin depender de keywords."""
+        """
+        Contexto COMPLETO con fuentes correctas para cada dato:
+        - Intereses a inversores: lógica de EXTRACTOS (solo NUEVA+CANCELADA, sin reinversiones)
+        - Ingresos compañía / cobros notas: lógica de DASHBOARD (detalle_activo_mes + resumen_notas_mes)
+        - Capital activo por inversor: lógica de CENTRO DE CONTROL (capital_activo_en_fecha)
+        """
         hoy = pd.Timestamp.today().normalize()
         anio_hoy, mes_hoy = hoy.year, hoy.month
         p = pregunta.lower()
 
-        # Detectar mes mencionado en la pregunta (para cálculos de ese mes)
+        # Detectar mes mencionado en la pregunta
         meses_map = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
                      "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
         mes_pregunta = next((v for k,v in meses_map.items() if k in p), mes_hoy)
         anio_pregunta = anio_hoy
 
-        lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
-                  f"Mes de referencia para cálculos: {mes_pregunta}/{anio_pregunta}"]
+        lineas = [
+            f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
+            f"Mes de referencia: {mes_pregunta}/{anio_pregunta}",
+            "",
+            "FUENTE DE DATOS:",
+            "- Intereses pagados a inversores → lógica EXTRACTOS (solo operaciones NUEVA y CANCELADA, sin reinversiones)",
+            "- Ingresos y beneficio empresa → lógica DASHBOARD (detalle_activo_mes + resumen_notas_mes)",
+            "- Capital activo → lógica CENTRO DE CONTROL (capital_activo_en_fecha)",
+        ]
 
-        # ── 1. CAPITAL ACTIVO GLOBAL Y POR ACTIVO ─────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # 1. CAPITAL ACTIVO HOY — fuente: capital_activo_en_fecha (Centro de control)
+        # ══════════════════════════════════════════════════════════════════════
         try:
+            lineas.append(f"\n=== CAPITAL ACTIVO HOY (fuente: Centro de control) ===")
             cap_total = capital_activo_en_fecha(df_inv, hoy)
-            lineas.append(f"\n=== CAPITAL ACTIVO HOY ===")
-            lineas.append(f"TOTAL: ${cap_total:,.2f}")
+            lineas.append(f"TOTAL FONDO: ${cap_total:,.2f}")
             for activo in ["notas","futbol","paraguay","bolivia","motoclick","bitcoin"]:
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
                 lineas.append(f"  {activo.upper()}: ${cap:,.2f}")
+
+            # Capital activo por inversor (mismo filtro que Centro de control)
+            lineas.append("\nCapital activo por inversor:")
+            df_cap = df_inv.copy()
+            df_cap["fecha_inversion"] = pd.to_datetime(df_cap.get("fecha_inversion"), errors="coerce", dayfirst=True)
+            df_cap["fecha_final_inversion"] = pd.to_datetime(df_cap.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
+            df_cap["capital_invertido"] = pd.to_numeric(df_cap.get("capital_invertido"), errors="coerce").fillna(0)
+            df_cap["tipo_op_n"] = df_cap["tipo_operacion"].astype(str).str.strip().str.upper()
+            df_cap["tipo_inv_n"] = df_cap["tipo_inversion"].astype(str).str.strip().str.lower()
+            activas_cc = df_cap[
+                (df_cap["fecha_inversion"].notna()) &
+                (df_cap["fecha_inversion"] <= hoy) &
+                (df_cap["fecha_final_inversion"].isna() | (df_cap["fecha_final_inversion"] >= hoy))
+            ].copy()
+            es_nota = activas_cc["tipo_inv_n"] == "nota"
+            es_cancelada = activas_cc["tipo_op_n"] == "CANCELADA"
+            activas_cc = activas_cc[es_nota | (~es_nota & ~es_cancelada)]
+            cap_por_inv = activas_cc.groupby("inversor")["capital_invertido"].sum().sort_values(ascending=False)
+            for inv, cap in cap_por_inv.items():
+                lineas.append(f"  {inv}: ${cap:,.2f}")
         except Exception as e:
             lineas.append(f"[Error capital activo: {e}]")
 
-        # ── 2. PAGOS E INTERESES DEL MES (calculado con funciones reales) ──────
+        # ══════════════════════════════════════════════════════════════════════
+        # 2. INTERESES A INVERSORES DEL MES — fuente: lógica EXTRACTOS
+        #    Solo NUEVA y CANCELADA. Reinversiones NO generan pago independiente.
+        # ══════════════════════════════════════════════════════════════════════
         try:
-            df_rent = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio_pregunta, mes_pregunta)
-            if df_rent is not None and not df_rent.empty:
-                lineas.append(f"\n=== PAGOS A INVERSORES {mes_pregunta}/{anio_pregunta} ===")
-                total_pago = 0.0
-                total_benef = 0.0
-                for _, row in df_rent.iterrows():
-                    inv = str(row.get("inversor","")).strip()
-                    activo = str(row.get("nombre_activo","")).strip()
-                    pago = float(row.get("pago_inversor_mes", 0) or 0)
-                    capital = float(row.get("capital", 0) or 0)
-                    beneficio = float(row.get("beneficio_empresa_mes", 0) or 0)
-                    if capital > 0:
-                        lineas.append(f"  {inv} | {activo} | Capital: ${capital:,.2f} | Pago inversor: ${pago:,.2f} | Benef empresa: ${beneficio:,.2f}")
-                        total_pago += pago
-                        total_benef += beneficio
-                lineas.append(f"  >> TOTAL PAGO INVERSORES: ${total_pago:,.2f}")
-                lineas.append(f"  >> TOTAL BENEFICIO EMPRESA: ${total_benef:,.2f}")
-        except Exception as e:
-            lineas.append(f"[Error pagos mes: {e}]")
+            lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES {mes_pregunta}/{anio_pregunta} (fuente: lógica Extractos) ===")
+            lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas.")
 
-        # ── 3. INVERSIONES ACTIVAS POR INVERSOR ───────────────────────────────
+            df_ext = df_inv.copy()
+            for col in ["inversor","tipo_inversion","subtipo_inversion","nombre_activo","tipo_operacion","id_inversion"]:
+                if col in df_ext.columns:
+                    df_ext[col] = df_ext[col].fillna("").astype(str).str.strip()
+            df_ext["tipo_op_n"] = df_ext["tipo_operacion"].str.upper()
+            df_ext = df_ext[df_ext["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
+            df_ext["fecha_inversion"] = pd.to_datetime(df_ext.get("fecha_inversion"), errors="coerce", dayfirst=True)
+            df_ext["fecha_final_inversion"] = pd.to_datetime(df_ext.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
+            df_ext["capital_invertido"] = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
+            df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
+
+            dias_mes_ext = ultimo_dia_mes(anio_pregunta, mes_pregunta)
+            fecha_corte_ext = pd.Timestamp(datetime(anio_pregunta, mes_pregunta, dias_mes_ext))
+            INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+            CORTE_TRAMO = datetime(2026, 2, 1)
+            fin_tramo1 = datetime(2026, 1, 31)
+
+            filas_int = []
+            for _, row in df_ext.iterrows():
+                fi = row.get("fecha_inversion")
+                if pd.isna(fi):
+                    continue
+                fi_dt = fi.to_pydatetime()
+                tipo_op = row["tipo_op_n"]
+                ff = row.get("fecha_final_inversion")
+
+                if tipo_op == "CANCELADA":
+                    if pd.isna(ff):
+                        continue
+                    fecha_fin_dt = min(ff.to_pydatetime(), fecha_corte_ext.to_pydatetime())
+                else:
+                    fecha_fin_dt = fecha_corte_ext.to_pydatetime()
+
+                inicio_mes_dt = datetime(anio_pregunta, mes_pregunta, 1)
+                fin_mes_dt = datetime(anio_pregunta, mes_pregunta, dias_mes_ext)
+                inicio_calc = max(fi_dt, inicio_mes_dt)
+                fin_calc = min(fecha_fin_dt, fin_mes_dt)
+                if inicio_calc > fin_calc:
+                    continue
+
+                dias = (fin_calc - inicio_calc).days + 1
+                capital = float(row["capital_invertido"])
+                tasa = float(row["interes_inversor_anual"])
+                inv_upper = str(row.get("inversor","")).strip().upper()
+
+                if inv_upper in INVERSORES_TRAMO:
+                    interes_mes = 0.0
+                    if inicio_calc <= fin_tramo1:
+                        fin_t1 = min(fin_calc, fin_tramo1)
+                        dias_t1 = (fin_t1 - inicio_calc).days + 1
+                        interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_ext, 2)
+                    if fin_calc >= CORTE_TRAMO:
+                        ini_t2 = max(inicio_calc, CORTE_TRAMO)
+                        dias_t2 = (fin_calc - ini_t2).days + 1
+                        interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_ext, 2)
+                else:
+                    interes_mes = round((capital * tasa / 12) * dias / dias_mes_ext, 2)
+
+                filas_int.append({
+                    "inversor": str(row.get("inversor","")),
+                    "nombre_activo": str(row.get("nombre_activo","")),
+                    "capital": capital,
+                    "tasa_anual": tasa,
+                    "dias": dias,
+                    "interes_mes": interes_mes,
+                })
+
+            if filas_int:
+                df_int = pd.DataFrame(filas_int)
+                # Por inversor agrupado
+                por_inv = df_int.groupby("inversor")["interes_mes"].sum().sort_values(ascending=False)
+                total_int = por_inv.sum()
+                for inv, val in por_inv.items():
+                    lineas.append(f"  {inv}: ${val:,.2f}")
+                lineas.append(f"  >> TOTAL INTERESES A PAGAR: ${total_int:,.2f}")
+                # Detalle por posición
+                lineas.append("\nDetalle por posición:")
+                for r in filas_int:
+                    lineas.append(f"  {r['inversor']} | {r['nombre_activo']} | Capital: ${r['capital']:,.2f} | Tasa: {r['tasa_anual']*100:.1f}% | Días: {r['dias']} | Interés: ${r['interes_mes']:,.2f}")
+            else:
+                lineas.append("  Sin datos de intereses para ese mes.")
+        except Exception as e:
+            lineas.append(f"[Error intereses extracto: {e}]")
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 3. INGRESOS EMPRESA DEL MES — fuente: DASHBOARD (detalle_activo_mes + resumen_notas_mes)
+        # ══════════════════════════════════════════════════════════════════════
         try:
-            if df_inv is not None and not df_inv.empty:
-                cols = [c for c in ["inversor","nombre_activo","capital_invertido",
-                                    "interes_inversor_anual","fecha_inversion",
-                                    "fecha_final_inversion","tipo_operacion","subtipo_inversion"] if c in df_inv.columns]
-                df_act = df_inv.copy()
-                df_act["fecha_final_inversion"] = pd.to_datetime(df_act.get("fecha_final_inversion"), errors="coerce")
-                activas = df_act[df_act["fecha_final_inversion"].isna() | (df_act["fecha_final_inversion"] >= hoy)]
-                activas = activas[activas["tipo_operacion"].astype(str).str.upper() != "CANCELADA"]
-                lineas.append(f"\n=== INVERSIONES ACTIVAS ({len(activas)} posiciones) ===")
-                lineas.append(activas[cols].to_string(index=False))
-        except Exception as e:
-            lineas.append(f"[Error inversiones activas: {e}]")
+            lineas.append(f"\n=== INGRESOS COMPAÑÍA {mes_pregunta}/{anio_pregunta} (fuente: Dashboard) ===")
+            total_ingreso_empresa = 0.0
+            total_benef_empresa = 0.0
 
-        # ── 4. NOTAS: PRÓXIMOS COBROS Y NOTAS EN RIESGO ───────────────────────
+            # Activos fijos
+            for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
+                                  ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
+                                  ("bitcoin",TASA_ANUAL_BITCOIN)]:
+                det = detalle_activo_mes(df_inv, activo, tasa, anio_pregunta, mes_pregunta)
+                if det is not None and not det.empty:
+                    ing = det["ingreso_bruto"].sum()
+                    pag = det["pago_inversor_mes"].sum()
+                    ben = det["beneficio_empresa_mes"].sum()
+                    lineas.append(f"  {activo.upper()}: ingreso ${ing:,.2f} | pago inversores ${pag:,.2f} | beneficio ${ben:,.2f}")
+                    total_ingreso_empresa += ing
+                    total_benef_empresa += ben
+
+            # Notas estructuradas
+            try:
+                cobro_notas, pago_notas_inv, benef_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio_pregunta, mes_pregunta)
+                lineas.append(f"  NOTAS: cobro compañía ${cobro_notas:,.2f} | pago inversores ${pago_notas_inv:,.2f} | beneficio ${benef_notas:,.2f}")
+                total_ingreso_empresa += cobro_notas
+                total_benef_empresa += benef_notas
+            except Exception as e2:
+                lineas.append(f"  NOTAS: [Error: {e2}]")
+
+            lineas.append(f"  >> TOTAL INGRESO COMPAÑÍA: ${total_ingreso_empresa:,.2f}")
+            lineas.append(f"  >> TOTAL BENEFICIO EMPRESA: ${total_benef_empresa:,.2f}")
+        except Exception as e:
+            lineas.append(f"[Error ingresos empresa: {e}]")
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 4. NOTAS: PRÓXIMOS EVENTOS Y ESTADO DE RIESGO
+        # ══════════════════════════════════════════════════════════════════════
         try:
             if df_cal is not None and not df_cal.empty:
                 df_c2 = df_cal.copy()
                 df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-                # Próximos 60 días
-                limite = hoy + pd.Timedelta(days=60)
+                limite = hoy + pd.Timedelta(days=90)
                 proximos = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["fecha"] <= limite)].sort_values("fecha")
                 cols_c = [c for c in ["fecha","nota","tipo_evento","importe_cobro","importe_pago_inversor"] if c in proximos.columns]
-                lineas.append(f"\n=== PRÓXIMOS EVENTOS NOTAS (60 días) ===")
+                lineas.append(f"\n=== PRÓXIMOS EVENTOS NOTAS (próximos 90 días) ===")
                 lineas.append(proximos[cols_c].to_string(index=False) if not proximos.empty else "Sin eventos próximos.")
         except Exception as e:
             lineas.append(f"[Error calendario notas: {e}]")
 
         try:
             if df_control is not None and not df_control.empty:
-                # Notas con observación de riesgo/barrera tocada/knock-in
-                risk_keywords = ["riesgo","barrera","knock","vencida","perdida","pérdida"]
                 df_ctrl = df_control.copy()
                 col_obs = next((c for c in df_ctrl.columns if "observ" in c.lower() or "result" in c.lower()), None)
                 if col_obs:
-                    en_riesgo = df_ctrl[df_ctrl[col_obs].astype(str).str.lower().str.contains("|".join(risk_keywords), na=False)]
+                    risk_kw = ["riesgo","barrera","knock","vencida","perdida","pérdida","capital en riesgo"]
+                    en_riesgo = df_ctrl[df_ctrl[col_obs].astype(str).str.lower().str.contains("|".join(risk_kw), na=False)]
+                    lineas.append(f"\n=== NOTAS EN RIESGO / BARRERA TOCADA ===")
                     if not en_riesgo.empty:
-                        lineas.append(f"\n=== NOTAS EN RIESGO / BARRERA TOCADA ===")
                         lineas.append(en_riesgo.to_string(index=False))
                     else:
-                        lineas.append("\n=== NOTAS EN RIESGO === Ninguna nota con alerta de riesgo actualmente.")
+                        lineas.append("Ninguna nota marcada con alerta de riesgo.")
         except Exception as e:
             lineas.append(f"[Error notas en riesgo: {e}]")
 
-        # ── 5. TOTALES HISTÓRICOS POR ACTIVO ──────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # 5. TOTALES HISTÓRICOS POR ACTIVO (desde inicio)
+        # ══════════════════════════════════════════════════════════════════════
         try:
-            lineas.append("\n=== TOTALES HISTÓRICOS POR ACTIVO (desde inicio) ===")
+            lineas.append("\n=== TOTALES HISTÓRICOS POR ACTIVO (desde inicio, fuente: Dashboard) ===")
             for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
                                   ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
                                   ("bitcoin",TASA_ANUAL_BITCOIN)]:
