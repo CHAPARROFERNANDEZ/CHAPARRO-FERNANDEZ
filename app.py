@@ -5228,6 +5228,39 @@ def seccion_deuda_jordi():
     ultimo = df_evol.iloc[-1]
     saldo_actual = ultimo["saldo_fin"]
 
+    # ── Mensaje personalizado ──────────────────────────────────────────────
+    st.divider()
+    if saldo_actual > 0:
+        st.markdown(
+            f"""
+            <div style="background:#fff3cd;border-left:6px solid #f5a623;padding:18px 24px;border-radius:8px;font-size:1.15rem;">
+            🧾 <b>Señor Chaparro, usted le debe a la compañía:</b>
+            <span style="font-size:1.6rem;font-weight:bold;color:#c0392b;margin-left:12px;">${saldo_actual:,.2f}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif saldo_actual < 0:
+        st.markdown(
+            f"""
+            <div style="background:#d4edda;border-left:6px solid #28a745;padding:18px 24px;border-radius:8px;font-size:1.15rem;">
+            ✅ <b>Señor Chaparro, la compañía le debe a usted:</b>
+            <span style="font-size:1.6rem;font-weight:bold;color:#155724;margin-left:12px;">${abs(saldo_actual):,.2f}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div style="background:#e2e3e5;border-left:6px solid #6c757d;padding:18px 24px;border-radius:8px;font-size:1.15rem;">
+            ⚖️ <b>Señor Chaparro, la deuda está completamente saldada.</b>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.divider()
+
     col1, col2, col3 = st.columns(3)
     col1.metric("💰 Deuda inicial", f"${capital_inicial:,.2f}")
     col2.metric("📅 Saldo actual (fin mes)", f"${saldo_actual:,.2f}",
@@ -5236,8 +5269,63 @@ def seccion_deuda_jordi():
 
     st.divider()
 
-    # Tabla mes a mes
-    st.subheader("Evolución mensual")
+    # ── Desglose mes a mes en formato "cuenta" ─────────────────────────────
+    st.subheader("📋 Desglose por mes")
+
+    for _, fila in df_evol.iterrows():
+        with st.expander(f"📅 {fila['mes']}  —  Saldo inicio: ${fila['saldo_inicio']:,.2f}  →  Saldo fin: ${fila['saldo_fin']:,.2f}", expanded=False):
+
+            lineas_resta = []
+            if fila["beneficio_fijos"] != 0:
+                lineas_resta.append(("Beneficio empresa (Paraguay + Motoclick + Fútbol + Bolivia)", fila["beneficio_fijos"]))
+            if fila["cobro_notas_jordi"] != 0:
+                lineas_resta.append(("Cobro notas en cuenta JORDI", fila["cobro_notas_jordi"]))
+
+            lineas_suma = []
+            if fila["pago_jep"] != 0:
+                lineas_suma.append(("Intereses mensuales a pagar a JEP", fila["pago_jep"]))
+
+            variacion = fila["variacion_neta"]
+            saldo_fin = fila["saldo_fin"]
+            color_fin = "#c0392b" if saldo_fin > 0 else "#155724"
+
+            html = f"""
+            <div style="font-family:monospace;font-size:0.95rem;line-height:2;">
+              <div style="display:flex;justify-content:space-between;border-bottom:1px solid #ccc;padding-bottom:4px;margin-bottom:6px;">
+                <span><b>Saldo inicio del mes</b></span>
+                <span><b>${fila['saldo_inicio']:,.2f}</b></span>
+              </div>
+            """
+
+            if lineas_suma:
+                html += "<div style='color:#c0392b;margin-top:4px;'><b>➕ Aumenta la deuda:</b></div>"
+                for concepto, importe in lineas_suma:
+                    html += f"<div style='display:flex;justify-content:space-between;padding-left:16px;color:#c0392b;'><span>+ {concepto}</span><span>+${importe:,.2f}</span></div>"
+
+            if lineas_resta:
+                html += "<div style='color:#155724;margin-top:8px;'><b>➖ Reduce la deuda:</b></div>"
+                for concepto, importe in lineas_resta:
+                    html += f"<div style='display:flex;justify-content:space-between;padding-left:16px;color:#155724;'><span>− {concepto}</span><span>−${importe:,.2f}</span></div>"
+
+            signo = "+" if variacion > 0 else ""
+            color_var = "#c0392b" if variacion > 0 else "#155724"
+            html += f"""
+              <div style="display:flex;justify-content:space-between;border-top:2px solid #999;margin-top:10px;padding-top:6px;">
+                <span><b>Variación neta del mes</b></span>
+                <span style="color:{color_var};font-weight:bold;">{signo}${variacion:,.2f}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;background:#f8f9fa;border-radius:6px;padding:8px 4px;margin-top:6px;">
+                <span><b>✅ Saldo fin de mes</b></span>
+                <span style="color:{color_fin};font-size:1.1rem;font-weight:bold;">${saldo_fin:,.2f}</span>
+              </div>
+            </div>
+            """
+            st.markdown(html, unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── Tabla resumen mes a mes ────────────────────────────────────────────
+    st.subheader("📊 Tabla resumen")
     tabla = df_evol.copy()
     tabla = tabla.rename(columns={
         "mes": "Mes",
@@ -5251,29 +5339,34 @@ def seccion_deuda_jordi():
         "saldo_fin": "Saldo fin mes ($)",
     })
 
-    def color_variacion(val):
-        if val < 0:
-            return "color: green"
-        elif val > 0:
-            return "color: red"
-        return ""
+    def color_variacion_col(series):
+        return [
+            ("color: green; font-weight: bold" if v < 0 else ("color: red; font-weight: bold" if v > 0 else ""))
+            for v in series
+        ]
 
-    styled = tabla.style.format({
-        "Saldo inicio ($)": "${:,.2f}",
-        "Beneficio fijos ($)": "${:,.2f}",
-        "Cobro notas JORDI ($)": "${:,.2f}",
-        "Total resta ($)": "${:,.2f}",
-        "Pago JEP ($)": "${:,.2f}",
-        "Total suma ($)": "${:,.2f}",
-        "Variación neta ($)": "${:,.2f}",
-        "Saldo fin mes ($)": "${:,.2f}",
-    }).applymap(color_variacion, subset=["Variación neta ($)"])
+    styled = (
+        tabla.style
+        .format({
+            "Saldo inicio ($)": "${:,.2f}",
+            "Beneficio fijos ($)": "${:,.2f}",
+            "Cobro notas JORDI ($)": "${:,.2f}",
+            "Total resta ($)": "${:,.2f}",
+            "Pago JEP ($)": "${:,.2f}",
+            "Total suma ($)": "${:,.2f}",
+            "Variación neta ($)": "${:,.2f}",
+            "Saldo fin mes ($)": "${:,.2f}",
+        })
+        .apply(color_variacion_col, subset=["Variación neta ($)"])
+        .apply(color_variacion_col, subset=["Saldo fin mes ($)"])
+    )
 
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    # Gráfico evolución saldo
-    st.subheader("Gráfico de evolución")
+    # ── Gráfico evolución saldo ────────────────────────────────────────────
+    st.subheader("📈 Gráfico de evolución")
     import plotly.graph_objects as go
+    colores = ["#28a745" if v <= 0 else "#e63946" for v in df_evol["saldo_fin"]]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=df_evol["mes"],
@@ -5281,7 +5374,7 @@ def seccion_deuda_jordi():
         mode="lines+markers",
         name="Saldo deuda",
         line=dict(color="#e63946", width=2),
-        marker=dict(size=7),
+        marker=dict(size=9, color=colores),
     ))
     fig.add_hline(y=0, line_dash="dash", line_color="green", annotation_text="Deuda saldada")
     fig.update_layout(
