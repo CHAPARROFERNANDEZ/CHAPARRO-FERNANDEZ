@@ -41,6 +41,7 @@ GDRIVE_FILE_ID = "1CImiIbg7kSLrYNpWgzPHEBCmI3KRVlBX"
 HOJA_INVERSIONES = "INVERSIONES"
 HOJA_CALENDARIO = "CALENDARIO_NOTAS"
 HOJA_CONTROL = "CONTROL_NOTAS"
+HOJA_MOTOCLICK = "MOVIMIENTOS_MOTOCLICK"
 
 TASA_ANUAL_FUTBOL = 0.15
 TASA_ANUAL_MOTOCLICK = 0.25
@@ -1052,6 +1053,101 @@ def dias_activos_en_mes(fecha_inicio, fecha_fin, anio: int, mes: int) -> int:
     return (fin_real - inicio_real).days + 1
 
 
+
+def cargar_movimientos_motoclick() -> pd.DataFrame:
+    """Lee la hoja MOVIMIENTOS_MOTOCLICK del Excel.
+    Columnas esperadas: fecha, tipo (DEVOLUCION/REINVERSION), importe, descripcion.
+    """
+    try:
+        df = pd.read_excel(ARCHIVO, sheet_name=HOJA_MOTOCLICK)
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
+        df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
+        df["tipo"] = df["tipo"].astype(str).str.strip().str.upper()
+        return df.dropna(subset=["fecha"])
+    except Exception:
+        return pd.DataFrame(columns=["fecha", "tipo", "importe", "descripcion"])
+
+
+def ingreso_bruto_motoclick_mes(df_inv: pd.DataFrame, df_mov: pd.DataFrame, anio: int, mes: int) -> float:
+    """
+    Calcula el ingreso bruto de MotoClick para la compañía en el mes,
+    usando el capital real desplegado día a día.
+
+    Lógica:
+    - Capital base cada día = suma del capital de todas las inversiones activas en MotoClick ese día
+    - Ajuste = devoluciones acumuladas (restan) y reinversiones acumuladas (suman) hasta ese día
+    - Capital real día = capital base + ajuste
+    - Ingreso = promedio(capital_real_día) × 25% / 12
+    """
+    dias_mes = ultimo_dia_mes(anio, mes)
+    inicio_mes = pd.Timestamp(anio, mes, 1)
+    fin_mes = pd.Timestamp(anio, mes, dias_mes)
+
+    mc = filtrar_activo(df_inv, "motoclick")
+    mc = mc[mc["tipo_operacion"].astype(str).str.lower() != "cancelada"].copy()
+    mc["fecha_inversion"] = pd.to_datetime(mc["fecha_inversion"], dayfirst=True, errors="coerce")
+    mc["fecha_final_inversion"] = pd.to_datetime(mc["fecha_final_inversion"], dayfirst=True, errors="coerce")
+
+    # Movimientos del mes y anteriores (acumulados)
+    movs = df_mov.copy() if not df_mov.empty else pd.DataFrame(columns=["fecha","tipo","importe"])
+
+    suma_capital_diaria = 0.0
+    for dia in range(1, dias_mes + 1):
+        fecha_dia = pd.Timestamp(anio, mes, dia)
+
+        # Capital base: inversiones activas ese día
+        cap_base = 0.0
+        for _, r in mc.iterrows():
+            fi = r["fecha_inversion"]
+            ff = r["fecha_final_inversion"]
+            if pd.isna(fi) or fi > fecha_dia:
+                continue
+            if pd.notna(ff) and ff < fecha_dia:
+                continue
+            cap_base += float(r.get("capital_invertido", 0))
+
+        # Ajuste acumulado por movimientos hasta ese día
+        ajuste = 0.0
+        if not movs.empty:
+            movs_hasta = movs[movs["fecha"] <= fecha_dia]
+            for _, m in movs_hasta.iterrows():
+                if m["tipo"] == "DEVOLUCION":
+                    ajuste -= float(m["importe"])
+                elif m["tipo"] == "REINVERSION":
+                    ajuste += float(m["importe"])
+
+        capital_real = max(cap_base + ajuste, 0.0)
+        suma_capital_diaria += capital_real
+
+    capital_promedio = suma_capital_diaria / dias_mes
+    return capital_promedio * TASA_ANUAL_MOTOCLICK / 12
+
+
+def ajustar_ingreso_motoclick(d_fijos: pd.DataFrame, df_inv: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
+    """
+    Reemplaza el ingreso_bruto y beneficio_empresa_mes de las filas de MotoClick
+    en d_fijos por el ingreso real calculado con movimientos (capital promedio diario).
+    El pago_inversor_mes NO se toca.
+    """
+    if d_fijos.empty or "activo" not in d_fijos.columns:
+        return d_fijos
+    df_mov = cargar_movimientos_motoclick()
+    ingreso_real = ingreso_bruto_motoclick_mes(df_inv, df_mov, anio, mes)
+    # Ingreso actual de MotoClick en d_fijos (sin ajuste)
+    mask_mc = d_fijos["activo"].str.lower() == "motoclick"
+    ingreso_actual = d_fijos.loc[mask_mc, "ingreso_bruto"].sum()
+    pago_actual = d_fijos.loc[mask_mc, "pago_inversor_mes"].sum()
+    if ingreso_actual == 0:
+        return d_fijos
+    # Distribuir el ingreso_real proporcionalmente entre las filas de MotoClick
+    factor = ingreso_real / ingreso_actual
+    d_fijos = d_fijos.copy()
+    d_fijos.loc[mask_mc, "ingreso_bruto"] = d_fijos.loc[mask_mc, "ingreso_bruto"] * factor
+    d_fijos.loc[mask_mc, "beneficio_empresa_mes"] = d_fijos.loc[mask_mc, "ingreso_bruto"] - d_fijos.loc[mask_mc, "pago_inversor_mes"]
+    return d_fijos
+
+
 def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, anio: int, mes: int) -> pd.DataFrame:
     df_activo = filtrar_activo(df_base, activo)
     dias_mes = ultimo_dia_mes(anio, mes)
@@ -2048,6 +2144,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
             det["activo"] = activo
             detalles_fijos.append(det)
     d_fijos = pd.concat(detalles_fijos, ignore_index=True) if detalles_fijos else pd.DataFrame()
+    d_fijos = ajustar_ingreso_motoclick(d_fijos, df_inv, int(anio), int(mes))
     cobro_fijos = d_fijos["ingreso_bruto"].sum() if not d_fijos.empty else 0
     pago_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
     beneficio_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
@@ -2176,6 +2273,7 @@ def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control):
             if not det.empty:
                 detalles_fijos.append(det)
         d_fijos = pd.concat(detalles_fijos, ignore_index=True) if detalles_fijos else pd.DataFrame()
+        d_fijos = ajustar_ingreso_motoclick(d_fijos, df_inv, anio, mes)
         b_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
         filas.append({"mes": f"{mes:02d}/{anio}", "beneficio": b_notas + b_fijos})
     data = pd.DataFrame(filas)
@@ -3744,6 +3842,7 @@ def seccion_sistema_fondo():
             if not det.empty:
                 det["activo"] = activo; detalles.append(det)
         d_fijos = pd.concat(detalles, ignore_index=True) if detalles else pd.DataFrame()
+        d_fijos = ajustar_ingreso_motoclick(d_fijos, df_inv, anio, mes)
         c_fijos = d_fijos["ingreso_bruto"].sum() if not d_fijos.empty else 0
         p_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
         b_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
@@ -5202,17 +5301,22 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
         label = f"{mes:02d}/{anio}"
 
         # 1) Beneficio por activo fijo
+        df_mov_mc = cargar_movimientos_motoclick()
         detalle_fijos = []
-        beneficio_fijos_total = 0.0
+        ingreso_fijos_total = 0.0
         for nombre_act, clave, tasa in ACTIVOS_FIJOS:
             det = detalle_activo_mes(df_inv, clave, tasa, anio, mes)
             if not det.empty:
-                cobro = float(det["ingreso_bruto"].sum())
-                pago = float(det["pago_inversor_mes"].sum())
-                benef = float(det["beneficio_empresa_mes"].sum())
-                beneficio_fijos_total += benef
-                if cobro > 0 or benef != 0:
-                    detalle_fijos.append({"activo": nombre_act, "cobro": cobro, "pago_inv": pago, "beneficio": benef})
+                det["activo"] = clave
+                # Para MotoClick usar ingreso real ajustado por movimientos
+                if clave == "motoclick":
+                    det_aj = ajustar_ingreso_motoclick(det, df_inv, anio, mes)
+                    cobro = float(det_aj["ingreso_bruto"].sum())
+                else:
+                    cobro = float(det["ingreso_bruto"].sum())
+                ingreso_fijos_total += cobro
+                if cobro > 0:
+                    detalle_fijos.append({"activo": nombre_act, "cobro": cobro})
 
         # 2) Cobro compañía notas cuenta JORDI (cobro bruto = capital * tasa_nota / 12)
         cobro_notas_jordi, por_nota_jordi = _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes)
@@ -5221,7 +5325,6 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
         pago_jep, jep_por_grupo = _intereses_jep_mes(df_inv, anio, mes)
 
         # Total ingresos compañía = ingresos fijos + cobro notas JORDI
-        ingreso_fijos_total = sum(d["cobro"] for d in detalle_fijos)
         resta = ingreso_fijos_total + cobro_notas_jordi
         suma = pago_jep
         saldo_inicio = saldo
