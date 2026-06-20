@@ -5686,65 +5686,109 @@ def seccion_asistente_ia_fondo():
 
     # ── Contexto del Excel ────────────────────────────────────────────────────
     def _contexto_excel(pregunta: str = "", fecha_limite=None) -> str:
-        """Contexto adaptado según la pregunta para no superar el límite de tokens."""
+        """Contexto COMPLETO del fondo: siempre calcula todo sin depender de keywords."""
         hoy = pd.Timestamp.today().normalize()
         anio_hoy, mes_hoy = hoy.year, hoy.month
         p = pregunta.lower()
-        lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}"]
 
-        # ── Siempre: resumen rápido de capitales ──────────────────────────────
+        # Detectar mes mencionado en la pregunta (para cálculos de ese mes)
+        meses_map = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+                     "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
+        mes_pregunta = next((v for k,v in meses_map.items() if k in p), mes_hoy)
+        anio_pregunta = anio_hoy
+
+        lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
+                  f"Mes de referencia para cálculos: {mes_pregunta}/{anio_pregunta}"]
+
+        # ── 1. CAPITAL ACTIVO GLOBAL Y POR ACTIVO ─────────────────────────────
         try:
             cap_total = capital_activo_en_fecha(df_inv, hoy)
-            lineas.append(f"Capital total activo: ${cap_total:,.2f}")
+            lineas.append(f"\n=== CAPITAL ACTIVO HOY ===")
+            lineas.append(f"TOTAL: ${cap_total:,.2f}")
             for activo in ["notas","futbol","paraguay","bolivia","motoclick","bitcoin"]:
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
-                lineas.append(f"Capital {activo}: ${cap:,.2f}")
-        except Exception:
-            pass
+                lineas.append(f"  {activo.upper()}: ${cap:,.2f}")
+        except Exception as e:
+            lineas.append(f"[Error capital activo: {e}]")
 
-        # ── Cobros / calendario ───────────────────────────────────────────────
-        keywords_cobro = ["cobro","pago","call","próximo","proximo","cuando","cuándo","fecha","hasta","junio","julio","mayo"]
-        if any(k in p for k in keywords_cobro):
-            try:
-                if df_cal is not None and not df_cal.empty:
-                    df_c2 = df_cal.copy()
-                    df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-                    mask = df_c2["fecha"] >= hoy
-                    if fecha_limite:
-                        mask = mask & (df_c2["fecha"] <= pd.Timestamp(fecha_limite))
-                    pagos = df_c2[mask & (df_c2["tipo_evento"].astype(str).str.upper() == "PAGO")].sort_values("fecha").head(25)
-                    cols_c = [c for c in ["fecha","nota","importe_cobro","importe_pago_inversor"] if c in pagos.columns]
-                    lineas += ["", "=== PRÓXIMOS COBROS (PAGO) ===",
-                               pagos[cols_c].to_string(index=False) if not pagos.empty else "Sin pagos próximos."]
-            except Exception:
-                pass
+        # ── 2. PAGOS E INTERESES DEL MES (calculado con funciones reales) ──────
+        try:
+            df_rent = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio_pregunta, mes_pregunta)
+            if df_rent is not None and not df_rent.empty:
+                lineas.append(f"\n=== PAGOS A INVERSORES {mes_pregunta}/{anio_pregunta} ===")
+                total_pago = 0.0
+                total_benef = 0.0
+                for _, row in df_rent.iterrows():
+                    inv = str(row.get("inversor","")).strip()
+                    activo = str(row.get("nombre_activo","")).strip()
+                    pago = float(row.get("pago_inversor_mes", 0) or 0)
+                    capital = float(row.get("capital", 0) or 0)
+                    beneficio = float(row.get("beneficio_empresa_mes", 0) or 0)
+                    if capital > 0:
+                        lineas.append(f"  {inv} | {activo} | Capital: ${capital:,.2f} | Pago inversor: ${pago:,.2f} | Benef empresa: ${beneficio:,.2f}")
+                        total_pago += pago
+                        total_benef += beneficio
+                lineas.append(f"  >> TOTAL PAGO INVERSORES: ${total_pago:,.2f}")
+                lineas.append(f"  >> TOTAL BENEFICIO EMPRESA: ${total_benef:,.2f}")
+        except Exception as e:
+            lineas.append(f"[Error pagos mes: {e}]")
 
-        # ── Inversiones: solo si pregunta por inversor, capital, interés ──────
-        keywords_inv = ["inversor","capital","interes","interés","biscafe","crowe","chaparro","jordi","yuri","alan","gholden","roberto","quien","quién","cuanto","cuánto"]
-        if any(k in p for k in keywords_inv):
-            try:
-                if df_inv is not None and not df_inv.empty:
-                    cols = [c for c in ["inversor","nombre_activo","capital_invertido",
-                                        "interes_inversor_anual","fecha_inversion","fecha_final_inversion","tipo_operacion"] if c in df_inv.columns]
-                    # Solo activas (sin fecha_final o fecha_final futura)
-                    df_act = df_inv.copy()
-                    df_act["fecha_final_inversion"] = pd.to_datetime(df_act.get("fecha_final_inversion"), errors="coerce")
-                    activas = df_act[df_act["fecha_final_inversion"].isna() | (df_act["fecha_final_inversion"] >= hoy)]
-                    lineas += ["", "=== INVERSIONES ACTIVAS ===", activas[cols].to_string(index=False)]
-            except Exception:
-                pass
+        # ── 3. INVERSIONES ACTIVAS POR INVERSOR ───────────────────────────────
+        try:
+            if df_inv is not None and not df_inv.empty:
+                cols = [c for c in ["inversor","nombre_activo","capital_invertido",
+                                    "interes_inversor_anual","fecha_inversion",
+                                    "fecha_final_inversion","tipo_operacion","subtipo_inversion"] if c in df_inv.columns]
+                df_act = df_inv.copy()
+                df_act["fecha_final_inversion"] = pd.to_datetime(df_act.get("fecha_final_inversion"), errors="coerce")
+                activas = df_act[df_act["fecha_final_inversion"].isna() | (df_act["fecha_final_inversion"] >= hoy)]
+                activas = activas[activas["tipo_operacion"].astype(str).str.upper() != "CANCELADA"]
+                lineas.append(f"\n=== INVERSIONES ACTIVAS ({len(activas)} posiciones) ===")
+                lineas.append(activas[cols].to_string(index=False))
+        except Exception as e:
+            lineas.append(f"[Error inversiones activas: {e}]")
 
-        # ── Beneficios / totales desde inicio ────────────────────────────────
-        keywords_ben = ["beneficio","ingres","total","motoclick","futbol","fútbol","paraguay","bolivia","bitcoin"]
-        if any(k in p for k in keywords_ben):
-            try:
-                lineas.append("\n=== TOTALES DESDE INICIO ===")
-                for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),("bitcoin",TASA_ANUAL_BITCOIN)]:
-                    ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
-                    pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
-                    lineas.append(f"{activo}: ingresado ${ing:,.2f} | pagado ${pag:,.2f} | beneficio ${ing-pag:,.2f}")
-            except Exception:
-                pass
+        # ── 4. NOTAS: PRÓXIMOS COBROS Y NOTAS EN RIESGO ───────────────────────
+        try:
+            if df_cal is not None and not df_cal.empty:
+                df_c2 = df_cal.copy()
+                df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
+                # Próximos 60 días
+                limite = hoy + pd.Timedelta(days=60)
+                proximos = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["fecha"] <= limite)].sort_values("fecha")
+                cols_c = [c for c in ["fecha","nota","tipo_evento","importe_cobro","importe_pago_inversor"] if c in proximos.columns]
+                lineas.append(f"\n=== PRÓXIMOS EVENTOS NOTAS (60 días) ===")
+                lineas.append(proximos[cols_c].to_string(index=False) if not proximos.empty else "Sin eventos próximos.")
+        except Exception as e:
+            lineas.append(f"[Error calendario notas: {e}]")
+
+        try:
+            if df_control is not None and not df_control.empty:
+                # Notas con observación de riesgo/barrera tocada/knock-in
+                risk_keywords = ["riesgo","barrera","knock","vencida","perdida","pérdida"]
+                df_ctrl = df_control.copy()
+                col_obs = next((c for c in df_ctrl.columns if "observ" in c.lower() or "result" in c.lower()), None)
+                if col_obs:
+                    en_riesgo = df_ctrl[df_ctrl[col_obs].astype(str).str.lower().str.contains("|".join(risk_keywords), na=False)]
+                    if not en_riesgo.empty:
+                        lineas.append(f"\n=== NOTAS EN RIESGO / BARRERA TOCADA ===")
+                        lineas.append(en_riesgo.to_string(index=False))
+                    else:
+                        lineas.append("\n=== NOTAS EN RIESGO === Ninguna nota con alerta de riesgo actualmente.")
+        except Exception as e:
+            lineas.append(f"[Error notas en riesgo: {e}]")
+
+        # ── 5. TOTALES HISTÓRICOS POR ACTIVO ──────────────────────────────────
+        try:
+            lineas.append("\n=== TOTALES HISTÓRICOS POR ACTIVO (desde inicio) ===")
+            for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
+                                  ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
+                                  ("bitcoin",TASA_ANUAL_BITCOIN)]:
+                ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
+                pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
+                lineas.append(f"  {activo}: ingresado ${ing:,.2f} | pagado inversores ${pag:,.2f} | beneficio empresa ${ing-pag:,.2f}")
+        except Exception as e:
+            lineas.append(f"[Error históricos: {e}]")
 
         return "\n".join(lineas)
 
@@ -5807,7 +5851,7 @@ def seccion_asistente_ia_fondo():
                     contenido = []
                     for nombre_pdf, pdf_b64 in pdfs_sel.items():
                         contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
-                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:3500]}\n\n---\nPREGUNTA: {ultima}"})
+                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:12000]}\n\n---\nPREGUNTA: {ultima}"})
 
                     # Solo los últimos 2 turnos del historial (sin datos pesados)
                     historial = []
@@ -5821,7 +5865,7 @@ def seccion_asistente_ia_fondo():
                     api_key = st.secrets.get("ANTHROPIC_API_KEY","") or st.secrets.get("anthropic",{}).get("api_key","")
                     resp = _req_ia.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
-                        json={"model":"claude-sonnet-4-5","max_tokens":600,
+                        json={"model":"claude-sonnet-4-5","max_tokens":2000,
                               "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
                               "messages":historial},timeout=60)
                     data = resp.json()
