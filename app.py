@@ -1918,6 +1918,10 @@ def calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio: int,
         det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
         if det is None or det.empty:
             continue
+        # Para MotoClick aplicar ajuste por devoluciones/reinversiones reales
+        if activo == "motoclick":
+            det["activo"] = "motoclick"
+            det = ajustar_ingreso_motoclick(det, df_inv, anio, mes)
         for _, row in det.iterrows():
             capital = float(row.get("capital_invertido", 0) or 0)
             cobro = float(row.get("ingreso_bruto", 0) or 0)
@@ -3087,25 +3091,33 @@ def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incl
     if consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
         inversores = sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
         nombre_inversor = st.selectbox("Inversor", inversores) if inversores else st.text_input("Inversor")
+    def _det_mes(a, m):
+        """Devuelve detalle del activo con ingreso MotoClick ajustado si corresponde."""
+        det = detalle_activo_mes(df_inv, activo_key, tasa_anual, a, m)
+        if activo_key == "motoclick" and not det.empty:
+            det["activo"] = "motoclick"
+            det = ajustar_ingreso_motoclick(det, df_inv, a, m)
+        return det
+
     if st.button("Calcular", key=f"calc_{activo_key}_{consulta}"):
         if consulta == f"¿Cuánto ingresará {nombre_visible} en un mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            detalle = _det_mes(anio, mes)
             mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Ingreso bruto", fmt(detalle["ingreso_bruto"].sum() if not detalle.empty else 0))])
             if not detalle.empty:
                 st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
         elif consulta == "¿Cuánto cobrará cada inversor ese mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            detalle = _det_mes(anio, mes)
             if detalle.empty:
                 st.info("No hay cobros de inversores para ese mes.")
             else:
                 resumen = detalle.groupby("inversor", as_index=False)["pago_inversor_mes"].sum().rename(columns={"pago_inversor_mes": "cobro_mes"}).sort_values("cobro_mes", ascending=False)
                 st.dataframe(preparar_tabla_monetaria(resumen, ["cobro_mes"]), use_container_width=True)
         elif consulta == "¿Cuánto cobrará un inversor concreto ese mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            detalle = _det_mes(anio, mes)
             filtrado = detalle[detalle["inversor"].astype(str).str.lower() == str(nombre_inversor).strip().lower()] if not detalle.empty else pd.DataFrame()
             mostrar_metricas("Resultado", [(f"Cobro de {nombre_inversor}", fmt(filtrado["pago_inversor_mes"].sum() if not filtrado.empty else 0))])
         elif consulta == "¿Cuál será el beneficio de la empresa ese mes?":
-            detalle = detalle_activo_mes(df_inv, activo_key, tasa_anual, anio, mes)
+            detalle = _det_mes(anio, mes)
             mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Beneficio empresa", fmt(detalle["beneficio_empresa_mes"].sum() if not detalle.empty else 0))])
             if not detalle.empty:
                 st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
