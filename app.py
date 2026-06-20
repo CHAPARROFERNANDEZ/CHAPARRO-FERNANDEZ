@@ -2868,6 +2868,23 @@ def seccion_historico_y_proyecciones():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+
+def boton_descarga_excel(df: pd.DataFrame, nombre_archivo: str, label: str = "⬇️ Descargar Excel"):
+    """Muestra un botón para descargar cualquier DataFrame como .xlsx."""
+    import io
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Datos")
+    buf.seek(0)
+    st.download_button(
+        label=label,
+        data=buf.getvalue(),
+        file_name=nombre_archivo,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"dl_{nombre_archivo}_{id(df)}",
+    )
+
+
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
 
@@ -2934,6 +2951,7 @@ def dashboard_financiero():
             tabla_alertas = alertas_notas.copy()
             tabla_alertas["peor_variacion_%"] = tabla_alertas["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
             st.dataframe(tabla_alertas, use_container_width=True)
+            boton_descarga_excel(alertas_notas, "alertas_notas.xlsx")
 
     resumen = obtener_resumen_dashboard(
         df_inv,
@@ -2981,6 +2999,47 @@ def dashboard_financiero():
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
+    # ── Desplegable movimientos MotoClick ─────────────────────────────────
+    if vista_dashboard == "MotoClick":
+        df_mov_display = cargar_movimientos_motoclick()
+        with st.expander("📋 Devoluciones y reinversiones MotoClick", expanded=False):
+            if df_mov_display.empty:
+                st.info("No hay movimientos registrados en la hoja MOVIMIENTOS_MOTOCLICK.")
+            else:
+                # Filtrar solo el mes seleccionado si hay datos, pero mostrar todos con columna mes
+                df_mov_display = df_mov_display.copy()
+                df_mov_display["mes"] = df_mov_display["fecha"].dt.strftime("%m/%Y")
+                df_mov_mes = df_mov_display[
+                    (df_mov_display["fecha"].dt.year == anio_dashboard) &
+                    (df_mov_display["fecha"].dt.month == mes_dashboard)
+                ]
+                total_dev = df_mov_mes.loc[df_mov_mes["tipo"] == "DEVOLUCION", "importe"].sum()
+                total_reinv = df_mov_mes.loc[df_mov_mes["tipo"] == "REINVERSION", "importe"].sum()
+                ajuste_neto = total_reinv - total_dev
+
+                col_d, col_r, col_n = st.columns(3)
+                col_d.metric("Devoluciones del mes", f"${total_dev:,.0f}", delta=None)
+                col_r.metric("Reinversiones del mes", f"${total_reinv:,.0f}", delta=None)
+                col_n.metric("Ajuste neto", f"${ajuste_neto:,.0f}",
+                             delta="capital reducido" if ajuste_neto < 0 else "capital añadido")
+
+                st.caption(f"Todos los movimientos registrados (mes seleccionado: {mes_dashboard:02d}/{anio_dashboard})")
+                tabla_movs = df_mov_display[["fecha","tipo","importe","descripcion","mes"]].copy()
+                tabla_movs["fecha"] = tabla_movs["fecha"].dt.strftime("%d/%m/%Y")
+                tabla_movs["importe"] = tabla_movs["importe"].apply(lambda x: f"${x:,.0f}")
+                # Colorear el mes seleccionado
+                def highlight_mes(row):
+                    if row["mes"] == f"{mes_dashboard:02d}/{anio_dashboard}":
+                        return ["background-color: #fff9e6"] * len(row)
+                    return [""] * len(row)
+                st.dataframe(tabla_movs.style.apply(highlight_mes, axis=1),
+                             use_container_width=True, hide_index=True)
+                boton_descarga_excel(
+                    df_mov_display[["fecha","tipo","importe","descripcion"]],
+                    f"movimientos_motoclick_{anio_dashboard}_{mes_dashboard:02d}.xlsx",
+                    "⬇️ Descargar movimientos"
+                )
+
     st.markdown("---")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -3003,6 +3062,7 @@ def dashboard_financiero():
             st.info("No hay datos de rentabilidad por activo para este mes.")
         else:
             st.dataframe(preparar_tabla_rentabilidad(tabla_activo), use_container_width=True)
+            boton_descarga_excel(tabla_activo, f"rentabilidad_activo_{anio_dashboard}_{mes_dashboard:02d}.xlsx")
     with tab5:
         st.caption("Detalle inversión por inversión: cuánto genera, cuánto se paga al inversor y qué rentabilidad de beneficio deja.")
         tabla_inv = resumen.get("rentabilidad_inversiones", pd.DataFrame())
@@ -3018,6 +3078,7 @@ def dashboard_financiero():
             ]
             columnas = [c for c in columnas if c in tabla_inv.columns]
             st.dataframe(preparar_tabla_rentabilidad(tabla_inv[columnas]), use_container_width=True)
+            boton_descarga_excel(tabla_inv[columnas], f"rentabilidad_inversiones_{anio_dashboard}_{mes_dashboard:02d}.xlsx")
 
 
 def centro_control_inversiones():
@@ -3055,12 +3116,15 @@ def centro_control_inversiones():
     tab1, tab2, tab3 = st.tabs(["Detalle", "Por activo", "Por inversor"])
     with tab1:
         st.dataframe(preparar_tabla_monetaria(activas, ["capital_invertido", "interes_inversor_anual", "interes_nota_anual"]), use_container_width=True)
+        boton_descarga_excel(activas, f"centro_control_{anio_cc}_{mes_cc:02d}.xlsx")
     with tab2:
         resumen_activo = activas.groupby("activo", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
         st.dataframe(preparar_tabla_monetaria(resumen_activo, ["capital"]), use_container_width=True)
+        boton_descarga_excel(resumen_activo, f"capital_por_activo_{anio_cc}_{mes_cc:02d}.xlsx")
     with tab3:
         resumen_inv = activas.groupby("inversor", as_index=False)["capital_invertido"].sum().rename(columns={"capital_invertido": "capital"}).sort_values("capital", ascending=False)
         st.dataframe(preparar_tabla_monetaria(resumen_inv, ["capital"]), use_container_width=True)
+        boton_descarga_excel(resumen_inv, f"capital_por_inversor_{anio_cc}_{mes_cc:02d}.xlsx")
 
 
 # =========================
@@ -3105,6 +3169,7 @@ def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incl
             mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Ingreso bruto", fmt(detalle["ingreso_bruto"].sum() if not detalle.empty else 0))])
             if not detalle.empty:
                 st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
+                boton_descarga_excel(detalle, f"ingreso_{activo_key}_{anio}_{mes:02d}.xlsx")
         elif consulta == "¿Cuánto cobrará cada inversor ese mes?":
             detalle = _det_mes(anio, mes)
             if detalle.empty:
@@ -3121,6 +3186,7 @@ def seccion_activo(nombre_visible: str, activo_key: str, tasa_anual: float, incl
             mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Beneficio empresa", fmt(detalle["beneficio_empresa_mes"].sum() if not detalle.empty else 0))])
             if not detalle.empty:
                 st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
+                boton_descarga_excel(detalle, f"beneficio_{activo_key}_{anio}_{mes:02d}.xlsx")
         elif consulta == "¿Cuál es el total pagado a inversores desde el inicio?":
             mostrar_metricas("Resultado", [("Total pagado", fmt(total_pagado_activo_desde_inicio(df_inv, activo_key, tasa_anual)))])
         elif consulta == "¿Cuánto ha ingresado la compañía desde el inicio?":
@@ -3178,6 +3244,7 @@ def seccion_notas():
                 resumen_cuentas = resumen_por_cuenta_cobro(detalle)
                 if not resumen_cuentas.empty:
                     st.dataframe(preparar_tabla_monetaria(resumen_cuentas, ["cobro_compania"]), use_container_width=True)
+                    boton_descarga_excel(resumen_cuentas, f"cobros_por_cuenta_{anio}_{mes:02d}.xlsx")
             elif consulta == "¿Cuánto se pagará a inversores en un mes de notas?":
                 mostrar_metricas(f"Resultado {nombre_mes_es(mes)} {anio}", [("Pago inversores", fmt(total_pagado))])
             elif consulta == "¿Cuál será el beneficio de la empresa en un mes de notas?":
@@ -3194,6 +3261,7 @@ def seccion_notas():
             if not detalle.empty:
                 with st.expander("Ver detalle por nota e inversión"):
                     st.dataframe(preparar_tabla_monetaria(detalle, ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]), use_container_width=True)
+                    boton_descarga_excel(detalle, f"detalle_notas_mes_{anio}_{mes:02d}.xlsx")
         elif consulta == "¿Cuánto ha cobrado la compañía desde el inicio?":
             detalle = preparar_detalle_notas(df_inv, pagos_notas_hasta_hoy(df_cal), df_cal=df_cal, df_control=df_control)
             mostrar_metricas("Resultado", [("Total cobrado compañía", fmt(detalle["cobro_compania"].sum() if not detalle.empty else 0))])
@@ -3447,6 +3515,7 @@ def seccion_notas_archivo():
             tabla_mostrar["variacion_%"] = tabla["variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
 
         st.dataframe(tabla_mostrar.style.apply(colorear_filas_alerta_notas, axis=1), use_container_width=True)
+        boton_descarga_excel(tabla_mostrar, "alertas_observaciones.xlsx")
 
         st.markdown("### Alertas por variación")
         st.caption("Amarillo: variación igual o inferior a -25%. Rojo: variación igual o inferior a -35%.")
@@ -3760,6 +3829,7 @@ def panel_alertas_y_calendario():
         )
         tabla = calendario[calendario["tipo_evento"].isin(filtro_tipo)].copy() if filtro_tipo else calendario.copy()
         st.dataframe(preparar_tabla_calendario_integrado(tabla), use_container_width=True)
+        boton_descarga_excel(tabla, "calendario_notas.xlsx")
 
         salida = BytesIO()
         exportar = tabla.copy()
@@ -3797,6 +3867,7 @@ def panel_calidad_datos():
     else:
         st.success("Base de datos validada correctamente.")
     st.dataframe(validaciones, use_container_width=True)
+    boton_descarga_excel(validaciones, "validaciones_notas.xlsx")
 
 
 def seccion_sistema_fondo():
@@ -3862,11 +3933,15 @@ def seccion_sistema_fondo():
         if not d_notas.empty:
             with st.expander("Detalle notas"):
                 st.dataframe(preparar_tabla_monetaria(d_notas, ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]), use_container_width=True)
+                boton_descarga_excel(d_notas, f"detalle_notas_{anio}_{mes:02d}.xlsx")
         if not d_fijos.empty:
             with st.expander("Detalle activos fijos"):
                 st.dataframe(preparar_tabla_monetaria(d_fijos, ["capital_invertido", "ingreso_bruto", "pago_inversor_mes", "beneficio_empresa_mes"]), use_container_width=True)
+                boton_descarga_excel(d_fijos, f"detalle_fijos_{anio}_{mes:02d}.xlsx")
     elif consulta == "Validaciones":
-        st.dataframe(validar_base_datos(df_inv, df_cal, df_control), use_container_width=True)
+        df_val = validar_base_datos(df_inv, df_cal, df_control)
+        st.dataframe(df_val, use_container_width=True)
+        boton_descarga_excel(df_val, "validaciones.xlsx")
     else:
         if df_calls.empty or "fecha_call" not in df_calls.columns:
             st.warning("No existe la hoja CALENDARIO_CALLS o no tiene la columna fecha_call.")
@@ -5544,6 +5619,7 @@ def seccion_deuda_jordi():
     )
 
     st.dataframe(styled, use_container_width=True, hide_index=True)
+    boton_descarga_excel(tabla, f"deuda_jordi_evolucion.xlsx")
 
     # ── Gráfico evolución saldo ────────────────────────────────────────────
     st.subheader("📈 Gráfico de evolución")
