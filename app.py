@@ -5842,37 +5842,31 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"[Error intereses extracto: {e}]")
 
         # ══════════════════════════════════════════════════════════════════════
-        # 3. INGRESOS EMPRESA DEL MES — fuente: DASHBOARD (detalle_activo_mes + resumen_notas_mes)
+        # 3. INGRESOS EMPRESA DEL MES — fuente: obtener_resumen_dashboard (EXACTAMENTE igual que el Dashboard)
         # ══════════════════════════════════════════════════════════════════════
         try:
-            lineas.append(f"\n=== INGRESOS COMPAÑÍA {mes_pregunta}/{anio_pregunta} (fuente: Dashboard) ===")
-            total_ingreso_empresa = 0.0
-            total_benef_empresa = 0.0
+            resumen_dash = obtener_resumen_dashboard(
+                df_inv, df_cal, df_control,
+                anio=anio_pregunta, mes=mes_pregunta,
+                vista_activo="General", incluir_chaparro=True
+            )
+            cobro_total   = resumen_dash.get("cobro_total_mes", 0.0)
+            pago_total    = resumen_dash.get("pago_total_mes", 0.0)
+            benef_total   = resumen_dash.get("beneficio_total_mes", 0.0)
+            cap_dashboard = resumen_dash.get("capital_total", 0.0)
 
-            # Activos fijos
-            for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
-                                  ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
-                                  ("bitcoin",TASA_ANUAL_BITCOIN)]:
-                det = detalle_activo_mes(df_inv, activo, tasa, anio_pregunta, mes_pregunta)
-                if det is not None and not det.empty:
-                    ing = det["ingreso_bruto"].sum()
-                    pag = det["pago_inversor_mes"].sum()
-                    ben = det["beneficio_empresa_mes"].sum()
-                    lineas.append(f"  {activo.upper()}: ingreso ${ing:,.2f} | pago inversores ${pag:,.2f} | beneficio ${ben:,.2f}")
-                    total_ingreso_empresa += ing
-                    total_benef_empresa += ben
+            lineas.append(f"\n=== INGRESOS COMPAÑÍA {mes_pregunta}/{anio_pregunta} (fuente: Dashboard — obtener_resumen_dashboard) ===")
+            lineas.append(f"  COBRO TOTAL COMPAÑÍA: ${cobro_total:,.2f}")
+            lineas.append(f"  PAGO TOTAL INVERSORES (dashboard): ${pago_total:,.2f}")
+            lineas.append(f"  BENEFICIO EMPRESA: ${benef_total:,.2f}")
+            lineas.append(f"  CAPITAL ACTIVO (dashboard): ${cap_dashboard:,.2f}")
 
-            # Notas estructuradas
-            try:
-                cobro_notas, pago_notas_inv, benef_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio_pregunta, mes_pregunta)
-                lineas.append(f"  NOTAS: cobro compañía ${cobro_notas:,.2f} | pago inversores ${pago_notas_inv:,.2f} | beneficio ${benef_notas:,.2f}")
-                total_ingreso_empresa += cobro_notas
-                total_benef_empresa += benef_notas
-            except Exception as e2:
-                lineas.append(f"  NOTAS: [Error: {e2}]")
-
-            lineas.append(f"  >> TOTAL INGRESO COMPAÑÍA: ${total_ingreso_empresa:,.2f}")
-            lineas.append(f"  >> TOTAL BENEFICIO EMPRESA: ${total_benef_empresa:,.2f}")
+            # Desglose por activo si está disponible
+            rent_activo = resumen_dash.get("rentabilidad_por_activo", None)
+            if rent_activo is not None and not rent_activo.empty:
+                lineas.append("  Desglose por activo:")
+                for _, r in rent_activo.iterrows():
+                    lineas.append(f"    {str(r.get('activo','')).upper()}: cobro ${float(r.get('cobro_compania_mes',0)):,.2f} | pago inversores ${float(r.get('pago_inversor_mes',0)):,.2f} | beneficio ${float(r.get('beneficio_empresa_mes',0)):,.2f}")
         except Exception as e:
             lineas.append(f"[Error ingresos empresa: {e}]")
 
