@@ -5719,7 +5719,11 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"\n=== CAPITAL ACTIVO HOY (fuente: Centro de control) ===")
             cap_total = capital_activo_en_fecha(df_inv, hoy)
             lineas.append(f"TOTAL FONDO: ${cap_total:,.2f}")
-            for activo in ["notas","futbol","paraguay","bolivia","motoclick","bitcoin"]:
+            # Notas: filtrar por tipo_inversion=="nota" (no por subtipo)
+            df_notas_cap = df_inv[df_inv["tipo_inversion"].astype(str).str.lower().str.strip() == "nota"]
+            cap_notas = capital_activo_en_fecha(df_notas_cap, hoy)
+            lineas.append(f"  NOTAS: ${cap_notas:,.2f}")
+            for activo in ["futbol","paraguay","bolivia","motoclick","bitcoin"]:
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
                 lineas.append(f"  {activo.upper()}: ${cap:,.2f}")
 
@@ -5738,7 +5742,7 @@ def seccion_asistente_ia_fondo():
             ].copy()
             es_nota = activas_cc["tipo_inv_n"] == "nota"
             es_cancelada = activas_cc["tipo_op_n"] == "CANCELADA"
-            activas_cc = activas_cc[es_nota | (~es_nota & ~es_cancelada)]
+            activas_cc = activas_cc[~es_cancelada]  # igual que inversiones_activas_global: excluir canceladas en todos
             cap_por_inv = activas_cc.groupby("inversor")["capital_invertido"].sum().sort_values(ascending=False)
             for inv, cap in cap_por_inv.items():
                 lineas.append(f"  {inv}: ${cap:,.2f}")
