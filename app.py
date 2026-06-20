@@ -5101,88 +5101,136 @@ except Exception as e:
     st.stop()
 
 
+def _beneficio_notas_jordi_mes(df_inv, df_cal, anio, mes):
+    """Beneficio neto (cobro nota - pago inversores) de notas cuenta JORDI con PAGO en el mes."""
+    import re as _re
+    cal_fechas = df_cal.copy()
+    cal_fechas["_fecha"] = pd.to_datetime(cal_fechas["fecha"], dayfirst=True, errors="coerce")
+    cal_fechas["_nota"] = pd.to_numeric(cal_fechas["nota"], errors="coerce")
+    pagos_mes = cal_fechas[
+        (cal_fechas["tipo_evento"].astype(str).str.upper() == "PAGO") &
+        (cal_fechas["_fecha"].dt.year == anio) &
+        (cal_fechas["_fecha"].dt.month == mes)
+    ]
+    notas_jordi = df_inv[
+        (df_inv["cuenta_cobro"].astype(str).str.strip().str.upper() == "JORDI") &
+        (df_inv["activo_generador_interes"].astype(str).str.upper() == "SI") &
+        (df_inv["tipo_operacion"].astype(str).str.lower().isin(["nueva", "cancelada"]))
+    ]
+    notas_en_mes = pagos_mes["_nota"].dropna().astype(int).unique()
+    total = 0.0
+    detalle = []
+    for nota_num in notas_en_mes:
+        nombre = f"NOTA_{nota_num:02d}"
+        activas = notas_jordi[notas_jordi["nombre_activo"].astype(str).str.upper() == nombre]
+        if activas.empty:
+            continue
+        for _, r in activas.iterrows():
+            cap = float(r.get("capital_invertido", 0))
+            tasa_nota = float(r.get("interes_nota_anual", 0))
+            tasa_inv = float(r.get("interes_inversor_anual", 0))
+            periodicidad = int(r.get("periodicidad_meses", 1) or 1)
+            cobro = cap * tasa_nota / 12 * periodicidad
+            pago = cap * tasa_inv / 12 * periodicidad
+            benef = cobro - pago
+            total += benef
+            detalle.append({
+                "concepto": f"{nombre} — {r.get('inversor','')}",
+                "cobro": cobro, "pago_inv": pago, "beneficio": benef,
+            })
+    return total, detalle
+
+
+def _intereses_jep_mes(df_inv, anio, mes):
+    """Intereses devengados a JEP en el mes (igual que el extracto: pro-rata días)."""
+    dias_mes = ultimo_dia_mes(anio, mes)
+    inicio_mes = pd.Timestamp(anio, mes, 1)
+    fin_mes = pd.Timestamp(anio, mes, dias_mes)
+    jep = df_inv[df_inv["inversor"].astype(str).str.upper().str.strip() == "JEP"].copy()
+    jep["_fi"] = pd.to_datetime(jep["fecha_inversion"], dayfirst=True, errors="coerce")
+    jep["_ff"] = pd.to_datetime(jep["fecha_final_inversion"], dayfirst=True, errors="coerce")
+    es_nota = jep["tipo_inversion"].astype(str).str.lower().str.contains("nota")
+    es_cancelada = jep["tipo_operacion"].astype(str).str.lower() == "cancelada"
+    jep = jep[es_nota | (~es_nota & ~es_cancelada)].copy()
+    total = 0.0
+    detalle = []
+    for _, r in jep.iterrows():
+        fi, ff = r["_fi"], r["_ff"]
+        if pd.isna(fi) or fi > fin_mes: continue
+        if pd.notna(ff) and ff < inicio_mes: continue
+        ir = max(fi, inicio_mes)
+        fr = fin_mes if pd.isna(ff) else min(ff, fin_mes)
+        if ir > fr: continue
+        dias = (fr - ir).days + 1
+        cap = float(r.get("capital_invertido", 0))
+        tasa_inv = float(r.get("interes_inversor_anual", 0))
+        interes = cap * tasa_inv / 12 * (dias / dias_mes)
+        total += interes
+        nombre_activo = str(r.get("nombre_activo", r.get("subtipo_inversion", "")))
+        detalle.append({
+            "concepto": f"{nombre_activo} ({r.get('id_inversion','')})",
+            "capital": cap, "tasa": tasa_inv,
+            "dias": dias, "dias_mes": dias_mes, "interes": interes,
+        })
+    return total, detalle
+
+
 def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fecha_inicio: pd.Timestamp) -> pd.DataFrame:
     """
-    Calcula la evolución mes a mes de la deuda con Jordi Chaparro.
-
-    Lógica por mes:
-      - RESTA deuda (cobros que reducen la deuda):
-          · beneficio_empresa de Paraguay + Motoclick + Fútbol + Bolivia (activos fijos, excluye Bitcoin y Notas)
-          · cobro_compania de notas con cuenta_cobro == 'JORDI' (cobros que entran por la cuenta de Jordi)
-      - SUMA deuda (lo que se le debería haber pagado a JEP ese mes, que aumenta la deuda):
-          · pago_inversor_mes de todas las inversiones activas de JEP (todos sus activos)
+    Evolución mes a mes de la deuda con Jordi Chaparro.
+    RESTA: beneficio fijos (Paraguay/Motoclick/Futbol/Bolivia) + beneficio notas cuenta JORDI
+    SUMA:  intereses devengados a JEP (todos sus activos, pro-rata días)
     """
     hoy = pd.Timestamp.today().normalize()
     filas = []
     saldo = capital_inicial
-
     anio = fecha_inicio.year
     mes = fecha_inicio.month
 
+    ACTIVOS_FIJOS = [
+        ("Paraguay",  "paraguay",  TASA_ANUAL_PARAGUAY),
+        ("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK),
+        ("Fútbol",    "futbol",    TASA_ANUAL_FUTBOL),
+        ("Bolivia",   "bolivia",   TASA_ANUAL_BOLIVIA),
+    ]
+
     while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
-        fin_mes = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
         label = f"{mes:02d}/{anio}"
 
-        # 1) Beneficio empresa de activos fijos SIN bitcoin (Paraguay, Motoclick, Fútbol, Bolivia)
-        beneficio_fijos = 0.0
-        for activo, tasa in [
-            ("paraguay", TASA_ANUAL_PARAGUAY),
-            ("motoclick", TASA_ANUAL_MOTOCLICK),
-            ("futbol", TASA_ANUAL_FUTBOL),
-            ("bolivia", TASA_ANUAL_BOLIVIA),
-        ]:
-            det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
+        # 1) Beneficio por activo fijo
+        detalle_fijos = []
+        beneficio_fijos_total = 0.0
+        for nombre_act, clave, tasa in ACTIVOS_FIJOS:
+            det = detalle_activo_mes(df_inv, clave, tasa, anio, mes)
             if not det.empty:
-                beneficio_fijos += float(det["beneficio_empresa_mes"].sum())
+                cobro = float(det["ingreso_bruto"].sum())
+                pago = float(det["pago_inversor_mes"].sum())
+                benef = float(det["beneficio_empresa_mes"].sum())
+                beneficio_fijos_total += benef
+                if cobro > 0 or benef != 0:
+                    detalle_fijos.append({"activo": nombre_act, "cobro": cobro, "pago_inv": pago, "beneficio": benef})
 
-        # 2) Cobros de notas con cuenta_cobro == JORDI (entran en cuenta Jordi → reducen la deuda)
-        cobro_notas_jordi = 0.0
-        try:
-            det_notas = calcular_notas_mes(df_inv, df_cal, df_control, anio, mes)
-            if not det_notas.empty:
-                jordi_notas = det_notas[
-                    det_notas["cuenta_cobro"].astype(str).str.upper() == "JORDI"
-                ]
-                cobro_notas_jordi = float(jordi_notas["cobro_compania"].sum()) if not jordi_notas.empty else 0.0
-        except Exception:
-            cobro_notas_jordi = 0.0
+        # 2) Beneficio neto notas cuenta JORDI
+        benef_notas_jordi, detalle_notas_jordi = _beneficio_notas_jordi_mes(df_inv, df_cal, anio, mes)
 
-        # 3) Pago mensual a JEP (lo que se le debe pagar → aumenta la deuda)
-        pago_jep = 0.0
-        # JEP en activos fijos (Paraguay, Motoclick, Fútbol, Bolivia, Bitcoin)
-        for activo, tasa in [
-            ("paraguay", TASA_ANUAL_PARAGUAY),
-            ("motoclick", TASA_ANUAL_MOTOCLICK),
-            ("futbol", TASA_ANUAL_FUTBOL),
-            ("bolivia", TASA_ANUAL_BOLIVIA),
-            ("bitcoin", TASA_ANUAL_BITCOIN),
-        ]:
-            det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
-            if not det.empty:
-                jep_rows = det[det["inversor"].astype(str).str.upper().str.strip() == "JEP"]
-                pago_jep += float(jep_rows["pago_inversor_mes"].sum()) if not jep_rows.empty else 0.0
-        # JEP en notas (devengo mensual)
-        try:
-            det_notas_jep = calcular_notas_mes(df_inv, df_cal, df_control, anio, mes)
-            if not det_notas_jep.empty:
-                jep_notas = det_notas_jep[
-                    det_notas_jep["inversor"].astype(str).str.upper().str.strip() == "JEP"
-                ]
-                pago_jep += float(jep_notas["pago_inversor"].sum()) if not jep_notas.empty else 0.0
-        except Exception:
-            pass
+        # 3) Intereses a JEP
+        pago_jep, detalle_jep = _intereses_jep_mes(df_inv, anio, mes)
 
-        resta = beneficio_fijos + cobro_notas_jordi
+        resta = beneficio_fijos_total + benef_notas_jordi
         suma = pago_jep
+        saldo_inicio = saldo
         saldo = saldo + suma - resta
 
         filas.append({
             "mes": label,
-            "saldo_inicio": saldo - suma + resta,
-            "beneficio_fijos": beneficio_fijos,
-            "cobro_notas_jordi": cobro_notas_jordi,
-            "total_resta": resta,
+            "saldo_inicio": saldo_inicio,
+            "detalle_fijos": detalle_fijos,
+            "beneficio_fijos": beneficio_fijos_total,
+            "detalle_notas_jordi": detalle_notas_jordi,
+            "benef_notas_jordi": benef_notas_jordi,
+            "detalle_jep": detalle_jep,
             "pago_jep": pago_jep,
+            "total_resta": resta,
             "total_suma": suma,
             "variacion_neta": suma - resta,
             "saldo_fin": saldo,
@@ -5273,73 +5321,84 @@ def seccion_deuda_jordi():
     st.subheader("📋 Desglose por mes")
 
     for _, fila in df_evol.iterrows():
-        with st.expander(f"📅 {fila['mes']}  —  Saldo inicio: ${fila['saldo_inicio']:,.2f}  →  Saldo fin: ${fila['saldo_fin']:,.2f}", expanded=False):
+        variacion = fila["variacion_neta"]
+        saldo_fin = fila["saldo_fin"]
+        emoji = "📉" if variacion < 0 else "📈"
+        with st.expander(f"{emoji} {fila['mes']}  |  Inicio: ${fila['saldo_inicio']:,.2f}  →  Fin: ${fila['saldo_fin']:,.2f}  (variación: {'+' if variacion>0 else ''}{variacion:,.2f})", expanded=False):
 
-            lineas_resta = []
-            if fila["beneficio_fijos"] != 0:
-                lineas_resta.append(("Beneficio empresa (Paraguay + Motoclick + Fútbol + Bolivia)", fila["beneficio_fijos"]))
-            if fila["cobro_notas_jordi"] != 0:
-                lineas_resta.append(("Cobro notas en cuenta JORDI", fila["cobro_notas_jordi"]))
-
-            lineas_suma = []
-            if fila["pago_jep"] != 0:
-                lineas_suma.append(("Intereses mensuales a pagar a JEP", fila["pago_jep"]))
-
-            variacion = fila["variacion_neta"]
-            saldo_fin = fila["saldo_fin"]
             color_fin = "#c0392b" if saldo_fin > 0 else "#155724"
-
-            html = f"""
-            <div style="font-family:monospace;font-size:0.95rem;line-height:2;">
-              <div style="display:flex;justify-content:space-between;border-bottom:1px solid #ccc;padding-bottom:4px;margin-bottom:6px;">
-                <span><b>Saldo inicio del mes</b></span>
-                <span><b>${fila['saldo_inicio']:,.2f}</b></span>
-              </div>
-            """
-
-            if lineas_suma:
-                html += "<div style='color:#c0392b;margin-top:4px;'><b>➕ Aumenta la deuda:</b></div>"
-                for concepto, importe in lineas_suma:
-                    html += f"<div style='display:flex;justify-content:space-between;padding-left:16px;color:#c0392b;'><span>+ {concepto}</span><span>+${importe:,.2f}</span></div>"
-
-            if lineas_resta:
-                html += "<div style='color:#155724;margin-top:8px;'><b>➖ Reduce la deuda:</b></div>"
-                for concepto, importe in lineas_resta:
-                    html += f"<div style='display:flex;justify-content:space-between;padding-left:16px;color:#155724;'><span>− {concepto}</span><span>−${importe:,.2f}</span></div>"
-
-            signo = "+" if variacion > 0 else ""
             color_var = "#c0392b" if variacion > 0 else "#155724"
+            signo = "+" if variacion > 0 else ""
+
+            html = f"""<div style="font-family:Arial,sans-serif;font-size:0.93rem;line-height:1.9;">
+              <div style="display:flex;justify-content:space-between;border-bottom:2px solid #555;padding-bottom:6px;margin-bottom:10px;">
+                <span style="font-weight:bold;font-size:1rem;">💰 Saldo inicio del mes</span>
+                <span style="font-weight:bold;font-size:1rem;">${fila['saldo_inicio']:,.2f}</span>
+              </div>"""
+
+            # ── JEP: AUMENTA DEUDA ──
+            det_jep = fila.get("detalle_jep", []) or []
+            if det_jep:
+                html += f"""<div style="background:#fdf0f0;border-left:4px solid #c0392b;padding:8px 12px;margin:8px 0;border-radius:4px;">
+                  <div style="color:#c0392b;font-weight:bold;margin-bottom:4px;">➕ AUMENTA LA DEUDA — Intereses devengados a JEP (${fila['pago_jep']:,.2f})</div>"""
+                for d in det_jep:
+                    html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#7b241c;">
+                      <span>{d['concepto']} &nbsp;|&nbsp; ${d['capital']:,.0f} × {d['tasa']:.0%}/12 × {d['dias']}/{d['dias_mes']}d</span>
+                      <span style="font-weight:bold;">+${d['interes']:,.2f}</span></div>"""
+                html += "</div>"
+
+            # ── ACTIVOS FIJOS: REDUCE DEUDA ──
+            det_fijos = fila.get("detalle_fijos", []) or []
+            if det_fijos:
+                html += f"""<div style="background:#f0fdf4;border-left:4px solid #28a745;padding:8px 12px;margin:8px 0;border-radius:4px;">
+                  <div style="color:#155724;font-weight:bold;margin-bottom:4px;">➖ REDUCE LA DEUDA — Beneficio activos fijos (${fila['beneficio_fijos']:,.2f})</div>"""
+                for d in det_fijos:
+                    html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#1a5c30;">
+                      <span>{d['activo']} &nbsp;|&nbsp; cobro ${d['cobro']:,.2f} − pago inv ${d['pago_inv']:,.2f}</span>
+                      <span style="font-weight:bold;">−${d['beneficio']:,.2f}</span></div>"""
+                html += "</div>"
+
+            # ── NOTAS JORDI: REDUCE DEUDA ──
+            det_notas = fila.get("detalle_notas_jordi", []) or []
+            if det_notas:
+                html += f"""<div style="background:#f0f8ff;border-left:4px solid #1a73e8;padding:8px 12px;margin:8px 0;border-radius:4px;">
+                  <div style="color:#1a3c6e;font-weight:bold;margin-bottom:4px;">➖ REDUCE LA DEUDA — Beneficio notas cuenta JORDI (${fila['benef_notas_jordi']:,.2f})</div>"""
+                for d in det_notas:
+                    html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#1a3c6e;">
+                      <span>{d['concepto']} &nbsp;|&nbsp; cobro ${d['cobro']:,.2f} − pago inv ${d['pago_inv']:,.2f}</span>
+                      <span style="font-weight:bold;">−${d['beneficio']:,.2f}</span></div>"""
+                html += "</div>"
+
             html += f"""
-              <div style="display:flex;justify-content:space-between;border-top:2px solid #999;margin-top:10px;padding-top:6px;">
-                <span><b>Variación neta del mes</b></span>
+              <div style="display:flex;justify-content:space-between;border-top:2px solid #555;margin-top:10px;padding-top:8px;">
+                <span style="font-weight:bold;">Variación neta del mes</span>
                 <span style="color:{color_var};font-weight:bold;">{signo}${variacion:,.2f}</span>
               </div>
-              <div style="display:flex;justify-content:space-between;background:#f8f9fa;border-radius:6px;padding:8px 4px;margin-top:6px;">
-                <span><b>✅ Saldo fin de mes</b></span>
-                <span style="color:{color_fin};font-size:1.1rem;font-weight:bold;">${saldo_fin:,.2f}</span>
+              <div style="display:flex;justify-content:space-between;background:#f8f9fa;border-radius:6px;padding:10px 6px;margin-top:6px;">
+                <span style="font-weight:bold;font-size:1.05rem;">✅ Saldo fin de mes</span>
+                <span style="color:{color_fin};font-size:1.15rem;font-weight:bold;">${saldo_fin:,.2f}</span>
               </div>
-            </div>
-            """
+            </div>"""
             st.markdown(html, unsafe_allow_html=True)
 
     st.divider()
 
     # ── Tabla resumen mes a mes ────────────────────────────────────────────
     st.subheader("📊 Tabla resumen")
-    tabla = df_evol.copy()
+    cols_tabla = ["mes","saldo_inicio","beneficio_fijos","benef_notas_jordi","total_resta","pago_jep","variacion_neta","saldo_fin"]
+    tabla = df_evol[cols_tabla].copy()
     tabla = tabla.rename(columns={
         "mes": "Mes",
         "saldo_inicio": "Saldo inicio ($)",
-        "beneficio_fijos": "Beneficio fijos ($)",
-        "cobro_notas_jordi": "Cobro notas JORDI ($)",
+        "beneficio_fijos": "Benef. fijos ($)",
+        "benef_notas_jordi": "Benef. notas JORDI ($)",
         "total_resta": "Total resta ($)",
-        "pago_jep": "Pago JEP ($)",
-        "total_suma": "Total suma ($)",
+        "pago_jep": "Intereses JEP ($)",
         "variacion_neta": "Variación neta ($)",
         "saldo_fin": "Saldo fin mes ($)",
     })
 
-    def color_variacion_col(series):
+    def color_col(series):
         return [
             ("color: green; font-weight: bold" if v < 0 else ("color: red; font-weight: bold" if v > 0 else ""))
             for v in series
@@ -5349,16 +5408,15 @@ def seccion_deuda_jordi():
         tabla.style
         .format({
             "Saldo inicio ($)": "${:,.2f}",
-            "Beneficio fijos ($)": "${:,.2f}",
-            "Cobro notas JORDI ($)": "${:,.2f}",
+            "Benef. fijos ($)": "${:,.2f}",
+            "Benef. notas JORDI ($)": "${:,.2f}",
             "Total resta ($)": "${:,.2f}",
-            "Pago JEP ($)": "${:,.2f}",
-            "Total suma ($)": "${:,.2f}",
+            "Intereses JEP ($)": "${:,.2f}",
             "Variación neta ($)": "${:,.2f}",
             "Saldo fin mes ($)": "${:,.2f}",
         })
-        .apply(color_variacion_col, subset=["Variación neta ($)"])
-        .apply(color_variacion_col, subset=["Saldo fin mes ($)"])
+        .apply(color_col, subset=["Variación neta ($)"])
+        .apply(color_col, subset=["Saldo fin mes ($)"])
     )
 
     st.dataframe(styled, use_container_width=True, hide_index=True)
