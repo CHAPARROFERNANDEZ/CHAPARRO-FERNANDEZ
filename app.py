@@ -5702,24 +5702,40 @@ def seccion_asistente_ia_fondo():
         mes_pregunta = next((v for k,v in meses_map.items() if k in p), mes_hoy)
         anio_pregunta = anio_hoy
 
+        # Calcular resumen dashboard al inicio para usarlo en todos los bloques
+        try:
+            resumen_dash = obtener_resumen_dashboard(
+                df_inv, df_cal, df_control,
+                anio=anio_pregunta, mes=mes_pregunta,
+                vista_activo="General", incluir_chaparro=True
+            )
+        except Exception:
+            resumen_dash = {}
+
         lineas = [
             f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
             f"Mes de referencia: {mes_pregunta}/{anio_pregunta}",
             "",
             "FUENTE DE DATOS:",
             "- Intereses pagados a inversores → lógica EXTRACTOS (solo operaciones NUEVA y CANCELADA, sin reinversiones)",
-            "- Ingresos y beneficio empresa → lógica DASHBOARD (detalle_activo_mes + resumen_notas_mes)",
-            "- Capital activo → lógica CENTRO DE CONTROL (capital_activo_en_fecha)",
+            "- Ingresos y beneficio empresa → lógica DASHBOARD (obtener_resumen_dashboard, incluir_chaparro=True)",
+            "- Capital activo → capital_activo_en_fecha + obtener_resumen_dashboard",
         ]
 
         # ══════════════════════════════════════════════════════════════════════
         # 1. CAPITAL ACTIVO HOY — fuente: capital_activo_en_fecha (Centro de control)
         # ══════════════════════════════════════════════════════════════════════
         try:
-            lineas.append(f"\n=== CAPITAL ACTIVO HOY (fuente: Centro de control) ===")
-            cap_total = capital_activo_en_fecha(df_inv, hoy)
-            lineas.append(f"TOTAL FONDO: ${cap_total:,.2f}")
-            # Notas: filtrar por tipo_inversion=="nota" (no por subtipo)
+            lineas.append(f"\n=== CAPITAL ACTIVO HOY ===")
+            # Total con Chaparro Fernández incluido (igual que Dashboard con checkbox activado)
+            cap_con_chaparro = resumen_dash.get("capital_total", 0.0)
+            # Total sin Chaparro Fernández (igual que Centro de control por defecto)
+            df_sin_cf = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro=False)
+            cap_sin_chaparro = capital_activo_en_fecha(df_sin_cf, hoy)
+            lineas.append(f"TOTAL FONDO (CON Chaparro Fernández, como Dashboard): ${cap_con_chaparro:,.2f}")
+            lineas.append(f"TOTAL FONDO (SIN Chaparro Fernández, como Centro de control): ${cap_sin_chaparro:,.2f}")
+
+            # Desglose por activo (con Chaparro incluido)
             df_notas_cap = df_inv[df_inv["tipo_inversion"].astype(str).str.lower().str.strip() == "nota"]
             cap_notas = capital_activo_en_fecha(df_notas_cap, hoy)
             lineas.append(f"  NOTAS: ${cap_notas:,.2f}")
@@ -5727,22 +5743,20 @@ def seccion_asistente_ia_fondo():
                 cap = capital_activo_en_fecha(df_inv, hoy, activo)
                 lineas.append(f"  {activo.upper()}: ${cap:,.2f}")
 
-            # Capital activo por inversor (mismo filtro que Centro de control)
-            lineas.append("\nCapital activo por inversor:")
+            # Capital activo por inversor
+            lineas.append("\nCapital activo por inversor (todos, incluyendo Chaparro Fernández):")
             df_cap = df_inv.copy()
             df_cap["fecha_inversion"] = pd.to_datetime(df_cap.get("fecha_inversion"), errors="coerce", dayfirst=True)
             df_cap["fecha_final_inversion"] = pd.to_datetime(df_cap.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
             df_cap["capital_invertido"] = pd.to_numeric(df_cap.get("capital_invertido"), errors="coerce").fillna(0)
             df_cap["tipo_op_n"] = df_cap["tipo_operacion"].astype(str).str.strip().str.upper()
-            df_cap["tipo_inv_n"] = df_cap["tipo_inversion"].astype(str).str.strip().str.lower()
             activas_cc = df_cap[
                 (df_cap["fecha_inversion"].notna()) &
                 (df_cap["fecha_inversion"] <= hoy) &
                 (df_cap["fecha_final_inversion"].isna() | (df_cap["fecha_final_inversion"] >= hoy))
             ].copy()
-            es_nota = activas_cc["tipo_inv_n"] == "nota"
             es_cancelada = activas_cc["tipo_op_n"] == "CANCELADA"
-            activas_cc = activas_cc[~es_cancelada]  # igual que inversiones_activas_global: excluir canceladas en todos
+            activas_cc = activas_cc[~es_cancelada]
             cap_por_inv = activas_cc.groupby("inversor")["capital_invertido"].sum().sort_values(ascending=False)
             for inv, cap in cap_por_inv.items():
                 lineas.append(f"  {inv}: ${cap:,.2f}")
@@ -5845,11 +5859,6 @@ def seccion_asistente_ia_fondo():
         # 3. INGRESOS EMPRESA DEL MES — fuente: obtener_resumen_dashboard (EXACTAMENTE igual que el Dashboard)
         # ══════════════════════════════════════════════════════════════════════
         try:
-            resumen_dash = obtener_resumen_dashboard(
-                df_inv, df_cal, df_control,
-                anio=anio_pregunta, mes=mes_pregunta,
-                vista_activo="General", incluir_chaparro=True
-            )
             cobro_total   = resumen_dash.get("cobro_total_mes", 0.0)
             pago_total    = resumen_dash.get("pago_total_mes", 0.0)
             benef_total   = resumen_dash.get("beneficio_total_mes", 0.0)
