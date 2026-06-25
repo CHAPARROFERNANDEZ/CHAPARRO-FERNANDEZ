@@ -5984,22 +5984,23 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"[Error históricos: {e}]")
 
         # ══════════════════════════════════════════════════════════════════════
-        # 6. EXTRACTO ACUMULADO POR INVERSOR (fuente: generar_extractos — igual que botón de extracto)
-        #    Para responder: ¿cuánto hemos pagado a X hasta esta fecha?
+        # 6. EXTRACTO ACUMULADO POR INVERSOR — loop directo mes a mes
+        #    NOTA: generar_extractos() devuelve lista de tuplas (nombre, bytes, bytes),
+        #    NO un DataFrame. Por eso replicamos el loop directamente aquí.
+        #    Misma lógica que bloque 2 (intereses del mes) pero iterando todos los meses.
         # ══════════════════════════════════════════════════════════════════════
         try:
-            # Detectar mes límite en la pregunta (ej: "hasta el 31/05" → mes 5)
+            import re as _re
+            # Detectar mes límite en la pregunta (ej: "hasta mayo" → mes 5, "hasta el 31/05" → mes 5)
             meses_map2 = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
                          "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
             mes_limite = next((v for k,v in meses_map2.items() if k in p), mes_hoy)
             anio_limite = anio_hoy
-            # Si mencionan un número de mes tipo "31/05" o "05/2026"
-            import re as _re
-            match_mes = _re.search(r'(\d{1,2})[/\-](\d{2,4})', p)
+            match_mes = _re.search(r'(\d{1,2})[/\-](\d{4})', p)
             if match_mes:
                 try:
                     mes_limite = int(match_mes.group(1))
-                    anio_limite = int(match_mes.group(2)) if len(match_mes.group(2)) == 4 else anio_hoy
+                    anio_limite = int(match_mes.group(2))
                 except:
                     pass
 
@@ -6012,33 +6013,112 @@ def seccion_asistente_ia_fondo():
                     inversor_pregunta = inv
                     break
 
+            # Preparar DataFrame base (misma lógica que bloque 2: solo NUEVA y CANCELADA)
+            df_acum = df_inv.copy()
+            for col in ["inversor","tipo_inversion","subtipo_inversion","nombre_activo","tipo_operacion","id_inversion"]:
+                if col in df_acum.columns:
+                    df_acum[col] = df_acum[col].fillna("").astype(str).str.strip()
+            df_acum["tipo_op_n"] = df_acum["tipo_operacion"].str.upper()
+            df_acum = df_acum[df_acum["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
+            df_acum["fecha_inversion"] = pd.to_datetime(df_acum.get("fecha_inversion"), errors="coerce", dayfirst=True)
+            df_acum["fecha_final_inversion"] = pd.to_datetime(df_acum.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
+            df_acum["capital_invertido"] = pd.to_numeric(df_acum.get("capital_invertido"), errors="coerce").fillna(0)
+            df_acum["interes_inversor_anual"] = pd.to_numeric(df_acum.get("interes_inversor_anual"), errors="coerce").fillna(0)
+
             if inversor_pregunta:
-                # generar_extractos devuelve DataFrame — usar directamente
-                df_ext = generar_extractos(df_inv, "Un inversor", inversor_pregunta, anio_limite, mes_limite)
-                if isinstance(df_ext, pd.DataFrame) and not df_ext.empty:
-                    lineas.append(f"\n=== EXTRACTO ACUMULADO {inversor_pregunta} hasta {mes_limite}/{anio_limite} (fuente: generar_extractos) ===")
-                    total_int_acum = pd.to_numeric(df_ext["interes_mes"], errors="coerce").fillna(0).sum()
-                    capital_actual = pd.to_numeric(df_ext["capital_invertido"], errors="coerce").fillna(0).max()
-                    # Mostrar resumen por mes (agrupado)
-                    resumen_mes = df_ext.groupby("mes")["interes_mes"].sum()
-                    for mes_k, int_k in resumen_mes.items():
-                        lineas.append(f"  {mes_k}: ${float(int_k):,.2f}")
-                    lineas.append(f"  >> CAPITAL ACTUAL {inversor_pregunta}: ${float(capital_actual):,.2f}")
-                    lineas.append(f"  >> TOTAL INTERESES ACUMULADOS {inversor_pregunta} hasta {mes_limite}/{anio_limite}: ${float(total_int_acum):,.2f}")
-                elif isinstance(df_ext, list) and df_ext:
-                    # fallback si devuelve lista
-                    lineas.append(f"\n=== EXTRACTO ACUMULADO {inversor_pregunta} hasta {mes_limite}/{anio_limite} ===")
-                    total_int_acum = sum(float(f.get("interes_mes", 0) or 0) for f in df_ext)
-                    lineas.append(f"  >> TOTAL INTERESES ACUMULADOS: ${total_int_acum:,.2f}")
+                df_acum = df_acum[df_acum["inversor"].str.upper() == inversor_pregunta.upper()].copy()
+
+            INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+            CORTE_TRAMO_A = datetime(2026, 2, 1)
+            fin_tramo1_a = datetime(2026, 1, 31)
+
+            # Determinar fecha inicio mínima del fondo
+            fecha_inicio_fondo = df_acum["fecha_inversion"].dropna().min()
+            if pd.isna(fecha_inicio_fondo):
+                fecha_inicio_fondo = datetime(2025, 9, 1)
             else:
-                # Sin inversor concreto: resumen de todos hasta mes_limite
-                lineas.append(f"\n=== RESUMEN INTERESES ACUMULADOS POR INVERSOR hasta {mes_limite}/{anio_limite} (fuente: generar_extractos) ===")
-                df_todos = generar_extractos(df_inv, "Todos", None, anio_limite, mes_limite)
-                if isinstance(df_todos, pd.DataFrame) and not df_todos.empty:
-                    resumen = df_todos.groupby("inversor")["interes_mes"].sum().sort_values(ascending=False)
-                    for inv, total in resumen.items():
+                fecha_inicio_fondo = fecha_inicio_fondo.to_pydatetime()
+            mes_inicio = fecha_inicio_fondo.month
+            anio_inicio = fecha_inicio_fondo.year
+
+            # Iterar todos los meses desde inicio hasta mes_limite/anio_limite
+            filas_acum = []
+            anio_iter, mes_iter = anio_inicio, mes_inicio
+            while (anio_iter, mes_iter) <= (anio_limite, mes_limite):
+                dias_mes_a = ultimo_dia_mes(anio_iter, mes_iter)
+                fecha_corte_a = datetime(anio_iter, mes_iter, dias_mes_a)
+                inicio_mes_a = datetime(anio_iter, mes_iter, 1)
+                fin_mes_a = datetime(anio_iter, mes_iter, dias_mes_a)
+
+                for _, row in df_acum.iterrows():
+                    fi = row.get("fecha_inversion")
+                    if pd.isna(fi):
+                        continue
+                    fi_dt = fi.to_pydatetime()
+                    tipo_op = row["tipo_op_n"]
+                    ff = row.get("fecha_final_inversion")
+                    if tipo_op == "CANCELADA":
+                        if pd.isna(ff):
+                            continue
+                        fecha_fin_dt = min(ff.to_pydatetime(), fecha_corte_a)
+                    else:
+                        fecha_fin_dt = fecha_corte_a
+
+                    inicio_calc = max(fi_dt, inicio_mes_a)
+                    fin_calc = min(fecha_fin_dt, fin_mes_a)
+                    if inicio_calc > fin_calc:
+                        continue
+
+                    dias = (fin_calc - inicio_calc).days + 1
+                    capital = float(row["capital_invertido"])
+                    tasa = float(row["interes_inversor_anual"])
+                    inv_upper = str(row.get("inversor","")).strip().upper()
+
+                    if inv_upper in INVERSORES_TRAMO:
+                        interes_mes = 0.0
+                        if inicio_calc <= fin_tramo1_a:
+                            fin_t1 = min(fin_calc, fin_tramo1_a)
+                            dias_t1 = (fin_t1 - inicio_calc).days + 1
+                            interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_a, 2)
+                        if fin_calc >= CORTE_TRAMO_A:
+                            ini_t2 = max(inicio_calc, CORTE_TRAMO_A)
+                            dias_t2 = (fin_calc - ini_t2).days + 1
+                            interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_a, 2)
+                    else:
+                        interes_mes = round((capital * tasa / 12) * dias / dias_mes_a, 2)
+
+                    filas_acum.append({
+                        "inversor": str(row.get("inversor","")),
+                        "mes": f"{mes_iter:02d}/{anio_iter}",
+                        "capital": capital,
+                        "interes_mes": interes_mes,
+                    })
+
+                # Avanzar mes
+                if mes_iter == 12:
+                    mes_iter, anio_iter = 1, anio_iter + 1
+                else:
+                    mes_iter += 1
+
+            if filas_acum:
+                df_ac = pd.DataFrame(filas_acum)
+                if inversor_pregunta:
+                    lineas.append(f"\n=== EXTRACTO ACUMULADO {inversor_pregunta} hasta {mes_limite:02d}/{anio_limite} ===")
+                    por_mes = df_ac.groupby("mes")["interes_mes"].sum()
+                    for mes_k, int_k in por_mes.items():
+                        lineas.append(f"  {mes_k}: ${float(int_k):,.2f}")
+                    total_acum = float(df_ac["interes_mes"].sum())
+                    cap_actual = float(df_ac["capital"].max())
+                    lineas.append(f"  >> CAPITAL ACTUAL: ${cap_actual:,.2f}")
+                    lineas.append(f"  >> TOTAL INTERESES ACUMULADOS: ${total_acum:,.2f}")
+                else:
+                    lineas.append(f"\n=== RESUMEN INTERESES ACUMULADOS POR INVERSOR hasta {mes_limite:02d}/{anio_limite} ===")
+                    por_inv = df_ac.groupby("inversor")["interes_mes"].sum().sort_values(ascending=False)
+                    for inv, total in por_inv.items():
                         lineas.append(f"  {inv}: ${float(total):,.2f}")
-                    lineas.append(f"  >> GRAN TOTAL INTERESES: ${float(resumen.sum()):,.2f}")
+                    lineas.append(f"  >> GRAN TOTAL INTERESES: ${float(por_inv.sum()):,.2f}")
+            else:
+                lineas.append(f"\n=== EXTRACTO ACUMULADO: Sin datos para el período solicitado ===")
         except Exception as e:
             lineas.append(f"[Error extracto acumulado: {e}]")
 
@@ -6103,7 +6183,7 @@ def seccion_asistente_ia_fondo():
                     contenido = []
                     for nombre_pdf, pdf_b64 in pdfs_sel.items():
                         contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
-                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:12000]}\n\n---\nPREGUNTA: {ultima}"})
+                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:20000]}\n\n---\nPREGUNTA: {ultima}"})
 
                     # Solo los últimos 2 turnos del historial (sin datos pesados)
                     historial = []
@@ -6118,7 +6198,39 @@ def seccion_asistente_ia_fondo():
                     resp = _req_ia.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
                         json={"model":"claude-sonnet-4-5","max_tokens":2000,
-                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
+                              "system": """Eres el asistente financiero de Chaparro Fernández Wealth Management. Respondes con total precisión usando ÚNICAMENTE los datos del contexto que se te proporciona.
+
+== LAS 3 FUENTES DE DATOS — USA SIEMPRE LA CORRECTA ==
+
+FUENTE 1 — COBROS DE NOTAS Y FECHAS (sección CALENDARIO NOTAS del contexto):
+  Usa esta fuente para: ¿cuánto cobraremos de notas este mes? ¿cuándo es el próximo cobro? ¿qué cobros hay entre fecha X e Y? ¿cuándo es el próximo call u observación?
+  Los importes ya están calculados en el calendario. No los recalcules tú.
+
+FUENTE 2 — INTERESES A INVERSORES / LO QUE PAGAMOS NOSOTROS (secciones INTERESES A PAGAR A INVERSORES y EXTRACTO ACUMULADO del contexto):
+  Usa esta fuente para: ¿cuánto cobra PAM este mes? ¿cuánto hemos pagado a JEP desde el inicio? ¿cuánto pagaremos a todos los inversores en junio? ¿intereses acumulados de un inversor?
+  Estos importes vienen de la lógica de extractos (solo operaciones NUEVA y CANCELADA).
+
+FUENTE 3 — CAPITAL ACTIVO (sección CAPITAL ACTIVO HOY del contexto):
+  Usa esta fuente para: ¿cuánto capital tenemos activo? ¿cuánto tiene invertido cada inversor? ¿cuál es el capital total del fondo?
+
+== REGLA DE ORO ==
+NUNCA inventes ni calcules por tu cuenta si el dato ya está en el contexto. Lee el dato directamente y respóndelo.
+Si el dato no está en el contexto, dilo claramente en lugar de inventarlo.
+
+== ESTRUCTURA DEL NEGOCIO ==
+El fondo capta capital de inversores, lo invierte en activos (notas estructuradas, Paraguay, Bolivia, MotoClick, Fútbol, Bitcoin) y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.
+
+== INVERSORES Y TASAS ==
+LEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%
+ROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+CROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%
+CHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago
+GOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%
+JORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%
+
+== FORMATO ==
+Responde SIEMPRE en español. Da el dato pedido directamente y de forma concisa. Fechas DD/MM/YYYY, importes con $ y 2 decimales.""",
                               "messages":historial},timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
