@@ -569,6 +569,16 @@ def health():
     return {"status": "ok", "servicio": "CF Wealth WhatsApp Bot"}
 
 
+
+@app.route("/debug", methods=["GET"])
+def debug():
+    return {
+        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "VACIA")[:10] + "...",
+        "TWILIO_AUTH_TOKEN": os.environ.get("TWILIO_AUTH_TOKEN", "VACIA")[:5] + "...",
+        "GDRIVE_FILE_ID": os.environ.get("GDRIVE_FILE_ID", "VACIA"),
+    }
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
