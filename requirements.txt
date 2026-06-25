@@ -5,3 +5,8 @@ requests
 plotly
 yfinance
 reportlab
+flask
+PyJWT
+cryptography
+twilio
+gunicorn
