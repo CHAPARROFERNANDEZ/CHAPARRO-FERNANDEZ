@@ -5880,82 +5880,76 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"[Error ingresos empresa: {e}]")
 
         # ══════════════════════════════════════════════════════════════════════
-        # 4. NOTAS: CALENDARIO COMPLETO + ESTADO DE RIESGO
-        #    Fuente: df_cal (igual que sección Alertas/Calendario de la app)
+        # 4. NOTAS: CALENDARIO INTEGRADO
+        #    Fuente: preparar_calendario_integrado_notas() — EXACTAMENTE igual que Alertas/Calendario
+        #    Incluye monto_cobro calculado correctamente por cada nota
         # ══════════════════════════════════════════════════════════════════════
         try:
-            if df_cal is not None and not df_cal.empty:
-                df_c2 = df_cal.copy()
-                df_c2["fecha"] = pd.to_datetime(df_c2["fecha"], errors="coerce")
-                cols_c = [c for c in ["fecha","nota","tipo_evento","importe_cobro","importe_pago_inversor","observacion","resultado"] if c in df_c2.columns]
+            hoy_ts = pd.Timestamp.today().normalize()
+            limite_180 = hoy_ts + pd.Timedelta(days=180)
+            df_calls_ctx = leer_hoja_excel("CALENDARIO_CALLS")
+            cal_integrado = preparar_calendario_integrado_notas(
+                df_inv=df_inv,
+                df_cal=df_cal,
+                df_control=df_control,
+                df_calls=df_calls_ctx,
+                fecha_inicio=hoy_ts,
+                fecha_fin=limite_180,
+            )
 
-                # Eventos pasados y futuros del mes de referencia
-                inicio_mes = pd.Timestamp(anio_pregunta, mes_pregunta, 1)
-                fin_mes = inicio_mes + pd.offsets.MonthEnd(0)
-                eventos_mes = df_c2[(df_c2["fecha"] >= inicio_mes) & (df_c2["fecha"] <= fin_mes)].sort_values("fecha")
-                lineas.append(f"\n=== CALENDARIO NOTAS {mes_pregunta}/{anio_pregunta} (fuente: Alertas/Calendario) ===")
-                if not eventos_mes.empty:
-                    lineas.append(eventos_mes[cols_c].to_string(index=False))
-                    # Totales del mes
-                    tot_cobro = pd.to_numeric(eventos_mes.get("importe_cobro", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
-                    tot_pago_inv = pd.to_numeric(eventos_mes.get("importe_pago_inversor", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
-                    lineas.append(f"  >> TOTAL COBRO COMPAÑÍA EN NOTAS {mes_pregunta}/{anio_pregunta}: ${tot_cobro:,.2f}")
-                    lineas.append(f"  >> TOTAL PAGO INVERSORES NOTAS {mes_pregunta}/{anio_pregunta}: ${tot_pago_inv:,.2f}")
-                else:
-                    lineas.append("Sin eventos de notas en ese mes.")
+            lineas.append(f"\n=== CALENDARIO INTEGRADO PRÓXIMOS 180 DÍAS (fuente: Alertas/Calendario, misma lógica que pantalla) ===")
 
-                # ── PRÓXIMO COBRO (el más cercano a partir de hoy) ────────────────
-                cobros_futuros = df_c2[
-                    (df_c2["fecha"] >= hoy) &
-                    (df_c2["tipo_evento"].astype(str).str.upper() == "COBRO")
-                ].sort_values("fecha")
-                lineas.append(f"\n=== PRÓXIMO COBRO DE NOTAS ===")
-                if not cobros_futuros.empty:
-                    prox = cobros_futuros.iloc[0]
-                    importe_prox = pd.to_numeric(prox.get("importe_cobro", 0), errors="coerce") or 0
+            if cal_integrado.empty:
+                lineas.append("  Sin eventos en los próximos 180 días.")
+            else:
+                # Tabla completa
+                cols_show = [c for c in ["fecha","tipo_evento","nota","estado","monto_cobro","detalle"] if c in cal_integrado.columns]
+                lineas.append(cal_integrado[cols_show].to_string(index=False))
+
+                # ── PRÓXIMO PAGO (cobro de la compañía) ──────────────────────────
+                pagos = cal_integrado[
+                    (cal_integrado["tipo_evento"] == "PAGO") &
+                    (pd.to_numeric(cal_integrado.get("monto_cobro", pd.Series(dtype=float)), errors="coerce").fillna(0) > 0)
+                ].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
+
+                lineas.append(f"\n=== PRÓXIMO COBRO DE NOTAS (PAGO con importe > 0) ===")
+                if not pagos.empty:
+                    prox = pagos.iloc[0]
                     lineas.append(f"  FECHA: {pd.Timestamp(prox['fecha']).strftime('%d/%m/%Y')}")
                     lineas.append(f"  NOTA: {prox.get('nota','')}")
-                    lineas.append(f"  IMPORTE COBRO COMPAÑÍA: ${importe_prox:,.2f}")
-                    if len(cobros_futuros) > 1:
-                        sig = cobros_futuros.iloc[1]
-                        importe_sig = pd.to_numeric(sig.get("importe_cobro", 0), errors="coerce") or 0
-                        lineas.append(f"  SIGUIENTE COBRO: {pd.Timestamp(sig['fecha']).strftime('%d/%m/%Y')} | {sig.get('nota','')} | ${importe_sig:,.2f}")
+                    lineas.append(f"  IMPORTE: ${float(prox.get('monto_cobro', 0)):,.2f}")
+                    lineas.append(f"  ESTADO: {prox.get('estado','')}")
+                    if len(pagos) > 1:
+                        sig = pagos.iloc[1]
+                        lineas.append(f"  SIGUIENTE: {pd.Timestamp(sig['fecha']).strftime('%d/%m/%Y')} | Nota {sig.get('nota','')} | ${float(sig.get('monto_cobro',0)):,.2f}")
+                    # Total cobros próximos 30 días
+                    hoy_30 = hoy_ts + pd.Timedelta(days=30)
+                    pagos_30 = pagos[pd.to_datetime(pagos["fecha"]) <= hoy_30]
+                    if not pagos_30.empty:
+                        tot_30 = pd.to_numeric(pagos_30["monto_cobro"], errors="coerce").fillna(0).sum()
+                        lineas.append(f"  >> TOTAL COBROS PRÓXIMOS 30 DÍAS: ${tot_30:,.2f}")
+                    tot_180 = pd.to_numeric(pagos["monto_cobro"], errors="coerce").fillna(0).sum()
+                    lineas.append(f"  >> TOTAL COBROS PRÓXIMOS 180 DÍAS: ${tot_180:,.2f}")
                 else:
-                    lineas.append("  Sin cobros futuros en el calendario.")
+                    lineas.append("  Sin pagos con importe > 0 en los próximos 180 días.")
 
                 # ── PRÓXIMA OBSERVACIÓN POR NOTA ─────────────────────────────────
-                obs_futuras = df_c2[
-                    (df_c2["fecha"] >= hoy) &
-                    (df_c2["tipo_evento"].astype(str).str.upper() == "OBSERVACION")
-                ].sort_values("fecha")
+                obs = cal_integrado[cal_integrado["tipo_evento"] == "OBSERVACION"].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
                 lineas.append(f"\n=== PRÓXIMA OBSERVACIÓN POR NOTA ===")
-                if not obs_futuras.empty:
-                    notas_obs = obs_futuras.groupby("nota").first().reset_index()
-                    for _, r in notas_obs.iterrows():
-                        lineas.append(f"  {r.get('nota','')}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')}")
+                if not obs.empty:
+                    for nota_id, grupo in obs.groupby("nota"):
+                        prox_obs = grupo.iloc[0]
+                        lineas.append(f"  Nota {nota_id}: {pd.Timestamp(prox_obs['fecha']).strftime('%d/%m/%Y')} | Estado: {prox_obs.get('estado','')}")
                 else:
-                    lineas.append("  Sin observaciones futuras en el calendario.")
+                    lineas.append("  Sin observaciones futuras.")
 
-                # ── PRÓXIMO CALL / VENCIMIENTO POR NOTA ──────────────────────────
-                calls_futuros = df_c2[
-                    (df_c2["fecha"] >= hoy) &
-                    (df_c2["tipo_evento"].astype(str).str.upper().isin(["CALL","VENCIMIENTO"]))
-                ].sort_values("fecha")
-                if not calls_futuros.empty:
+                # ── PRÓXIMOS CALLS ────────────────────────────────────────────────
+                calls_cal = cal_integrado[cal_integrado["tipo_evento"] == "CALL"].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
+                if not calls_cal.empty:
                     lineas.append(f"\n=== PRÓXIMOS CALLS / VENCIMIENTOS ===")
-                    for _, r in calls_futuros.head(10).iterrows():
-                        lineas.append(f"  {r.get('nota','')}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')} ({r.get('tipo_evento','')})")
+                    for _, r in calls_cal.head(10).iterrows():
+                        lineas.append(f"  Nota {r.get('nota','')}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')}")
 
-                # ── TODOS LOS EVENTOS PRÓXIMOS 180 DÍAS (tabla completa) ──────────
-                limite_180 = hoy + pd.Timedelta(days=180)
-                proximos = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["fecha"] <= limite_180)].sort_values("fecha")
-                lineas.append(f"\n=== TODOS LOS EVENTOS PRÓXIMOS 180 DÍAS ===")
-                if not proximos.empty:
-                    lineas.append(proximos[cols_c].to_string(index=False))
-                    tot_cobro_180 = pd.to_numeric(proximos["importe_cobro"] if "importe_cobro" in proximos.columns else pd.Series(dtype=float), errors="coerce").fillna(0).sum()
-                    lineas.append(f"  >> TOTAL COBRO COMPAÑÍA PRÓXIMOS 180 DÍAS: ${tot_cobro_180:,.2f}")
-                else:
-                    lineas.append("Sin eventos próximos en 180 días.")
         except Exception as e:
             lineas.append(f"[Error calendario notas: {e}]")
 
