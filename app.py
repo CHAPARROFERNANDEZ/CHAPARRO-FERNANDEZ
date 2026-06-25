@@ -5904,10 +5904,52 @@ def seccion_asistente_ia_fondo():
                 else:
                     lineas.append("Sin eventos de notas en ese mes.")
 
-                # Próximos 180 días (independiente del mes preguntado) — para rangos personalizados
+                # ── PRÓXIMO COBRO (el más cercano a partir de hoy) ────────────────
+                cobros_futuros = df_c2[
+                    (df_c2["fecha"] >= hoy) &
+                    (df_c2["tipo_evento"].astype(str).str.upper() == "COBRO")
+                ].sort_values("fecha")
+                lineas.append(f"\n=== PRÓXIMO COBRO DE NOTAS ===")
+                if not cobros_futuros.empty:
+                    prox = cobros_futuros.iloc[0]
+                    importe_prox = pd.to_numeric(prox.get("importe_cobro", 0), errors="coerce") or 0
+                    lineas.append(f"  FECHA: {pd.Timestamp(prox['fecha']).strftime('%d/%m/%Y')}")
+                    lineas.append(f"  NOTA: {prox.get('nota','')}")
+                    lineas.append(f"  IMPORTE COBRO COMPAÑÍA: ${importe_prox:,.2f}")
+                    if len(cobros_futuros) > 1:
+                        sig = cobros_futuros.iloc[1]
+                        importe_sig = pd.to_numeric(sig.get("importe_cobro", 0), errors="coerce") or 0
+                        lineas.append(f"  SIGUIENTE COBRO: {pd.Timestamp(sig['fecha']).strftime('%d/%m/%Y')} | {sig.get('nota','')} | ${importe_sig:,.2f}")
+                else:
+                    lineas.append("  Sin cobros futuros en el calendario.")
+
+                # ── PRÓXIMA OBSERVACIÓN POR NOTA ─────────────────────────────────
+                obs_futuras = df_c2[
+                    (df_c2["fecha"] >= hoy) &
+                    (df_c2["tipo_evento"].astype(str).str.upper() == "OBSERVACION")
+                ].sort_values("fecha")
+                lineas.append(f"\n=== PRÓXIMA OBSERVACIÓN POR NOTA ===")
+                if not obs_futuras.empty:
+                    notas_obs = obs_futuras.groupby("nota").first().reset_index()
+                    for _, r in notas_obs.iterrows():
+                        lineas.append(f"  {r.get('nota','')}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')}")
+                else:
+                    lineas.append("  Sin observaciones futuras en el calendario.")
+
+                # ── PRÓXIMO CALL / VENCIMIENTO POR NOTA ──────────────────────────
+                calls_futuros = df_c2[
+                    (df_c2["fecha"] >= hoy) &
+                    (df_c2["tipo_evento"].astype(str).str.upper().isin(["CALL","VENCIMIENTO"]))
+                ].sort_values("fecha")
+                if not calls_futuros.empty:
+                    lineas.append(f"\n=== PRÓXIMOS CALLS / VENCIMIENTOS ===")
+                    for _, r in calls_futuros.head(10).iterrows():
+                        lineas.append(f"  {r.get('nota','')}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')} ({r.get('tipo_evento','')})")
+
+                # ── TODOS LOS EVENTOS PRÓXIMOS 180 DÍAS (tabla completa) ──────────
                 limite_180 = hoy + pd.Timedelta(days=180)
                 proximos = df_c2[(df_c2["fecha"] >= hoy) & (df_c2["fecha"] <= limite_180)].sort_values("fecha")
-                lineas.append(f"\n=== TODOS LOS EVENTOS NOTAS PRÓXIMOS 180 DÍAS (para consultas de rango personalizado) ===")
+                lineas.append(f"\n=== TODOS LOS EVENTOS PRÓXIMOS 180 DÍAS ===")
                 if not proximos.empty:
                     lineas.append(proximos[cols_c].to_string(index=False))
                     tot_cobro_180 = pd.to_numeric(proximos["importe_cobro"] if "importe_cobro" in proximos.columns else pd.Series(dtype=float), errors="coerce").fillna(0).sum()
