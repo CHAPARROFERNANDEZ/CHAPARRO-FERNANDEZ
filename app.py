@@ -6020,151 +6020,112 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"[Error históricos: {e}]")
 
         # ══════════════════════════════════════════════════════════════════════
-        # 6. EXTRACTO ACUMULADO POR INVERSOR — loop directo mes a mes
-        #    NOTA: generar_extractos() devuelve lista de tuplas (nombre, bytes, bytes),
-        #    NO un DataFrame. Por eso replicamos el loop directamente aquí.
-        #    Misma lógica que bloque 2 (intereses del mes) pero iterando todos los meses.
+        # 6. EXTRACTO ACUMULADO — PRE-CALCULADO PARA TODOS LOS INVERSORES
+        #    Se calcula de 2025 hasta hoy para TODOS, sin esperar a que el IA
+        #    detecte el inversor. Así el IA solo lee, nunca calcula.
         # ══════════════════════════════════════════════════════════════════════
         try:
-            import re as _re
-            # Detectar mes y año límite en la pregunta
-            meses_map2 = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-                         "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
-            mes_limite = next((v for k,v in meses_map2.items() if k in p), mes_hoy)
-            anio_limite = anio_hoy
+            df_ext = df_inv.copy()
+            for col in ["inversor","tipo_operacion"]:
+                if col in df_ext.columns:
+                    df_ext[col] = df_ext[col].fillna("").astype(str).str.strip()
+            df_ext["tipo_op_n"] = df_ext["tipo_operacion"].str.upper()
+            df_ext = df_ext[df_ext["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
+            df_ext["fecha_inversion"]        = pd.to_datetime(df_ext.get("fecha_inversion"), errors="coerce", dayfirst=True)
+            df_ext["fecha_final_inversion"]  = pd.to_datetime(df_ext.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
+            df_ext["capital_invertido"]      = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
+            df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-            # Detectar año explícito en la pregunta (ej: "en 2025", "del 2025", "año 2025")
-            match_anio = _re.search(r'\b(202[0-9])\b', p)
-            if match_anio:
-                anio_limite = int(match_anio.group(1))
-                # Si mencionan un año pero no un mes específico, asumir diciembre de ese año
-                if not any(k in p for k in meses_map2.keys()):
-                    mes_limite = 12
+            TRAMO_INV_E = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+            CORTE_T_E   = datetime(2026, 2, 1)
+            FIN_T1_E    = datetime(2026, 1, 31)
 
-            # Detectar formato fecha DD/MM/YYYY
-            match_mes = _re.search(r'(\d{1,2})[/\-](\d{4})', p)
-            if match_mes:
-                try:
-                    mes_limite = int(match_mes.group(1))
-                    anio_limite = int(match_mes.group(2))
-                except:
-                    pass
-
-            # Detectar inversor mencionado en la pregunta
-            inversores_conocidos = df_inv["inversor"].dropna().unique().tolist() if df_inv is not None and not df_inv.empty else []
-            inversor_pregunta = None
-            p_upper = p.upper()
-            for inv in inversores_conocidos:
-                if inv.upper() in p_upper or any(part in p_upper for part in inv.upper().split() if len(part) > 3):
-                    inversor_pregunta = inv
-                    break
-
-            # Preparar DataFrame base (misma lógica que bloque 2: solo NUEVA y CANCELADA)
-            df_acum = df_inv.copy()
-            for col in ["inversor","tipo_inversion","subtipo_inversion","nombre_activo","tipo_operacion","id_inversion"]:
-                if col in df_acum.columns:
-                    df_acum[col] = df_acum[col].fillna("").astype(str).str.strip()
-            df_acum["tipo_op_n"] = df_acum["tipo_operacion"].str.upper()
-            df_acum = df_acum[df_acum["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
-            df_acum["fecha_inversion"] = pd.to_datetime(df_acum.get("fecha_inversion"), errors="coerce", dayfirst=True)
-            df_acum["fecha_final_inversion"] = pd.to_datetime(df_acum.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
-            df_acum["capital_invertido"] = pd.to_numeric(df_acum.get("capital_invertido"), errors="coerce").fillna(0)
-            df_acum["interes_inversor_anual"] = pd.to_numeric(df_acum.get("interes_inversor_anual"), errors="coerce").fillna(0)
-
-            if inversor_pregunta:
-                df_acum = df_acum[df_acum["inversor"].str.upper() == inversor_pregunta.upper()].copy()
-
-            INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-            CORTE_TRAMO_A = datetime(2026, 2, 1)
-            fin_tramo1_a = datetime(2026, 1, 31)
-
-            # Determinar fecha inicio mínima del fondo
-            fecha_inicio_fondo = df_acum["fecha_inversion"].dropna().min()
-            if pd.isna(fecha_inicio_fondo):
-                fecha_inicio_fondo = datetime(2025, 9, 1)
+            # Rango: desde el primer mes con inversión hasta hoy
+            fecha_min = df_ext["fecha_inversion"].dropna().min()
+            if pd.isna(fecha_min):
+                fecha_min = datetime(2025, 9, 1)
             else:
-                fecha_inicio_fondo = fecha_inicio_fondo.to_pydatetime()
-            mes_inicio = fecha_inicio_fondo.month
-            anio_inicio = fecha_inicio_fondo.year
+                fecha_min = fecha_min.to_pydatetime()
 
-            # Iterar todos los meses desde inicio hasta mes_limite/anio_limite
-            filas_acum = []
-            anio_iter, mes_iter = anio_inicio, mes_inicio
-            while (anio_iter, mes_iter) <= (anio_limite, mes_limite):
-                dias_mes_a = ultimo_dia_mes(anio_iter, mes_iter)
-                fecha_corte_a = datetime(anio_iter, mes_iter, dias_mes_a)
-                inicio_mes_a = datetime(anio_iter, mes_iter, 1)
-                fin_mes_a = datetime(anio_iter, mes_iter, dias_mes_a)
+            anio_ini_e = fecha_min.year
+            mes_ini_e  = fecha_min.month
+            anio_fin_e = anio_hoy
+            mes_fin_e  = mes_hoy
 
-                for _, row in df_acum.iterrows():
+            # Acumular mes a mes para TODOS los inversores
+            filas_e = []
+            ai_e, mi_e = anio_ini_e, mes_ini_e
+            while (ai_e, mi_e) <= (anio_fin_e, mes_fin_e):
+                dm_e = ultimo_dia_mes(ai_e, mi_e)
+                im_e = datetime(ai_e, mi_e, 1)
+                fm_e = datetime(ai_e, mi_e, dm_e)
+
+                for _, row in df_ext.iterrows():
                     fi = row.get("fecha_inversion")
-                    if pd.isna(fi):
-                        continue
-                    fi_dt = fi.to_pydatetime()
+                    if pd.isna(fi): continue
+                    fi_dt   = fi.to_pydatetime()
                     tipo_op = row["tipo_op_n"]
-                    ff = row.get("fecha_final_inversion")
+                    ff      = row.get("fecha_final_inversion")
                     if tipo_op == "CANCELADA":
-                        if pd.isna(ff):
-                            continue
-                        fecha_fin_dt = min(ff.to_pydatetime(), fecha_corte_a)
+                        if pd.isna(ff): continue
+                        ffd = min(ff.to_pydatetime(), fm_e)
                     else:
-                        fecha_fin_dt = fecha_corte_a
-
-                    inicio_calc = max(fi_dt, inicio_mes_a)
-                    fin_calc = min(fecha_fin_dt, fin_mes_a)
-                    if inicio_calc > fin_calc:
-                        continue
-
-                    dias = (fin_calc - inicio_calc).days + 1
+                        ffd = fm_e
+                    ic = max(fi_dt, im_e)
+                    fc = min(ffd, fm_e)
+                    if ic > fc: continue
+                    dias    = (fc - ic).days + 1
                     capital = float(row["capital_invertido"])
-                    tasa = float(row["interes_inversor_anual"])
-                    inv_upper = str(row.get("inversor","")).strip().upper()
-
-                    if inv_upper in INVERSORES_TRAMO:
-                        interes_mes = 0.0
-                        if inicio_calc <= fin_tramo1_a:
-                            fin_t1 = min(fin_calc, fin_tramo1_a)
-                            dias_t1 = (fin_t1 - inicio_calc).days + 1
-                            interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_a, 2)
-                        if fin_calc >= CORTE_TRAMO_A:
-                            ini_t2 = max(inicio_calc, CORTE_TRAMO_A)
-                            dias_t2 = (fin_calc - ini_t2).days + 1
-                            interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_a, 2)
+                    tasa    = float(row["interes_inversor_anual"])
+                    inv_up  = str(row.get("inversor","")).strip().upper()
+                    if inv_up in TRAMO_INV_E:
+                        interes = 0.0
+                        if ic <= FIN_T1_E:
+                            ft1 = min(fc, FIN_T1_E)
+                            interes += round((capital*0.05/12)*((ft1-ic).days+1)/dm_e, 2)
+                        if fc >= CORTE_T_E:
+                            it2 = max(ic, CORTE_T_E)
+                            interes += round((capital*0.075/12)*((fc-it2).days+1)/dm_e, 2)
                     else:
-                        interes_mes = round((capital * tasa / 12) * dias / dias_mes_a, 2)
-
-                    filas_acum.append({
+                        interes = round((capital*tasa/12)*dias/dm_e, 2)
+                    filas_e.append({
                         "inversor": str(row.get("inversor","")),
-                        "mes": f"{mes_iter:02d}/{anio_iter}",
-                        "capital": capital,
-                        "interes_mes": interes_mes,
+                        "anio": ai_e,
+                        "mes": f"{mi_e:02d}/{ai_e}",
+                        "interes_mes": interes,
                     })
 
-                # Avanzar mes
-                if mes_iter == 12:
-                    mes_iter, anio_iter = 1, anio_iter + 1
-                else:
-                    mes_iter += 1
+                mi_e = mi_e + 1 if mi_e < 12 else 1
+                ai_e = ai_e if mi_e > 1 else ai_e + 1
 
-            if filas_acum:
-                df_ac = pd.DataFrame(filas_acum)
-                if inversor_pregunta:
-                    lineas.append(f"\n=== EXTRACTO ACUMULADO {inversor_pregunta} hasta {mes_limite:02d}/{anio_limite} ===")
-                    por_mes = df_ac.groupby("mes")["interes_mes"].sum()
-                    for mes_k, int_k in por_mes.items():
-                        lineas.append(f"  {mes_k}: ${float(int_k):,.2f}")
-                    total_acum = float(df_ac["interes_mes"].sum())
-                    cap_actual = float(df_ac["capital"].max())
-                    lineas.append(f"  >> CAPITAL ACTUAL: ${cap_actual:,.2f}")
-                    lineas.append(f"  >> TOTAL INTERESES ACUMULADOS: ${total_acum:,.2f}")
-                else:
-                    lineas.append(f"\n=== RESUMEN INTERESES ACUMULADOS POR INVERSOR hasta {mes_limite:02d}/{anio_limite} ===")
-                    por_inv = df_ac.groupby("inversor")["interes_mes"].sum().sort_values(ascending=False)
-                    for inv, total in por_inv.items():
-                        lineas.append(f"  {inv}: ${float(total):,.2f}")
-                    lineas.append(f"  >> GRAN TOTAL INTERESES: ${float(por_inv.sum()):,.2f}")
-            else:
-                lineas.append(f"\n=== EXTRACTO ACUMULADO: Sin datos para el período solicitado ===")
+            if filas_e:
+                df_tot = pd.DataFrame(filas_e)
+
+                # ── RESUMEN POR INVERSOR Y AÑO ────────────────────────────────
+                lineas.append(f"\n=== EXTRACTO COMPLETO INTERESES PAGADOS A INVERSORES ===")
+                lineas.append(f"(Fuente: lógica extractos — solo operaciones NUEVA y CANCELADA)")
+                lineas.append(f"(USA SIEMPRE ESTOS DATOS. NUNCA CALCULES POR TU CUENTA.)")
+
+                for inv in sorted(df_tot["inversor"].unique()):
+                    df_inv_i = df_tot[df_tot["inversor"] == inv]
+                    lineas.append(f"\n-- {inv} --")
+                    for anio_k in sorted(df_inv_i["anio"].unique()):
+                        df_anio = df_inv_i[df_inv_i["anio"] == anio_k]
+                        total_anio = float(df_anio["interes_mes"].sum())
+                        lineas.append(f"  {anio_k}: ${total_anio:,.2f}")
+                        for mes_k, int_k in df_anio.groupby("mes")["interes_mes"].sum().items():
+                            if float(int_k) > 0:
+                                lineas.append(f"    {mes_k}: ${float(int_k):,.2f}")
+                    total_inv = float(df_inv_i["interes_mes"].sum())
+                    lineas.append(f"  TOTAL ACUMULADO DESDE INICIO: ${total_inv:,.2f}")
+
+                # ── GRAN TOTAL TODOS LOS INVERSORES ──────────────────────────
+                lineas.append(f"\n-- TOTALES GENERALES --")
+                for anio_k in sorted(df_tot["anio"].unique()):
+                    tot_a = float(df_tot[df_tot["anio"] == anio_k]["interes_mes"].sum())
+                    lineas.append(f"  TOTAL TODOS INVERSORES {anio_k}: ${tot_a:,.2f}")
+                lineas.append(f"  GRAN TOTAL DESDE INICIO: ${float(df_tot['interes_mes'].sum()):,.2f}")
+
         except Exception as e:
             lineas.append(f"[Error extracto acumulado: {e}]")
 
