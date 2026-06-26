@@ -5983,18 +5983,45 @@ def seccion_asistente_ia_fondo():
                     else:
                         sin_dato.append(entry)
 
+                # Para cada nota en riesgo, añadir próximo call y próximo pago del calendario
+                hoy_r = pd.Timestamp.today().normalize()
+                def proximos_eventos_nota(nota_id):
+                    extras = []
+                    try:
+                        df_cn = df_c_riesgo[df_c_riesgo["nota"] == nota_id]
+                        futuros = df_cn[df_cn["fecha"] >= hoy_r].sort_values("fecha")
+                        calls = futuros[futuros["tipo_evento"].astype(str).str.upper() == "CALL"]
+                        pagos = futuros[futuros["tipo_evento"].astype(str).str.upper() == "PAGO"]
+                        obs_fut = futuros[futuros["tipo_evento"].astype(str).str.upper() == "OBSERVACION"]
+                        if not calls.empty:
+                            extras.append(f"    Próximo CALL: {pd.Timestamp(calls.iloc[0]['fecha']).strftime('%d/%m/%Y')}")
+                        if not pagos.empty:
+                            imp = pd.to_numeric(pagos.iloc[0].get("importe_cobro", 0), errors="coerce") or 0
+                            extras.append(f"    Próximo PAGO: {pd.Timestamp(pagos.iloc[0]['fecha']).strftime('%d/%m/%Y')} | ${imp:,.2f}")
+                        if not obs_fut.empty:
+                            extras.append(f"    Próxima OBS: {pd.Timestamp(obs_fut.iloc[0]['fecha']).strftime('%d/%m/%Y')}")
+                    except:
+                        pass
+                    return extras
+
                 if negativas:
-                    lineas.append(f"🔴 NEGATIVAS / EN RIESGO ({len(negativas)}):")
-                    lineas.extend(negativas)
+                    lineas.append(f"NEGATIVAS / EN RIESGO ({len(negativas)}):")
+                    for entry in negativas:
+                        lineas.append(entry)
+                        nota_id = float(entry.split("NOTA_")[1].split(" ")[0])
+                        lineas.extend(proximos_eventos_nota(nota_id))
                 else:
-                    lineas.append("🔴 NEGATIVAS / EN RIESGO: Ninguna")
+                    lineas.append("NEGATIVAS / EN RIESGO: Ninguna")
 
                 if pendientes:
-                    lineas.append(f"🟡 PENDIENTES de observación ({len(pendientes)}):")
-                    lineas.extend(pendientes)
+                    lineas.append(f"PENDIENTES de observacion ({len(pendientes)}):")
+                    for entry in pendientes:
+                        lineas.append(entry)
+                        nota_id = float(entry.split("NOTA_")[1].split(" ")[0])
+                        lineas.extend(proximos_eventos_nota(nota_id))
 
                 if positivas:
-                    lineas.append(f"🟢 POSITIVAS ({len(positivas)}):")
+                    lineas.append(f"POSITIVAS ({len(positivas)}):")
                     lineas.extend(positivas)
 
                 if sin_dato:
@@ -6020,9 +6047,9 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"[Error históricos: {e}]")
 
         # ══════════════════════════════════════════════════════════════════════
-        # 6. EXTRACTO ACUMULADO — PRE-CALCULADO PARA TODOS LOS INVERSORES
-        #    Se calcula de 2025 hasta hoy para TODOS, sin esperar a que el IA
-        #    detecte el inversor. Así el IA solo lee, nunca calcula.
+        # 6. EXTRACTO ACUMULADO — PRE-CALCULADO Y FILTRADO POR INVERSOR
+        #    Si se detecta un inversor en la pregunta: solo sus datos
+        #    Si no: resumen anual de todos (compacto)
         # ══════════════════════════════════════════════════════════════════════
         try:
             df_ext = df_inv.copy()
@@ -6040,26 +6067,42 @@ def seccion_asistente_ia_fondo():
             CORTE_T_E   = datetime(2026, 2, 1)
             FIN_T1_E    = datetime(2026, 1, 31)
 
-            # Rango: desde el primer mes con inversión hasta hoy
+            # Detectar inversor en la pregunta
+            inversores_todos = df_ext["inversor"].dropna().unique().tolist()
+            inv_detectado = None
+            p_up = p.upper()
+            for inv in inversores_todos:
+                if inv.upper() in p_up or any(pt in p_up for pt in inv.upper().split() if len(pt) > 3):
+                    inv_detectado = inv
+                    break
+
+            # Detectar año en la pregunta
+            import re as _re2
+            match_anio2 = _re2.search(r'\b(202[0-9])\b', p)
+            anio_filtro = int(match_anio2.group(1)) if match_anio2 else None
+
+            # Si hay inversor detectado, filtrar solo ese
+            if inv_detectado:
+                df_ext = df_ext[df_ext["inversor"].str.upper() == inv_detectado.upper()].copy()
+
+            # Calcular desde inicio hasta hoy
             fecha_min = df_ext["fecha_inversion"].dropna().min()
             if pd.isna(fecha_min):
                 fecha_min = datetime(2025, 9, 1)
             else:
                 fecha_min = fecha_min.to_pydatetime()
 
-            anio_ini_e = fecha_min.year
-            mes_ini_e  = fecha_min.month
-            anio_fin_e = anio_hoy
-            mes_fin_e  = mes_hoy
-
-            # Acumular mes a mes para TODOS los inversores
             filas_e = []
-            ai_e, mi_e = anio_ini_e, mes_ini_e
-            while (ai_e, mi_e) <= (anio_fin_e, mes_fin_e):
+            ai_e, mi_e = fecha_min.year, fecha_min.month
+            while (ai_e, mi_e) <= (anio_hoy, mes_hoy):
+                # Si hay filtro de año, saltar años que no interesan
+                if anio_filtro and ai_e != anio_filtro and not inv_detectado:
+                    mi_e = mi_e + 1 if mi_e < 12 else 1
+                    ai_e = ai_e if mi_e > 1 else ai_e + 1
+                    continue
                 dm_e = ultimo_dia_mes(ai_e, mi_e)
                 im_e = datetime(ai_e, mi_e, 1)
                 fm_e = datetime(ai_e, mi_e, dm_e)
-
                 for _, row in df_ext.iterrows():
                     fi = row.get("fecha_inversion")
                     if pd.isna(fi): continue
@@ -6094,37 +6137,32 @@ def seccion_asistente_ia_fondo():
                         "mes": f"{mi_e:02d}/{ai_e}",
                         "interes_mes": interes,
                     })
-
                 mi_e = mi_e + 1 if mi_e < 12 else 1
                 ai_e = ai_e if mi_e > 1 else ai_e + 1
 
             if filas_e:
                 df_tot = pd.DataFrame(filas_e)
+                lineas.append(f"\n=== EXTRACTO INTERESES PAGADOS A INVERSORES ===")
+                lineas.append(f"(LEE ESTOS DATOS DIRECTAMENTE. PROHIBIDO CALCULAR POR TU CUENTA.)")
 
-                # ── RESUMEN POR INVERSOR Y AÑO ────────────────────────────────
-                lineas.append(f"\n=== EXTRACTO COMPLETO INTERESES PAGADOS A INVERSORES ===")
-                lineas.append(f"(Fuente: lógica extractos — solo operaciones NUEVA y CANCELADA)")
-                lineas.append(f"(USA SIEMPRE ESTOS DATOS. NUNCA CALCULES POR TU CUENTA.)")
-
-                for inv in sorted(df_tot["inversor"].unique()):
-                    df_inv_i = df_tot[df_tot["inversor"] == inv]
-                    lineas.append(f"\n-- {inv} --")
-                    for anio_k in sorted(df_inv_i["anio"].unique()):
-                        df_anio = df_inv_i[df_inv_i["anio"] == anio_k]
-                        total_anio = float(df_anio["interes_mes"].sum())
+                if inv_detectado:
+                    # Detalle completo del inversor detectado
+                    lineas.append(f"\n-- {inv_detectado} --")
+                    for anio_k in sorted(df_tot["anio"].unique()):
+                        df_a = df_tot[df_tot["anio"] == anio_k]
+                        total_anio = float(df_a["interes_mes"].sum())
                         lineas.append(f"  {anio_k}: ${total_anio:,.2f}")
-                        for mes_k, int_k in df_anio.groupby("mes")["interes_mes"].sum().items():
+                        for mes_k, int_k in df_a.groupby("mes")["interes_mes"].sum().items():
                             if float(int_k) > 0:
                                 lineas.append(f"    {mes_k}: ${float(int_k):,.2f}")
-                    total_inv = float(df_inv_i["interes_mes"].sum())
-                    lineas.append(f"  TOTAL ACUMULADO DESDE INICIO: ${total_inv:,.2f}")
-
-                # ── GRAN TOTAL TODOS LOS INVERSORES ──────────────────────────
-                lineas.append(f"\n-- TOTALES GENERALES --")
-                for anio_k in sorted(df_tot["anio"].unique()):
-                    tot_a = float(df_tot[df_tot["anio"] == anio_k]["interes_mes"].sum())
-                    lineas.append(f"  TOTAL TODOS INVERSORES {anio_k}: ${tot_a:,.2f}")
-                lineas.append(f"  GRAN TOTAL DESDE INICIO: ${float(df_tot['interes_mes'].sum()):,.2f}")
+                    lineas.append(f"  TOTAL ACUMULADO DESDE INICIO: ${float(df_tot['interes_mes'].sum()):,.2f}")
+                else:
+                    # Resumen compacto de todos — solo totales por inversor y año
+                    for inv in sorted(df_tot["inversor"].unique()):
+                        df_i = df_tot[df_tot["inversor"] == inv]
+                        resumen = " | ".join([f"{a}: ${float(df_i[df_i['anio']==a]['interes_mes'].sum()):,.2f}" for a in sorted(df_i["anio"].unique())])
+                        lineas.append(f"  {inv}: {resumen} | TOTAL: ${float(df_i['interes_mes'].sum()):,.2f}")
+                    lineas.append(f"  GRAN TOTAL: ${float(df_tot['interes_mes'].sum()):,.2f}")
 
         except Exception as e:
             lineas.append(f"[Error extracto acumulado: {e}]")
@@ -6209,9 +6247,14 @@ def seccion_asistente_ia_fondo():
 
 == LAS 3 FUENTES DE DATOS — USA SIEMPRE LA CORRECTA ==
 
-FUENTE 1 — COBROS DE NOTAS Y FECHAS (sección CALENDARIO NOTAS del contexto):
+FUENTE 1A — COBROS DE NOTAS Y FECHAS (sección CALENDARIO NOTAS del contexto):
   Usa esta fuente para: ¿cuánto cobraremos de notas este mes? ¿cuándo es el próximo cobro? ¿qué cobros hay entre fecha X e Y? ¿cuándo es el próximo call u observación?
   Los importes ya están calculados en el calendario. No los recalcules tú.
+
+FUENTE 1B — NOTAS EN RIESGO (sección ESTADO DE RIESGO DE NOTAS del contexto):
+  Usa esta fuente para: ¿qué notas están en riesgo? ¿cuáles son negativas? ¿cuáles tienen observación pendiente? ¿estado de la NOTA_XX?
+  Las notas están clasificadas como NEGATIVA (en riesgo), PENDIENTE (observación pendiente), POSITIVA (ok) o SIN_DATO.
+  NUNCA inventes el estado de una nota — léelo directamente de esta sección.
 
 FUENTE 2 — INTERESES A INVERSORES / LO QUE PAGAMOS NOSOTROS (secciones INTERESES A PAGAR A INVERSORES y EXTRACTO ACUMULADO del contexto):
   Usa esta fuente para: ¿cuánto cobra PAM este mes? ¿cuánto hemos pagado a JEP desde el inicio? ¿cuánto pagaremos a todos los inversores en junio? ¿intereses acumulados de un inversor?
