@@ -6027,11 +6027,21 @@ def seccion_asistente_ia_fondo():
         # ══════════════════════════════════════════════════════════════════════
         try:
             import re as _re
-            # Detectar mes límite en la pregunta (ej: "hasta mayo" → mes 5, "hasta el 31/05" → mes 5)
+            # Detectar mes y año límite en la pregunta
             meses_map2 = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
                          "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
             mes_limite = next((v for k,v in meses_map2.items() if k in p), mes_hoy)
             anio_limite = anio_hoy
+
+            # Detectar año explícito en la pregunta (ej: "en 2025", "del 2025", "año 2025")
+            match_anio = _re.search(r'\b(202[0-9])\b', p)
+            if match_anio:
+                anio_limite = int(match_anio.group(1))
+                # Si mencionan un año pero no un mes específico, asumir diciembre de ese año
+                if not any(k in p for k in meses_map2.keys()):
+                    mes_limite = 12
+
+            # Detectar formato fecha DD/MM/YYYY
             match_mes = _re.search(r'(\d{1,2})[/\-](\d{4})', p)
             if match_mes:
                 try:
