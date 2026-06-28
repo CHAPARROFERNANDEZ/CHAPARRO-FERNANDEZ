@@ -6462,7 +6462,7 @@ def seccion_asistente_ia_fondo():
             def _proximos_nota(nota_id):
                 extras = []
                 if cal_fut.empty: return extras
-                cn = cal_fut[pd.to_numeric(cal_fut.get("nota"), errors="coerce") == nota_id].sort_values("fecha")
+                cn = cal_fut[pd.to_numeric(cal_fut.get("nota"), errors="coerce").fillna(-1) == nota_id].sort_values("fecha")
                 for tipo_ev in ["CALL","PAGO","OBSERVACION"]:
                     filt = cn[cn["tipo_evento"].astype(str).str.upper() == tipo_ev]
                     if not filt.empty:
@@ -6478,7 +6478,9 @@ def seccion_asistente_ia_fondo():
             if alertas is not None and not alertas.empty:
                 alertas.columns = [str(c).strip().lower() for c in alertas.columns]
                 for _, r in alertas.iterrows():
-                    nota_id = int(pd.to_numeric(r.get("nota",0), errors="coerce") or 0)
+                    nota_val = pd.to_numeric(r.get("nota",0), errors="coerce")
+                    if pd.isna(nota_val): continue
+                    nota_id = int(nota_val)
                     estado  = str(r.get("estado","")).upper()
                     fecha_s = ""
                     try: fecha_s = pd.Timestamp(r.get("fecha")).strftime("%d/%m/%Y")
@@ -6497,10 +6499,14 @@ def seccion_asistente_ia_fondo():
                 df_obs_fb["fecha"] = pd.to_datetime(df_obs_fb["fecha"], errors="coerce")
                 df_obs_fb["tipo_evento"] = df_obs_fb["tipo_evento"].fillna("").astype(str).str.upper()
                 obs_prox_fb = df_obs_fb[(df_obs_fb["tipo_evento"]=="OBSERVACION") & (df_obs_fb["fecha"]>=hoy)].sort_values("fecha")
-                for nota_id in sorted(obs_prox_fb["nota"].dropna().unique()):
-                    r2 = obs_prox_fb[obs_prox_fb["nota"]==nota_id].iloc[0]
+                for nota_id_raw in sorted(obs_prox_fb["nota"].dropna().unique()):
+                    try:
+                        nota_id2 = int(nota_id_raw)
+                    except:
+                        continue
+                    r2 = obs_prox_fb[obs_prox_fb["nota"]==nota_id_raw].iloc[0]
                     fecha_s2 = pd.Timestamp(r2["fecha"]).strftime("%d/%m/%Y")
-                    pendientes.append((int(nota_id), f"  NOTA_{int(nota_id):02d} | Próx obs: {fecha_s2} | PENDIENTE"))
+                    pendientes.append((nota_id2, f"  NOTA_{nota_id2:02d} | Próx obs: {fecha_s2} | PENDIENTE"))
 
             if negativas:
                 lineas.append(f"ROJAS / EN RIESGO ({len(negativas)}):")
