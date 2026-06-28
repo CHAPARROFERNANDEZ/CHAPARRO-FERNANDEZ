@@ -5953,84 +5953,100 @@ def seccion_asistente_ia_fondo():
         except Exception as e:
             lineas.append(f"[Error calendario notas: {e}]")
 
-        # Estado de riesgo de notas — igual que Alertas/Calendario de la app
-        # Evalúa cada nota con observación pasada usando evaluar_nota_en_fecha
+        # Estado de riesgo de notas
+        # Fuente: RESULTADOS_OBSERVACION (estado real) + CONTROL_NOTAS (precio/barrera) + CALENDARIO_NOTAS (próx obs)
         try:
-            lineas.append(f"\n=== ESTADO DE RIESGO DE NOTAS (fuente: evaluar_nota_en_fecha, igual que Alertas) ===")
-            if df_cal is not None and not df_cal.empty and df_control is not None and not df_control.empty:
-                df_c_riesgo = df_cal.copy()
-                df_c_riesgo["fecha"] = pd.to_datetime(df_c_riesgo["fecha"], errors="coerce")
-                # Todas las observaciones (pasadas y futuras)
-                obs_todas = df_c_riesgo[df_c_riesgo["tipo_evento"].astype(str).str.upper() == "OBSERVACION"].copy()
-                # Para cada nota, coger la observación más reciente
-                notas_unicas = obs_todas["nota"].dropna().unique()
-                negativas, pendientes, positivas, sin_dato = [], [], [], []
-                for nota in sorted(notas_unicas):
-                    obs_nota = obs_todas[obs_todas["nota"] == nota].sort_values("fecha")
-                    if obs_nota.empty:
-                        continue
-                    ultima_obs = obs_nota.iloc[-1]
-                    fecha_obs = ultima_obs["fecha"]
-                    importe_cobro = pd.to_numeric(ultima_obs.get("importe_cobro", 0), errors="coerce") or 0
-                    resultado, _ = evaluar_nota_en_fecha(df_control, int(nota), fecha_obs, preferida="contingency")
-                    entry = f"  NOTA_{int(nota):02d} | Obs: {pd.Timestamp(fecha_obs).strftime('%d/%m/%Y')} | Cobro: ${importe_cobro:,.2f} | Estado: {resultado}"
-                    if resultado == "NEGATIVA":
-                        negativas.append(entry)
-                    elif resultado == "PENDIENTE":
-                        pendientes.append(entry)
-                    elif resultado == "POSITIVA":
-                        positivas.append(entry)
-                    else:
-                        sin_dato.append(entry)
+            lineas.append(f"\n=== ESTADO DE RIESGO DE NOTAS ===")
+            hoy_r = pd.Timestamp.today().normalize()
 
-                # Para cada nota en riesgo, añadir próximo call y próximo pago del calendario
-                hoy_r = pd.Timestamp.today().normalize()
-                def proximos_eventos_nota(nota_id):
-                    extras = []
-                    try:
-                        df_cn = df_c_riesgo[df_c_riesgo["nota"] == nota_id]
-                        futuros = df_cn[df_cn["fecha"] >= hoy_r].sort_values("fecha")
-                        calls = futuros[futuros["tipo_evento"].astype(str).str.upper() == "CALL"]
-                        pagos = futuros[futuros["tipo_evento"].astype(str).str.upper() == "PAGO"]
-                        obs_fut = futuros[futuros["tipo_evento"].astype(str).str.upper() == "OBSERVACION"]
-                        if not calls.empty:
-                            extras.append(f"    Próximo CALL: {pd.Timestamp(calls.iloc[0]['fecha']).strftime('%d/%m/%Y')}")
-                        if not pagos.empty:
-                            imp = pd.to_numeric(pagos.iloc[0].get("importe_cobro", 0), errors="coerce") or 0
-                            extras.append(f"    Próximo PAGO: {pd.Timestamp(pagos.iloc[0]['fecha']).strftime('%d/%m/%Y')} | ${imp:,.2f}")
-                        if not obs_fut.empty:
-                            extras.append(f"    Próxima OBS: {pd.Timestamp(obs_fut.iloc[0]['fecha']).strftime('%d/%m/%Y')}")
-                    except:
-                        pass
-                    return extras
+            # 1. Últimos resultados reales por nota (RESULTADOS_OBSERVACION)
+            try:
+                df_res = leer_hoja_excel("RESULTADOS_OBSERVACION")
+                df_res.columns = [str(c).strip().lower() for c in df_res.columns]
+                df_res = df_res.dropna(subset=["nota","resultado"])
+                df_res["nota"] = pd.to_numeric(df_res["nota"], errors="coerce")
+                df_res["fecha_observacion"] = pd.to_datetime(df_res.get("fecha_observacion"), errors="coerce")
+                df_res = df_res.dropna(subset=["nota"])
+                ultima_res = df_res.sort_values("fecha_observacion").groupby("nota").last().reset_index()
+                estado_por_nota = {int(r["nota"]): (str(r["resultado"]).upper(), r.get("detalle","")) 
+                                   for _, r in ultima_res.iterrows()}
+            except:
+                estado_por_nota = {}
 
-                if negativas:
-                    lineas.append(f"NEGATIVAS / EN RIESGO ({len(negativas)}):")
-                    for entry in negativas:
-                        lineas.append(entry)
-                        nota_id = float(entry.split("NOTA_")[1].split(" ")[0])
-                        lineas.extend(proximos_eventos_nota(nota_id))
+            # 2. Precios actuales y barreras (CONTROL_NOTAS)
+            def _precios_nota(nota_id):
+                try:
+                    filas = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
+                    if filas.empty: return ""
+                    partes = []
+                    for _, r in filas.iterrows():
+                        ticker = str(r.get("ticker","")).strip()
+                        precio_actual = pd.to_numeric(r.get("precio_actual"), errors="coerce")
+                        barrera = pd.to_numeric(r.get("barrera_capital") or r.get("barrera_cupon"), errors="coerce")
+                        if ticker:
+                            p_s = f"${precio_actual:,.2f}" if not pd.isna(precio_actual) else "N/D"
+                            b_s = f"${barrera:,.2f}" if not pd.isna(barrera) else "N/D"
+                            partes.append(f"{ticker}: precio={p_s} barrera={b_s}")
+                    return " | ".join(partes)
+                except:
+                    return ""
+
+            # 3. Próxima observación futura (CALENDARIO_NOTAS)
+            df_c_riesgo = df_cal.copy()
+            df_c_riesgo["fecha"] = pd.to_datetime(df_c_riesgo["fecha"], errors="coerce")
+            df_c_riesgo["tipo_evento"] = df_c_riesgo["tipo_evento"].fillna("").astype(str).str.upper()
+            obs_futuras = df_c_riesgo[(df_c_riesgo["tipo_evento"]=="OBSERVACION") & (df_c_riesgo["fecha"]>=hoy_r)].sort_values("fecha")
+            prox_obs = obs_futuras.groupby("nota").first().reset_index()
+            prox_obs_dict = {int(r["nota"]): pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y") 
+                            for _, r in prox_obs.iterrows() if not pd.isna(r.get("nota"))}
+
+            # 4. Próximo call (CALENDARIO_NOTAS)
+            calls_fut = df_c_riesgo[(df_c_riesgo["tipo_evento"]=="CALL") & (df_c_riesgo["fecha"]>=hoy_r)].sort_values("fecha")
+            prox_call_dict = {}
+            for _, r in calls_fut.iterrows():
+                n = pd.to_numeric(r.get("nota"), errors="coerce")
+                if pd.isna(n): continue
+                ni = int(n)
+                if ni not in prox_call_dict:
+                    prox_call_dict[ni] = pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y")
+
+            # Clasificar notas
+            todas_notas = sorted(set(list(estado_por_nota.keys()) + list(prox_obs_dict.keys())))
+            negativas, pendientes, positivas = [], [], []
+
+            for nota_id in todas_notas:
+                estado, detalle = estado_por_nota.get(nota_id, ("PENDIENTE", ""))
+                prox_obs_s = prox_obs_dict.get(nota_id, "Sin obs programada")
+                prox_call_s = prox_call_dict.get(nota_id, "")
+                precios_s = _precios_nota(nota_id)
+
+                linea = f"  NOTA_{nota_id:02d} | Estado: {estado} | Próx obs: {prox_obs_s}"
+                if prox_call_s:
+                    linea += f" | Próx call: {prox_call_s}"
+                if precios_s:
+                    linea += f"\n    Precios: {precios_s}"
+
+                if estado == "NEGATIVA":
+                    negativas.append(linea)
+                elif estado == "POSITIVA":
+                    positivas.append(linea)
                 else:
-                    lineas.append("NEGATIVAS / EN RIESGO: Ninguna")
+                    pendientes.append(linea)
 
-                if pendientes:
-                    lineas.append(f"PENDIENTES de observacion ({len(pendientes)}):")
-                    for entry in pendientes:
-                        lineas.append(entry)
-                        nota_id = float(entry.split("NOTA_")[1].split(" ")[0])
-                        lineas.extend(proximos_eventos_nota(nota_id))
-
-                if positivas:
-                    lineas.append(f"POSITIVAS ({len(positivas)}):")
-                    lineas.extend(positivas)
-
-                if sin_dato:
-                    lineas.append(f"⚪ SIN DATO ({len(sin_dato)}):")
-                    lineas.extend(sin_dato)
+            if negativas:
+                lineas.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
+                lineas.extend(negativas)
             else:
-                lineas.append("Sin datos de calendario o control para evaluar riesgo.")
-        except Exception as e:
-            lineas.append(f"[Error notas en riesgo: {e}]")
+                lineas.append("🔴 ROJAS / EN RIESGO: Ninguna")
+
+            if pendientes:
+                lineas.append(f"🟡 AMARILLAS / PENDIENTES ({len(pendientes)}):")
+                lineas.extend(pendientes)
+
+            lineas.append(f"RESUMEN: {len(negativas)} rojas | {len(pendientes)} amarillas | {len(positivas)} verdes (positivas no se muestran)")
+            lineas.append("(USA SIEMPRE ESTOS DATOS. NO INVENTES NI CALCULES EL ESTADO DE LAS NOTAS.)")
+        except Exception as _e_r:
+            lineas.append(f"[Error riesgo notas: {_e_r}]")
 
         # ══════════════════════════════════════════════════════════════════════
         # 5. TOTALES HISTÓRICOS POR ACTIVO (desde inicio)
@@ -6251,10 +6267,15 @@ FUENTE 1A — COBROS DE NOTAS Y FECHAS (sección CALENDARIO NOTAS del contexto):
   Usa esta fuente para: ¿cuánto cobraremos de notas este mes? ¿cuándo es el próximo cobro? ¿qué cobros hay entre fecha X e Y? ¿cuándo es el próximo call u observación?
   Los importes ya están calculados en el calendario. No los recalcules tú.
 
-FUENTE 1B — NOTAS EN RIESGO (sección ESTADO DE RIESGO DE NOTAS del contexto):
-  Usa esta fuente para: ¿qué notas están en riesgo? ¿cuáles son negativas? ¿cuáles tienen observación pendiente? ¿estado de la NOTA_XX?
-  Las notas están clasificadas como NEGATIVA (en riesgo), PENDIENTE (observación pendiente), POSITIVA (ok) o SIN_DATO.
-  NUNCA inventes el estado de una nota — léelo directamente de esta sección.
+FUENTE 1B — NOTAS ESTRUCTURADAS (sección ESTADO DE RIESGO DE NOTAS del contexto):
+  Usa esta fuente para CUALQUIER pregunta sobre notas excepto fechas de cobro/observación/call:
+  - ¿Qué notas están en riesgo? ¿cuáles son rojas o amarillas?
+  - ¿Cuál es el precio de barrera de tal nota o de notas con tal acción?
+  - ¿Qué notas tienen TSLA, NVDA, AAPL u otro ticker?
+  - ¿Precio actual vs barrera de tal nota?
+  - Estado de la NOTA_XX
+  Los datos de precios y barreras están en la línea "Precios:" de cada nota.
+  NUNCA inventes datos de notas — léelos directamente de esta sección.
 
 FUENTE 2 — INTERESES A INVERSORES / LO QUE PAGAMOS NOSOTROS (secciones INTERESES A PAGAR A INVERSORES y EXTRACTO ACUMULADO del contexto):
   Usa esta fuente para: ¿cuánto cobra PAM este mes? ¿cuánto hemos pagado a JEP desde el inicio? ¿cuánto pagaremos a todos los inversores en junio? ¿intereses acumulados de un inversor?
