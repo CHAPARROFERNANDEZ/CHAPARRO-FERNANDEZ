@@ -6198,480 +6198,100 @@ def seccion_asistente_ia_fondo():
         st.session_state["chat_ia_cf"].append({"role": "user", "content": pregunta})
         st.rerun()
 
-    # ═══════════════════════════════════════════════════════════════════
-    # ASISTENTE IA CON FUNCTION CALLING
-    # El IA nunca calcula — llama a funciones Python que leen el Excel
-    # ═══════════════════════════════════════════════════════════════════
-
-    # ── Definición de herramientas ────────────────────────────────────
-    TOOLS = [
-        {
-            "name": "get_intereses_inversor",
-            "description": "Devuelve los intereses pagados a un inversor, mes a mes. Usa esto para cualquier pregunta sobre cuánto hemos pagado o cobrado un inversor, intereses acumulados, extracto de un inversor.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "inversor": {"type": "string", "description": "Nombre del inversor exacto o parcial (ej: PAM, JEP, PEDRO MAGAÑA)"},
-                    "anio": {"type": "integer", "description": "Año a consultar (ej: 2025, 2026). Si no se especifica, devuelve todos los años."},
-                    "mes": {"type": "integer", "description": "Mes a consultar (1-12). Opcional. Si no se especifica, devuelve todos los meses del año."}
-                },
-                "required": ["inversor"]
-            }
-        },
-        {
-            "name": "get_capital_activo",
-            "description": "Devuelve el capital activo del fondo o de un inversor concreto a fecha de hoy.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "inversor": {"type": "string", "description": "Nombre del inversor. Si se omite, devuelve el capital total del fondo y por inversor."}
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "get_calendario_notas",
-            "description": "Devuelve los próximos cobros, observaciones y calls de notas estructuradas. Usa esto para preguntas sobre cuándo cobraremos, próximos pagos, próximas observaciones, próximos calls.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "dias": {"type": "integer", "description": "Número de días a futuro a consultar (default: 90)"},
-                    "tipo": {"type": "string", "description": "Filtrar por tipo: PAGO, OBSERVACION, CALL, o ALL (default: ALL)"},
-                    "nota": {"type": "integer", "description": "Número de nota específica (opcional)"}
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "get_notas_riesgo",
-            "description": "Devuelve el estado de riesgo de todas las notas estructuradas: cuáles están en riesgo (NEGATIVA/rojo), cuáles tienen observación pendiente (PENDIENTE/amarillo), cuáles están bien (POSITIVA/verde). Incluye próximo call y próximo pago de cada nota en riesgo.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "solo_riesgo": {"type": "boolean", "description": "Si true, devuelve solo las negativas y pendientes. Si false, devuelve todas."}
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "get_intereses_todos_inversores",
-            "description": "Devuelve un resumen de intereses pagados a TODOS los inversores para un año o mes concreto. Usa esto cuando pregunten por el total de pagos a inversores, o quieran ver todos los inversores a la vez.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "anio": {"type": "integer", "description": "Año a consultar"},
-                    "mes": {"type": "integer", "description": "Mes (1-12). Opcional."}
-                },
-                "required": ["anio"]
-            }
-        }
-    ]
-
-    # ── Implementación de herramientas ────────────────────────────────
-    def _ejecutar_herramienta(nombre: str, params: dict) -> str:
-        """Ejecuta la herramienta y devuelve el resultado como string."""
-        import calendar as _cal
-
-        def _ult_dia(a, m): return _cal.monthrange(a, m)[1]
-
-        # Preparar df base para cálculos de intereses
-        def _df_extracto():
-            df = df_inv.copy()
-            for col in ["inversor","tipo_operacion"]:
-                if col in df.columns:
-                    df[col] = df[col].fillna("").astype(str).str.strip()
-            df["tipo_op_n"] = df["tipo_operacion"].str.upper()
-            df = df[df["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
-            df["fecha_inversion"]        = pd.to_datetime(df.get("fecha_inversion"), errors="coerce", dayfirst=True)
-            df["fecha_final_inversion"]  = pd.to_datetime(df.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
-            df["capital_invertido"]      = pd.to_numeric(df.get("capital_invertido"), errors="coerce").fillna(0)
-            df["interes_inversor_anual"] = pd.to_numeric(df.get("interes_inversor_anual"), errors="coerce").fillna(0)
-            return df
-
-        TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-        CORTE_T = datetime(2026, 2, 1)
-        FIN_T1  = datetime(2026, 1, 31)
-
-        def _calcular_interes_mes(row, anio, mes):
-            dm = _ult_dia(anio, mes)
-            im = datetime(anio, mes, 1)
-            fm = datetime(anio, mes, dm)
-            fi = row["fecha_inversion"]
-            if pd.isna(fi): return 0
-            fi_dt = fi.to_pydatetime()
-            ff = row.get("fecha_final_inversion")
-            if row["tipo_op_n"] == "CANCELADA":
-                if pd.isna(ff): return 0
-                ffd = min(ff.to_pydatetime(), fm)
-            else:
-                ffd = fm
-            ic = max(fi_dt, im)
-            fc = min(ffd, fm)
-            if ic > fc: return 0
-            dias = (fc - ic).days + 1
-            capital = float(row["capital_invertido"])
-            tasa = float(row["interes_inversor_anual"])
-            inv_up = str(row.get("inversor","")).strip().upper()
-            if inv_up in TRAMO:
-                interes = 0.0
-                if ic <= FIN_T1:
-                    ft1 = min(fc, FIN_T1)
-                    interes += round((capital*0.05/12)*((ft1-ic).days+1)/dm, 2)
-                if fc >= CORTE_T:
-                    it2 = max(ic, CORTE_T)
-                    interes += round((capital*0.075/12)*((fc-it2).days+1)/dm, 2)
-            else:
-                interes = round((capital*tasa/12)*dias/dm, 2)
-            return interes
-
-        hoy = pd.Timestamp.today().normalize()
-        anio_hoy, mes_hoy = hoy.year, hoy.month
-
-        # ── get_intereses_inversor ──────────────────────────────────────
-        if nombre == "get_intereses_inversor":
-            inv_buscar = params.get("inversor","").upper()
-            anio_f = params.get("anio")
-            mes_f  = params.get("mes")
-            df = _df_extracto()
-            # Buscar inversor por nombre parcial
-            mask = df["inversor"].str.upper().str.contains(inv_buscar, na=False)
-            df_inv_f = df[mask].copy()
-            if df_inv_f.empty:
-                return f"No se encontró ningún inversor que coincida con '{inv_buscar}'"
-            inv_real = df_inv_f["inversor"].iloc[0]
-
-            # Rango de meses
-            fecha_min = df_inv_f["fecha_inversion"].dropna().min().to_pydatetime()
-            filas = []
-            ai, mi = fecha_min.year, fecha_min.month
-            while (ai, mi) <= (anio_hoy, mes_hoy):
-                if anio_f and ai != anio_f:
-                    mi = mi+1 if mi < 12 else 1
-                    ai = ai if mi > 1 else ai+1
-                    continue
-                if mes_f and mi != mes_f:
-                    mi = mi+1 if mi < 12 else 1
-                    ai = ai if mi > 1 else ai+1
-                    continue
-                int_mes = sum(_calcular_interes_mes(row, ai, mi) for _, row in df_inv_f.iterrows())
-                if int_mes > 0:
-                    filas.append({"mes": f"{mi:02d}/{ai}", "anio": ai, "interes": int_mes})
-                mi = mi+1 if mi < 12 else 1
-                ai = ai if mi > 1 else ai+1
-
-            if not filas:
-                return f"{inv_real}: sin intereses en el período solicitado"
-
-            lineas = [f"INTERESES PAGADOS A {inv_real}:"]
-            anio_actual = None
-            total_anio = 0
-            total_general = 0
-            for f in filas:
-                if f["anio"] != anio_actual:
-                    if anio_actual is not None:
-                        lineas.append(f"  TOTAL {anio_actual}: ${total_anio:,.2f}")
-                    anio_actual = f["anio"]
-                    total_anio = 0
-                lineas.append(f"  {f['mes']}: ${f['interes']:,.2f}")
-                total_anio += f["interes"]
-                total_general += f["interes"]
-            if anio_actual:
-                lineas.append(f"  TOTAL {anio_actual}: ${total_anio:,.2f}")
-            lineas.append(f"TOTAL ACUMULADO DESDE INICIO: ${total_general:,.2f}")
-            return "\n".join(lineas)
-
-        # ── get_capital_activo ──────────────────────────────────────────
-        elif nombre == "get_capital_activo":
-            inv_buscar = params.get("inversor","").upper().strip()
-            df = df_inv.copy()
-            for col in ["inversor","tipo_operacion"]:
-                if col in df.columns:
-                    df[col] = df[col].fillna("").astype(str).str.strip()
-            df["tipo_op_n"] = df["tipo_operacion"].str.upper()
-            df["fecha_inversion"]        = pd.to_datetime(df.get("fecha_inversion"), errors="coerce", dayfirst=True)
-            df["fecha_final_inversion"]  = pd.to_datetime(df.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
-            df["capital_invertido"]      = pd.to_numeric(df.get("capital_invertido"), errors="coerce").fillna(0)
-            activas = df[
-                df["tipo_op_n"].isin(["NUEVA","REINVERSION"]) &
-                df["fecha_inversion"].notna() &
-                (df["fecha_inversion"] <= hoy) &
-                (df["fecha_final_inversion"].isna() | (df["fecha_final_inversion"] >= hoy))
-            ]
-            if inv_buscar:
-                activas = activas[activas["inversor"].str.upper().str.contains(inv_buscar, na=False)]
-                if activas.empty:
-                    return f"No se encontró capital activo para '{inv_buscar}'"
-                inv_real = activas["inversor"].iloc[0]
-                total = float(activas["capital_invertido"].sum())
-                return f"CAPITAL ACTIVO {inv_real} a {hoy.strftime('%d/%m/%Y')}: ${total:,.2f}"
-            else:
-                por_inv = activas.groupby("inversor")["capital_invertido"].sum().sort_values(ascending=False)
-                lineas = [f"CAPITAL ACTIVO TOTAL a {hoy.strftime('%d/%m/%Y')}: ${float(por_inv.sum()):,.2f}", ""]
-                for inv, cap in por_inv.items():
-                    lineas.append(f"  {inv}: ${float(cap):,.2f}")
-                return "\n".join(lineas)
-
-        # ── get_calendario_notas ────────────────────────────────────────
-        elif nombre == "get_calendario_notas":
-            dias = params.get("dias", 90)
-            tipo = params.get("tipo", "ALL").upper()
-            nota_f = params.get("nota")
-            limite = hoy + pd.Timedelta(days=dias)
-            try:
-                df_calls_t = leer_hoja_excel("CALENDARIO_CALLS")
-            except:
-                df_calls_t = None
-            cal = preparar_calendario_integrado_notas(df_inv=df_inv, df_cal=df_cal, df_control=df_control,
-                                                       df_calls=df_calls_t, fecha_inicio=hoy, fecha_fin=limite)
-            if cal.empty:
-                return f"Sin eventos en los próximos {dias} días."
-            if tipo != "ALL":
-                cal = cal[cal["tipo_evento"].astype(str).str.upper() == tipo]
-            if nota_f:
-                cal = cal[pd.to_numeric(cal.get("nota"), errors="coerce") == nota_f]
-            if cal.empty:
-                return f"Sin eventos de tipo {tipo} en los próximos {dias} días."
-            lineas = [f"CALENDARIO NOTAS — próximos {dias} días:"]
-            for _, r in cal.sort_values("fecha").iterrows():
-                fecha_s = pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y")
-                monto = float(r.get("monto_cobro",0) or 0)
-                monto_s = f" | ${monto:,.2f}" if monto > 0 else ""
-                lineas.append(f"  {fecha_s} | NOTA_{int(r.get('nota',0)):02d} | {r.get('tipo_evento','')} | {r.get('estado','')}{monto_s}")
-            if tipo in ["ALL","PAGO"]:
-                tot = float(cal[cal["tipo_evento"].astype(str).str.upper()=="PAGO"]["monto_cobro"].apply(pd.to_numeric, errors="coerce").fillna(0).sum())
-                lineas.append(f"TOTAL COBROS PERÍODO: ${tot:,.2f}")
-            return "\n".join(lineas)
-
-        # ── get_notas_riesgo ────────────────────────────────────────────
-        elif nombre == "get_notas_riesgo":
-            solo_riesgo = params.get("solo_riesgo", True)
-            try:
-                alertas = detectar_alertas_financieras(df_inv, df_cal, df_control)
-            except:
-                alertas = None
-
-            # Obtener calendario para próximos eventos
-            try:
-                df_calls_t2 = leer_hoja_excel("CALENDARIO_CALLS")
-                cal_fut = preparar_calendario_integrado_notas(df_inv=df_inv, df_cal=df_cal, df_control=df_control,
-                                                               df_calls=df_calls_t2, fecha_inicio=hoy,
-                                                               fecha_fin=hoy+pd.Timedelta(days=180))
-            except:
-                cal_fut = pd.DataFrame()
-
-            def _proximos_nota(nota_id):
-                extras = []
-                if cal_fut.empty: return extras
-                cn = cal_fut[pd.to_numeric(cal_fut.get("nota"), errors="coerce").fillna(-1) == nota_id].sort_values("fecha")
-                for tipo_ev in ["CALL","PAGO","OBSERVACION"]:
-                    filt = cn[cn["tipo_evento"].astype(str).str.upper() == tipo_ev]
-                    if not filt.empty:
-                        r = filt.iloc[0]
-                        monto = float(r.get("monto_cobro",0) or 0)
-                        monto_s = f" | ${monto:,.2f}" if monto > 0 else ""
-                        extras.append(f"    Próximo {tipo_ev}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')}{monto_s}")
-                return extras
-
-            lineas = ["ESTADO DE NOTAS ESTRUCTURADAS:"]
-            negativas, pendientes, positivas = [], [], []
-
-            if alertas is not None and not alertas.empty:
-                alertas.columns = [str(c).strip().lower() for c in alertas.columns]
-                for _, r in alertas.iterrows():
-                    nota_val = pd.to_numeric(r.get("nota",0), errors="coerce")
-                    if pd.isna(nota_val): continue
-                    nota_id = int(nota_val)
-                    estado  = str(r.get("estado","")).upper()
-                    fecha_s = ""
-                    try: fecha_s = pd.Timestamp(r.get("fecha")).strftime("%d/%m/%Y")
-                    except: pass
-                    det = str(r.get("detalle",""))[:100]
-                    entry = (nota_id, f"  NOTA_{nota_id:02d} | {fecha_s} | {estado} | {det}")
-                    if estado in ["NEGATIVA","RIESGO"]:
-                        negativas.append(entry)
-                    elif estado == "PENDIENTE":
-                        pendientes.append(entry)
-                    else:
-                        positivas.append(entry)
-            else:
-                # Fallback: observaciones futuras del calendario
-                df_obs_fb = df_cal.copy()
-                df_obs_fb["fecha"] = pd.to_datetime(df_obs_fb["fecha"], errors="coerce")
-                df_obs_fb["tipo_evento"] = df_obs_fb["tipo_evento"].fillna("").astype(str).str.upper()
-                obs_prox_fb = df_obs_fb[(df_obs_fb["tipo_evento"]=="OBSERVACION") & (df_obs_fb["fecha"]>=hoy)].sort_values("fecha")
-                for nota_id_raw in sorted(obs_prox_fb["nota"].dropna().unique()):
-                    try:
-                        nota_id2 = int(nota_id_raw)
-                    except:
-                        continue
-                    r2 = obs_prox_fb[obs_prox_fb["nota"]==nota_id_raw].iloc[0]
-                    fecha_s2 = pd.Timestamp(r2["fecha"]).strftime("%d/%m/%Y")
-                    pendientes.append((nota_id2, f"  NOTA_{nota_id2:02d} | Próx obs: {fecha_s2} | PENDIENTE"))
-
-            if negativas:
-                lineas.append(f"ROJAS / EN RIESGO ({len(negativas)}):")
-                for nota_id, entry in negativas:
-                    lineas.append(entry)
-                    lineas.extend(_proximos_nota(nota_id))
-            else:
-                lineas.append("ROJAS / EN RIESGO: Ninguna")
-
-            if pendientes:
-                lineas.append(f"AMARILLAS / PENDIENTES ({len(pendientes)}):")
-                for nota_id, entry in pendientes:
-                    lineas.append(entry)
-                    lineas.extend(_proximos_nota(nota_id))
-
-            if not solo_riesgo and positivas:
-                lineas.append(f"VERDES / POSITIVAS ({len(positivas)}):")
-                for nota_id, entry in positivas:
-                    lineas.append(entry)
-
-            return "\n".join(lineas)
-
-        # ── get_intereses_todos_inversores ──────────────────────────────
-        elif nombre == "get_intereses_todos_inversores":
-            anio_f = params.get("anio", anio_hoy)
-            mes_f  = params.get("mes")
-            df = _df_extracto()
-            fecha_min = df["fecha_inversion"].dropna().min().to_pydatetime()
-            filas = []
-            ai, mi = fecha_min.year, fecha_min.month
-            while (ai, mi) <= (anio_hoy, mes_hoy):
-                if ai != anio_f:
-                    mi = mi+1 if mi < 12 else 1
-                    ai = ai if mi > 1 else ai+1
-                    continue
-                if mes_f and mi != mes_f:
-                    mi = mi+1 if mi < 12 else 1
-                    ai = ai if mi > 1 else ai+1
-                    continue
-                for _, row in df.iterrows():
-                    int_mes = _calcular_interes_mes(row, ai, mi)
-                    if int_mes > 0:
-                        filas.append({"inversor": str(row.get("inversor","")), "mes": f"{mi:02d}/{ai}", "interes": int_mes})
-                mi = mi+1 if mi < 12 else 1
-                ai = ai if mi > 1 else ai+1
-
-            if not filas:
-                return f"Sin intereses registrados para {anio_f}"
-            df_r = pd.DataFrame(filas)
-            por_inv = df_r.groupby("inversor")["interes"].sum().sort_values(ascending=False)
-            label = f"{mes_f:02d}/{anio_f}" if mes_f else str(anio_f)
-            lineas = [f"INTERESES PAGADOS A TODOS LOS INVERSORES — {label}:"]
-            for inv, total in por_inv.items():
-                lineas.append(f"  {inv}: ${float(total):,.2f}")
-            lineas.append(f"TOTAL: ${float(por_inv.sum()):,.2f}")
-            return "\n".join(lineas)
-
-        return f"Herramienta '{nombre}' no reconocida"
-
-    # ── Bucle de llamada a la API con function calling ────────────────
     if st.session_state["chat_ia_cf"] and st.session_state["chat_ia_cf"][-1]["role"] == "user":
         ultima = st.session_state["chat_ia_cf"][-1]["content"]
         with st.chat_message("assistant"):
             with st.spinner("Analizando..."):
                 try:
-                    api_key = st.secrets.get("ANTHROPIC_API_KEY","") or st.secrets.get("anthropic",{}).get("api_key","")
+                    # Detectar fecha límite en la pregunta (ej: "hasta el 07/06/2026")
+                    fecha_limite = None
+                    m_fecha = _re_ia.search(r"hasta\s+(?:el\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", ultima.lower())
+                    if m_fecha:
+                        d, mo = int(m_fecha.group(1)), int(m_fecha.group(2))
+                        yr = int(m_fecha.group(3)) if m_fecha.group(3) else pd.Timestamp.today().year
+                        fecha_limite = f"{yr}-{mo:02d}-{d:02d}"
 
-                    SYSTEM_IA = """Eres el asistente financiero de Chaparro Fernández Wealth Management.
+                    ctx = _contexto_excel(ultima, fecha_limite)
 
-REGLA ABSOLUTA: Para responder cualquier pregunta sobre datos del fondo, SIEMPRE usa una de las herramientas disponibles. NUNCA calcules ni inventes datos por tu cuenta.
-
-Herramientas disponibles:
-- get_intereses_inversor → intereses pagados a un inversor concreto
-- get_capital_activo → capital activo del fondo o de un inversor
-- get_calendario_notas → cobros, observaciones y calls próximos
-- get_notas_riesgo → qué notas están en riesgo (rojo/amarillo/verde)
-- get_intereses_todos_inversores → intereses de todos los inversores en un período
-
-Cuando el usuario pregunte algo, identifica qué herramienta usar y llámala. La herramienta te devolverá los datos exactos del Excel — responde con esos datos directamente.
-
-Responde siempre en español. Sé conciso y directo. Fechas DD/MM/YYYY, importes con $ y 2 decimales."""
-
-                    # Historial limpio (solo texto)
-                    historial_ia = []
-                    for m in st.session_state["chat_ia_cf"][:-1][-6:]:
-                        if isinstance(m["content"], str):
-                            historial_ia.append({"role": m["role"], "content": m["content"]})
-                    historial_ia.append({"role": "user", "content": ultima})
-
-                    # Seleccionar PDFs relevantes
-                    import re as _re_ia2
-                    nums = _re_ia2.findall(r"nota[_\s]*(\d+)", ultima.lower())
+                    # Seleccionar PDFs relevantes (máx 2 para no superar tokens)
+                    nums = _re_ia.findall(r"nota[_\s]*(\d+)", ultima.lower())
                     if nums:
-                        def _norm(s): return _re_ia2.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
+                        def _norm(s): return _re_ia.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
                         pdfs_sel = {k:v for k,v in pdfs_b64.items() if any(_norm(k)==f"nota{n}" for n in nums)}
+                        if not pdfs_sel: pdfs_sel = dict(list(pdfs_b64.items())[:2])
+                    elif any(w in ultima.lower() for w in ["call","cobro","pago","barrera","vencimiento","próximo","proximo"]):
+                        pdfs_sel = dict(list(pdfs_b64.items())[:2])
                     else:
                         pdfs_sel = {}
 
-                    # Si hay PDFs relevantes, añadirlos al mensaje
-                    if pdfs_sel:
-                        contenido_user = []
-                        for nombre_pdf, pdf_b64 in list(pdfs_sel.items())[:2]:
-                            contenido_user.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
-                        contenido_user.append({"type":"text","text":ultima})
-                        historial_ia[-1] = {"role":"user","content":contenido_user}
+                    # Construir mensaje con PDFs + contexto
+                    contenido = []
+                    for nombre_pdf, pdf_b64 in pdfs_sel.items():
+                        contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
+                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:20000]}\n\n---\nPREGUNTA: {ultima}"})
 
-                    respuesta = ""
-                    # Bucle: el IA puede llamar herramientas múltiples veces
-                    MAX_ITER = 5
-                    for _ in range(MAX_ITER):
-                        resp = _req_ia.post(
-                            "https://api.anthropic.com/v1/messages",
-                            headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
-                            json={
-                                "model": "claude-sonnet-4-6",
-                                "max_tokens": 2000,
-                                "system": SYSTEM_IA,
-                                "tools": TOOLS,
-                                "messages": historial_ia
-                            },
-                            timeout=60
-                        )
-                        data = resp.json()
+                    # Solo los últimos 2 turnos del historial (sin datos pesados)
+                    historial = []
+                    mensajes_prev = st.session_state["chat_ia_cf"][:-1]
+                    for m in mensajes_prev[-4:]:
+                        # Solo texto plano del historial, nunca los bloques con PDFs/contexto
+                        if isinstance(m["content"], str):
+                            historial.append({"role": m["role"], "content": m["content"]})
+                    historial.append({"role": "user", "content": contenido})
 
-                        if data.get("error"):
-                            respuesta = f"Error API: {data['error'].get('message', str(data['error']))}"
-                            break
+                    api_key = st.secrets.get("ANTHROPIC_API_KEY","") or st.secrets.get("anthropic",{}).get("api_key","")
+                    resp = _req_ia.post("https://api.anthropic.com/v1/messages",
+                        headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
+                        json={"model":"claude-sonnet-4-5","max_tokens":2000,
+                              "system": """Eres el asistente financiero de Chaparro Fernández Wealth Management. Respondes con total precisión usando ÚNICAMENTE los datos del contexto que se te proporciona.
 
-                        stop_reason = data.get("stop_reason","")
-                        content_blocks = data.get("content", [])
+== LAS 3 FUENTES DE DATOS — USA SIEMPRE LA CORRECTA ==
 
-                        # Si el IA quiere usar una herramienta
-                        if stop_reason == "tool_use":
-                            # Añadir respuesta del IA al historial
-                            historial_ia.append({"role":"assistant","content":content_blocks})
+FUENTE 1A — COBROS DE NOTAS Y FECHAS (sección CALENDARIO NOTAS del contexto):
+  Usa esta fuente para: ¿cuánto cobraremos de notas este mes? ¿cuándo es el próximo cobro? ¿qué cobros hay entre fecha X e Y? ¿cuándo es el próximo call u observación?
+  Los importes ya están calculados en el calendario. No los recalcules tú.
 
-                            # Ejecutar todas las herramientas que pidió
-                            tool_results = []
-                            for block in content_blocks:
-                                if block.get("type") == "tool_use":
-                                    tool_name   = block["name"]
-                                    tool_input  = block.get("input",{})
-                                    tool_id     = block["id"]
-                                    resultado   = _ejecutar_herramienta(tool_name, tool_input)
-                                    tool_results.append({
-                                        "type": "tool_result",
-                                        "tool_use_id": tool_id,
-                                        "content": resultado
-                                    })
+FUENTE 1B — NOTAS EN RIESGO (sección ESTADO DE RIESGO DE NOTAS del contexto):
+  Usa esta fuente para: ¿qué notas están en riesgo? ¿cuáles son negativas? ¿cuáles tienen observación pendiente? ¿estado de la NOTA_XX?
+  Las notas están clasificadas como NEGATIVA (en riesgo), PENDIENTE (observación pendiente), POSITIVA (ok) o SIN_DATO.
+  NUNCA inventes el estado de una nota — léelo directamente de esta sección.
 
-                            # Añadir resultados al historial y continuar
-                            historial_ia.append({"role":"user","content":tool_results})
+FUENTE 2 — INTERESES A INVERSORES / LO QUE PAGAMOS NOSOTROS (secciones INTERESES A PAGAR A INVERSORES y EXTRACTO ACUMULADO del contexto):
+  Usa esta fuente para: ¿cuánto cobra PAM este mes? ¿cuánto hemos pagado a JEP desde el inicio? ¿cuánto pagaremos a todos los inversores en junio? ¿intereses acumulados de un inversor?
+  Estos importes vienen de la lógica de extractos (solo operaciones NUEVA y CANCELADA).
 
-                        else:
-                            # Respuesta final
-                            respuesta = "".join(b.get("text","") for b in content_blocks if b.get("type")=="text")
-                            if not respuesta:
-                                respuesta = f"Error: respuesta vacía. {data}"
-                            break
-                    else:
-                        respuesta = "Error: demasiadas iteraciones de herramientas."
+FUENTE 3 — CAPITAL ACTIVO (sección CAPITAL ACTIVO HOY del contexto):
+  Usa esta fuente para: ¿cuánto capital tenemos activo? ¿cuánto tiene invertido cada inversor? ¿cuál es el capital total del fondo?
 
+== REGLA DE ORO — LA MÁS IMPORTANTE ==
+PROHIBIDO CALCULAR. PROHIBIDO INVENTAR.
+Los intereses pagados a inversores están en la sección "EXTRACTO COMPLETO INTERESES PAGADOS A INVERSORES".
+LEE EL DATO DE AHÍ Y REPÍTELO. No hagas ningún cálculo propio.
+Si ves "$7,908.31" para PAM 2025 en el extracto, la respuesta es "$7,908.31". Sin más.
+Si un inversor no aparece en un mes del extracto, significa que ese mes no tenía capital invertido — NO pongas $0 ni calcules nada.
+Si el dato no está en el extracto, di "no tengo ese dato en el extracto".
+
+== ESTRUCTURA DEL NEGOCIO ==
+El fondo capta capital de inversores, lo invierte en activos (notas estructuradas, Paraguay, Bolivia, MotoClick, Fútbol, Bitcoin) y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.
+
+== INVERSORES Y TASAS ==
+LEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%
+ROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+CROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%
+CHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago
+GOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%
+JORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%
+
+== FORMATO ==
+Responde SIEMPRE en español. Da el dato pedido directamente y de forma concisa. Fechas DD/MM/YYYY, importes con $ y 2 decimales.""",
+                              "messages":historial},timeout=60)
+                    data = resp.json()
+                    respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
+                    if not respuesta:
+                        respuesta = f"Error API: {data.get('error',{}).get('message',str(data))}"
                 except Exception as e:
                     respuesta = f"Error: {e}"
-
                 st.markdown(respuesta)
         st.session_state["chat_ia_cf"].append({"role":"assistant","content":respuesta})
 
