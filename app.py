@@ -5973,23 +5973,72 @@ def seccion_asistente_ia_fondo():
             except:
                 estado_por_nota = {}
 
-            # 2. Precios actuales y barreras (CONTROL_NOTAS)
+            # 2. Precios actuales via yfinance + barreras (CONTROL_NOTAS)
+            try:
+                import yfinance as _yf
+                tickers_unicos = df_control["ticker"].dropna().unique().tolist() if "ticker" in df_control.columns else []
+                precios_live = {}
+                if tickers_unicos:
+                    datos_yf = _yf.download(tickers_unicos, period="1d", auto_adjust=True, progress=False)
+                    if "Close" in datos_yf.columns:
+                        ultimo = datos_yf["Close"].iloc[-1]
+                        for t in tickers_unicos:
+                            try:
+                                v = float(ultimo[t]) if t in ultimo else float(ultimo)
+                                if not pd.isna(v):
+                                    precios_live[str(t).upper()] = v
+                            except:
+                                pass
+            except:
+                precios_live = {}
+
             def _precios_nota(nota_id):
                 try:
                     filas = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
                     if filas.empty: return ""
                     partes = []
                     for _, r in filas.iterrows():
-                        ticker = str(r.get("ticker","")).strip()
-                        precio_actual = pd.to_numeric(r.get("precio_actual"), errors="coerce")
-                        barrera = pd.to_numeric(r.get("barrera_capital") or r.get("barrera_cupon"), errors="coerce")
+                        ticker = str(r.get("ticker","")).strip().upper()
+                        precio_actual = precios_live.get(ticker, pd.to_numeric(r.get("precio_actual"), errors="coerce"))
+                        precio_compra = pd.to_numeric(r.get("precio_compra"), errors="coerce")
+                        barrera_cap = pd.to_numeric(r.get("barrera_capital"), errors="coerce")
+                        barrera_cup = pd.to_numeric(r.get("barrera_cupon"), errors="coerce")
+                        barrera = barrera_cap if not pd.isna(barrera_cap) else barrera_cup
                         if ticker:
                             p_s = f"${precio_actual:,.2f}" if not pd.isna(precio_actual) else "N/D"
                             b_s = f"${barrera:,.2f}" if not pd.isna(barrera) else "N/D"
-                            partes.append(f"{ticker}: precio={p_s} barrera={b_s}")
+                            # Calcular variación
+                            if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0:
+                                var = (precio_actual - precio_compra) / precio_compra * 100
+                                var_s = f" ({var:+.1f}%)"
+                                alerta = " 🔴" if var <= -35 else (" 🟡" if var <= -25 else "")
+                            else:
+                                var_s = ""
+                                alerta = ""
+                            partes.append(f"{ticker}: precio={p_s}{var_s} | barrera={b_s}{alerta}")
                     return " | ".join(partes)
                 except:
                     return ""
+
+            # Calcular estado real por nota usando variación de precio
+            def _estado_nota_precio(nota_id):
+                try:
+                    filas = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
+                    peor_var = 0
+                    for _, r in filas.iterrows():
+                        ticker = str(r.get("ticker","")).strip().upper()
+                        precio_actual = precios_live.get(ticker, pd.to_numeric(r.get("precio_actual"), errors="coerce"))
+                        precio_compra = pd.to_numeric(r.get("precio_compra"), errors="coerce")
+                        if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0:
+                            var = (precio_actual - precio_compra) / precio_compra * 100
+                            if var < peor_var:
+                                peor_var = var
+                    if peor_var <= -35: return "ROJA"
+                    if peor_var <= -25: return "AMARILLA"
+                    if peor_var < 0: return "OK"
+                    return "PENDIENTE"
+                except:
+                    return "PENDIENTE"
 
             # 3. Próxima observación futura (CALENDARIO_NOTAS)
             df_c_riesgo = df_cal.copy()
@@ -6015,23 +6064,26 @@ def seccion_asistente_ia_fondo():
             negativas, pendientes, positivas = [], [], []
 
             for nota_id in todas_notas:
-                estado, detalle = estado_por_nota.get(nota_id, ("PENDIENTE", ""))
+                # Estado por variación de precio (igual que pantalla Notas estructuradas)
+                estado_precio = _estado_nota_precio(nota_id)
                 prox_obs_s = prox_obs_dict.get(nota_id, "Sin obs programada")
                 prox_call_s = prox_call_dict.get(nota_id, "")
                 precios_s = _precios_nota(nota_id)
 
-                linea = f"  NOTA_{nota_id:02d} | Estado: {estado} | Próx obs: {prox_obs_s}"
+                linea = f"  NOTA_{nota_id:02d} | Estado: {estado_precio} | Próx obs: {prox_obs_s}"
                 if prox_call_s:
                     linea += f" | Próx call: {prox_call_s}"
                 if precios_s:
                     linea += f"\n    Precios: {precios_s}"
 
-                if estado == "NEGATIVA":
+                if estado_precio == "ROJA":
                     negativas.append(linea)
-                elif estado == "POSITIVA":
+                elif estado_precio == "AMARILLA":
+                    pendientes.append(linea)
+                elif estado_precio == "OK":
                     positivas.append(linea)
                 else:
-                    pendientes.append(linea)
+                    pendientes.append(linea)  # PENDIENTE = sin precio disponible
 
             if negativas:
                 lineas.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
