@@ -5320,6 +5320,48 @@ def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
     return total, por_nota
 
 
+HOJA_REPARTO_DIVIDENDOS = "REPARTO_DIVIDENDOS"
+
+
+def cargar_reparto_dividendos() -> pd.DataFrame:
+    """Lee la hoja REPARTO_DIVIDENDOS del Excel.
+    Columnas esperadas: fecha, importe, descripcion.
+    Cada fila es un reparto de dividendos que AUMENTA la deuda con Jordi,
+    igual que los intereses de JEP.
+    """
+    try:
+        df = pd.read_excel(ARCHIVO, sheet_name=HOJA_REPARTO_DIVIDENDOS)
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
+        df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
+        if "descripcion" not in df.columns:
+            df["descripcion"] = ""
+        return df.dropna(subset=["fecha"])
+    except Exception:
+        return pd.DataFrame(columns=["fecha", "importe", "descripcion"])
+
+
+def _reparto_dividendos_mes(df_rep, anio, mes):
+    """
+    Total de reparto de dividendos del mes (aumenta la deuda con Jordi).
+    Devuelve (total, {descripcion: importe})
+    """
+    if df_rep.empty:
+        return 0.0, {}
+    mes_rows = df_rep[
+        (df_rep["fecha"].dt.year == anio) &
+        (df_rep["fecha"].dt.month == mes)
+    ]
+    if mes_rows.empty:
+        return 0.0, {}
+    total = float(mes_rows["importe"].sum())
+    por_item = {}
+    for _, r in mes_rows.iterrows():
+        desc = str(r.get("descripcion", "") or "").strip() or "Reparto de dividendos"
+        por_item[desc] = por_item.get(desc, 0) + float(r["importe"])
+    return total, por_item
+
+
 def _intereses_jep_mes(df_inv, anio, mes):
     """
     Intereses devengados a JEP en el mes, agrupados por tipo de activo.
@@ -5363,12 +5405,14 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
     Evolución mes a mes de la deuda con Jordi Chaparro.
     RESTA: beneficio fijos (Paraguay/Motoclick/Futbol/Bolivia) + beneficio notas cuenta JORDI
     SUMA:  intereses devengados a JEP (todos sus activos, pro-rata días)
+           + reparto de dividendos (hoja REPARTO_DIVIDENDOS)
     """
     hoy = pd.Timestamp.today().normalize()
     filas = []
     saldo = capital_inicial
     anio = fecha_inicio.year
     mes = fecha_inicio.month
+    df_reparto = cargar_reparto_dividendos()
 
     ACTIVOS_FIJOS = [
         ("Paraguay",  "paraguay",  TASA_ANUAL_PARAGUAY),
@@ -5404,9 +5448,12 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
         # 3) Intereses devengados a JEP (pro-rata días, agrupados por tipo)
         pago_jep, jep_por_grupo = _intereses_jep_mes(df_inv, anio, mes)
 
+        # 4) Reparto de dividendos del mes (aumenta la deuda, igual que JEP)
+        reparto_dividendos, reparto_por_item = _reparto_dividendos_mes(df_reparto, anio, mes)
+
         # Total ingresos compañía = ingresos fijos + cobro notas JORDI
         resta = ingreso_fijos_total + cobro_notas_jordi
-        suma = pago_jep
+        suma = pago_jep + reparto_dividendos
         saldo_inicio = saldo
         saldo = saldo + suma - resta
 
@@ -5419,6 +5466,8 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
             "cobro_notas_jordi": cobro_notas_jordi,
             "jep_por_grupo": jep_por_grupo,           # dict grupo->interes
             "pago_jep": pago_jep,
+            "reparto_por_item": reparto_por_item,     # dict descripcion->importe
+            "reparto_dividendos": reparto_dividendos,
             "total_resta": resta,
             "total_suma": suma,
             "variacion_neta": suma - resta,
@@ -5452,7 +5501,7 @@ def seccion_deuda_jordi():
 
     st.caption(f"Deuda inicial: **${capital_inicial:,.2f}** · Fecha inicio: **{fecha_inicio.strftime('%d/%m/%Y')}**")
     st.caption("La deuda **baja** con: beneficio empresa de Paraguay + Motoclick + Fútbol + Bolivia + cobros de notas en cuenta JORDI.  "
-               "La deuda **sube** con: intereses mensuales de JEP (todos sus activos).")
+               "La deuda **sube** con: intereses mensuales de JEP (todos sus activos) + reparto de dividendos.")
 
     with st.spinner("Calculando evolución de la deuda..."):
         df_evol = calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial, fecha_inicio)
@@ -5539,6 +5588,17 @@ def seccion_deuda_jordi():
                 html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#c0392b;font-weight:bold;border-top:1px solid #f5c6cb;margin-top:4px;padding-top:4px;">
                       <span>TOTAL intereses JEP</span><span>+${fila['pago_jep']:,.2f}</span></div></div>"""
 
+            # ── REPARTO DE DIVIDENDOS: AUMENTA DEUDA ──
+            reparto_items = fila.get("reparto_por_item", {}) or {}
+            if reparto_items:
+                html += f"""<div style="background:#fdf0f0;border-left:4px solid #c0392b;padding:8px 12px;margin:8px 0;border-radius:4px;">
+                  <div style="color:#c0392b;font-weight:bold;margin-bottom:4px;">➕ AUMENTA LA DEUDA — Reparto de dividendos</div>"""
+                for desc, importe in reparto_items.items():
+                    html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#7b241c;">
+                      <span>{desc}</span><span style="font-weight:bold;">+${importe:,.2f}</span></div>"""
+                html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#c0392b;font-weight:bold;border-top:1px solid #f5c6cb;margin-top:4px;padding-top:4px;">
+                      <span>TOTAL reparto dividendos</span><span>+${fila['reparto_dividendos']:,.2f}</span></div></div>"""
+
             # ── ACTIVOS FIJOS: REDUCE DEUDA ── cobro bruto por activo
             det_fijos = fila.get("detalle_fijos", []) or []
             if det_fijos:
@@ -5577,7 +5637,7 @@ def seccion_deuda_jordi():
 
     # ── Tabla resumen mes a mes ────────────────────────────────────────────
     st.subheader("📊 Tabla resumen")
-    cols_tabla = ["mes","saldo_inicio","ingreso_fijos","cobro_notas_jordi","total_resta","pago_jep","variacion_neta","saldo_fin"]
+    cols_tabla = ["mes","saldo_inicio","ingreso_fijos","cobro_notas_jordi","total_resta","pago_jep","reparto_dividendos","variacion_neta","saldo_fin"]
     tabla = df_evol[cols_tabla].copy()
     tabla = tabla.rename(columns={
         "mes": "Mes",
@@ -5586,6 +5646,7 @@ def seccion_deuda_jordi():
         "cobro_notas_jordi": "Cobro notas JORDI ($)",
         "total_resta": "Total resta ($)",
         "pago_jep": "Intereses JEP ($)",
+        "reparto_dividendos": "Reparto dividendos ($)",
         "variacion_neta": "Variación neta ($)",
         "saldo_fin": "Saldo fin mes ($)",
     })
@@ -5604,6 +5665,7 @@ def seccion_deuda_jordi():
             "Benef. notas JORDI ($)": "${:,.2f}",
             "Total resta ($)": "${:,.2f}",
             "Intereses JEP ($)": "${:,.2f}",
+            "Reparto dividendos ($)": "${:,.2f}",
             "Variación neta ($)": "${:,.2f}",
             "Saldo fin mes ($)": "${:,.2f}",
         })
