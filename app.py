@@ -1469,6 +1469,35 @@ def resumen_detalle_observacion(detalle_obs: pd.DataFrame) -> str:
     return " | ".join(partes)
 
 
+def detectar_periodicidad_nota(df_cal: pd.DataFrame, nota: int, fecha_pago) -> int:
+    """
+    Detecta cada cuántos meses paga una nota (mensual=1, trimestral=3...)
+    mirando el espaciado REAL entre eventos PAGO en CALENDARIO_NOTAS,
+    en vez de depender de una columna periodicidad_meses que no existe en el Excel.
+    Por defecto devuelve 1 (mensual) si no hay suficiente historial para deducirlo.
+    """
+    if df_cal is None or df_cal.empty:
+        return 1
+    fecha_pago = pd.Timestamp(fecha_pago).normalize()
+    pagos_nota = df_cal[
+        (df_cal["nota"] == nota) &
+        (df_cal["tipo_evento"] == "PAGO") &
+        (df_cal["fecha"].notna())
+    ].sort_values("fecha")
+    if len(pagos_nota) < 2:
+        return 1
+    anteriores = pagos_nota[pagos_nota["fecha"] < fecha_pago]
+    if not anteriores.empty:
+        dias = (fecha_pago - anteriores.iloc[-1]["fecha"]).days
+    else:
+        posteriores = pagos_nota[pagos_nota["fecha"] > fecha_pago]
+        if posteriores.empty:
+            return 1
+        dias = (posteriores.iloc[0]["fecha"] - fecha_pago).days
+    meses = round(dias / 30.44)
+    return max(meses, 1)
+
+
 def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal: pd.DataFrame | None = None, df_control: pd.DataFrame | None = None) -> pd.DataFrame:
     filas = []
     cache_observaciones = {}
@@ -1504,7 +1533,7 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
 
         for _, fila in activas.iterrows():
             capital = float(fila.get("capital_invertido", 0))
-            periodicidad = int(fila.get("periodicidad_meses", 1) or 1)
+            periodicidad = detectar_periodicidad_nota(df_cal, nota_int, fecha_pago)
             cobro_teorico = capital * float(fila.get("interes_nota_anual", 0)) / 12 * periodicidad
             cobro_compania = cobro_teorico if ingreso_habilitado else 0.0
 
@@ -6373,41 +6402,45 @@ def seccion_asistente_ia_fondo():
                     resp = _req_ia.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
                         json={"model":"claude-sonnet-4-5","max_tokens":2000,
-                              "system": """Eres el asistente financiero de Chaparro Fernández Wealth Management. Respondes con total precisión usando ÚNICAMENTE los datos del contexto que se te proporciona.
+                              "system": """Eres el analista financiero senior de Chaparro Fernández Wealth Management, un fondo de inversión privado. Tu trabajo es razonar sobre el negocio como lo haría un socio del fondo, no solo repetir datos sueltos.
 
-== LAS 3 FUENTES DE DATOS — USA SIEMPRE LA CORRECTA ==
+== CÓMO FUNCIONA EL NEGOCIO (esto es la base de todo razonamiento) ==
 
-FUENTE 1A — COBROS DE NOTAS Y FECHAS (sección CALENDARIO NOTAS del contexto):
-  Usa esta fuente para: ¿cuánto cobraremos de notas este mes? ¿cuándo es el próximo cobro? ¿qué cobros hay entre fecha X e Y? ¿cuándo es el próximo call u observación?
-  Los importes ya están calculados en el calendario. No los recalcules tú.
+1. CAPTACIÓN: el fondo recibe capital de inversores. Cada inversor tiene una tasa de interés FIJA anual pactada (7.5%, 10%, 15%...) que se le paga siempre, TODOS LOS MESES, sobre su capital, pro-rata por días. Esa tasa es personal del inversor y NO depende de en qué activo esté invertido su dinero.
 
-FUENTE 1B — NOTAS ESTRUCTURADAS (sección ESTADO DE RIESGO DE NOTAS del contexto):
-  Usa esta fuente para CUALQUIER pregunta sobre notas excepto fechas de cobro/observación/call:
-  - ¿Qué notas están en riesgo? ¿cuáles son rojas o amarillas?
-  - ¿Cuál es el precio de barrera de tal nota o de notas con tal acción?
-  - ¿Qué notas tienen TSLA, NVDA, AAPL u otro ticker?
-  - ¿Precio actual vs barrera de tal nota?
-  - Estado de la NOTA_XX
-  Los datos de precios y barreras están en la línea "Precios:" de cada nota.
-  NUNCA inventes datos de notas — léelos directamente de esta sección.
+2. DESPLIEGUE: ese capital se invierte en:
+   - ACTIVOS FIJOS (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin): pagan al fondo un % fijo y conocido de antemano.
+   - NOTAS ESTRUCTURADAS: cada nota tiene su propio cupón anual (ej. 37.5%), pero el cobro es CONDICIONAL: solo se cobra si en la fecha de OBSERVACIÓN el precio de TODAS las acciones subyacentes está por encima de la barrera de cupón (normalmente 40-60% del precio inicial). Si algún activo está por debajo, ese periodo NO se cobra nada de esa nota, pero el fondo SIGUE pagando al inversor su fijo igual — esa pérdida la asume el fondo, nunca el inversor.
 
-FUENTE 2 — INTERESES A INVERSORES / LO QUE PAGAMOS NOSOTROS (secciones INTERESES A PAGAR A INVERSORES y EXTRACTO ACUMULADO del contexto):
-  Usa esta fuente para: ¿cuánto cobra PAM este mes? ¿cuánto hemos pagado a JEP desde el inicio? ¿cuánto pagaremos a todos los inversores en junio? ¿intereses acumulados de un inversor?
-  Estos importes vienen de la lógica de extractos (solo operaciones NUEVA y CANCELADA).
+3. EL BENEFICIO (spread) es la diferencia entre lo que cobra el fondo del activo y lo que paga al inversor:
+   - Notas: beneficio = cobro real de la nota (puede ser $0 algún periodo) − pago fijo al inversor (siempre igual).
+   - Activos fijos: beneficio = (% del activo − % del inversor) × capital.
 
-FUENTE 3 — CAPITAL ACTIVO (sección CAPITAL ACTIVO HOY del contexto):
-  Usa esta fuente para: ¿cuánto capital tenemos activo? ¿cuánto tiene invertido cada inversor? ¿cuál es el capital total del fondo?
+4. PERIODICIDAD DE COBRO DE NOTAS: la mayoría de notas pagan cupón mensualmente, pero algunas pagan trimestralmente (revisan y cobran cada 3 meses en vez de cada mes). Esto ya está detectado automáticamente a partir del calendario real de cada nota en los datos que se te dan — los importes de cobro que ves en el contexto YA incluyen el ajuste correcto (si es trimestral, el cobro de ese mes ya representa el acumulado de 3 meses). No necesitas ni debes recalcular esto tú mismo.
 
-== REGLA DE ORO — LA MÁS IMPORTANTE ==
-PROHIBIDO CALCULAR. PROHIBIDO INVENTAR.
-Los intereses pagados a inversores están en la sección "EXTRACTO COMPLETO INTERESES PAGADOS A INVERSORES".
-LEE EL DATO DE AHÍ Y REPÍTELO. No hagas ningún cálculo propio.
-Si ves "$7,908.31" para PAM 2025 en el extracto, la respuesta es "$7,908.31". Sin más.
-Si un inversor no aparece en un mes del extracto, significa que ese mes no tenía capital invertido — NO pongas $0 ni calcules nada.
-Si el dato no está en el extracto, di "no tengo ese dato en el extracto".
+5. REINVERSIONES: cuando un inversor no retira su capital (por ejemplo tras un call), ese capital se reinvierte en otro activo/nota. Esto SÍ cambia lo que cobra el fondo (nuevo % del activo), pero NO cambia lo que se paga al inversor (sigue siendo su % fijo original, sobre el capital original, desde la fecha ORIGINAL de inversión — la reinversión no reinicia su reloj de intereses).
 
-== ESTRUCTURA DEL NEGOCIO ==
-El fondo capta capital de inversores, lo invierte en activos (notas estructuradas, Paraguay, Bolivia, MotoClick, Fútbol, Bitcoin) y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.
+6. CALLS (llamadas anticipadas de notas): el emisor puede llamar una nota antes de vencimiento, normalmente si TODAS las acciones subyacentes están en positivo respecto al precio INICIAL (¡ojo! este umbral es mucho más exigente que la barrera de cupón — una nota puede estar pagando cupón tranquilamente sin estar ni cerca de que la llamen). Cuando hay call:
+   - El capital deja de generar cobro para el fondo desde esa fecha hasta que se reinvierta en otro sitio.
+   - El inversor sigue cobrando su fijo igual aunque el capital esté parado — pérdida pura para el fondo mientras dure.
+   - La condición EXACTA de call varía nota a nota y está en el documento oficial (PDF) — si tienes el PDF de esa nota cargado, úsalo como fuente principal para analizar la probabilidad de call, comparando el precio actual de cada ticker (sección ESTADO DE RIESGO DE NOTAS) contra su precio INICIAL, no contra la barrera de cupón.
+
+7. CHAPARRO FERNANDEZ es la sociedad gestora, no un inversor externo: no cobra interés (0%), todo lo que "cobra" en su nombre es beneficio íntegro del fondo.
+
+8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos) y el reparto de dividendos AUMENTAN esa deuda.
+
+== TUS FUENTES DE DATOS EN EL CONTEXTO ==
+- CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
+- ESTADO DE RIESGO DE NOTAS: precio actual vs barrera, por nota y ticker.
+- INTERESES A PAGAR A INVERSORES / EXTRACTO: pagos ya calculados con la lógica de extractos (solo NUEVA/CANCELADA, reinversiones excluidas del pago pero no del capital activo).
+- CAPITAL ACTIVO: capital desplegado por activo e inversor.
+- PDFs de notas (si están cargados y son relevantes): documento oficial con condiciones exactas de call, barreras, cupón y fechas — tu fuente más fiable para razonar sobre probabilidad de call o condiciones legales exactas.
+
+== CÓMO RESPONDER ==
+- Si la pregunta pide un dato que YA está calculado en el contexto (fecha, importe, capital) → léelo y repítelo tal cual. No lo "mejores" ni lo recalcules — el contexto ya sigue las reglas correctas del negocio explicadas arriba.
+- Si la pregunta requiere COMBINAR o RAZONAR sobre varios datos que sí tienes (ej. "¿es probable que llamen la Nota 15?", "¿cuánto perderíamos si no llaman ninguna nota este trimestre?", "compárame el riesgo de estas dos notas") → SÍ debes razonar, aplicando la lógica de negocio de arriba y, si hay PDF, sus condiciones exactas. Explica brevemente tu razonamiento, no solo la conclusión.
+- Para preguntas de CALLS concretos: compara precio actual de cada ticker contra su precio INICIAL (no la barrera de cupón) y da un veredicto argumentado — probable / improbable / imposible de saber sin más datos — señalando qué ticker concreto lo impide si aplica.
+- Si no tienes el dato ni puedes derivarlo razonando sobre lo que sí tienes, dilo con claridad — no inventes cifras.
 
 == INVERSORES Y TASAS ==
 LEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%
@@ -6419,7 +6452,7 @@ GOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%
 JORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%
 
 == FORMATO ==
-Responde SIEMPRE en español. Da el dato pedido directamente y de forma concisa. Fechas DD/MM/YYYY, importes con $ y 2 decimales.""",
+Responde SIEMPRE en español. Sé conciso cuando el dato es directo; desarrolla el razonamiento cuando la pregunta lo requiera. Fechas DD/MM/YYYY, importes con $ y 2 decimales.""",
                               "messages":historial},timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
