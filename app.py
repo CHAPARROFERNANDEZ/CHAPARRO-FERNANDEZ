@@ -3635,11 +3635,24 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
         "Sube el documento oficial (pricing supplement) de una nota nueva. La IA extrae automáticamente "
         "tickers, precios iniciales, barreras, cupón y el calendario de observación/pago. "
         "Revisa siempre la previsualización antes de guardar — cualquier dato marcado con ⚠️ REVISAR "
-        "no se pudo determinar con confianza y hay que rellenarlo a mano."
+        "no se pudo determinar con confianza y hay que rellenarlo a mano.\n\n"
+        "Cada número de nota mantiene su propia previsualización guardada: si cambias de número, "
+        "verás el formulario en blanco para una nota sin empezar, o los datos ya extraídos si vuelves "
+        "a un número en el que ya trabajaste."
     )
 
-    numero_nota = st.number_input("Número de nota (ej. 28)", min_value=1, max_value=999, step=1, key="nueva_nota_numero")
-    pdf_subido = st.file_uploader("Documento oficial de la nota (PDF)", type=["pdf"], key="nueva_nota_pdf")
+    if "notas_wizard_datos" not in st.session_state:
+        st.session_state["notas_wizard_datos"] = {}
+    almacen = st.session_state["notas_wizard_datos"]
+
+    numero_nota = int(st.number_input("Número de nota (ej. 28)", min_value=1, max_value=999, step=1, key="nueva_nota_numero"))
+
+    extraido_guardado = almacen.get(numero_nota)
+
+    if extraido_guardado:
+        st.info(f"📂 Ya hay datos extraídos guardados para la Nota {numero_nota}. Puedes revisarlos abajo, o subir un PDF nuevo para reemplazarlos.")
+
+    pdf_subido = st.file_uploader(f"Documento oficial de la Nota {numero_nota} (PDF)", type=["pdf"], key=f"nueva_nota_pdf_{numero_nota}")
 
     if st.button("🔎 Extraer datos con IA", type="primary", disabled=pdf_subido is None):
         with st.spinner("Leyendo el documento y extrayendo los datos..."):
@@ -3647,23 +3660,19 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
         if "error" in resultado:
             st.error(f"No se pudieron extraer los datos: {resultado['error']}")
         else:
-            st.session_state["nueva_nota_extraida"] = resultado
-            st.session_state["nueva_nota_extraida_numero"] = int(numero_nota)
-            # Se incrementa en cada extracción para forzar claves de widget nuevas
-            # (evita que las tablas editables arrastren datos de una nota anterior).
-            st.session_state["nueva_nota_version"] = st.session_state.get("nueva_nota_version", 0) + 1
-            st.success("Datos extraídos. Revisa la previsualización antes de guardar.")
+            almacen[numero_nota] = resultado
+            st.success(f"Datos extraídos para la Nota {numero_nota}. Revisa la previsualización antes de guardar.")
+            st.rerun()
 
-    extraido = st.session_state.get("nueva_nota_extraida")
+    extraido = almacen.get(numero_nota)
     if not extraido:
         return
-
-    version = st.session_state.get("nueva_nota_version", 0)
 
     def _marcar(valor):
         return "⚠️ REVISAR" if (valor is None or str(valor).strip().upper() == "REVISAR") else valor
 
     st.markdown("---")
+    st.markdown(f"### Nota {numero_nota}")
     st.markdown(f"**Emisor:** {_marcar(extraido.get('emisor'))}  |  **Cupón anual:** {_marcar(extraido.get('cupon_anual_pct'))}  |  **Vencimiento:** {_marcar(extraido.get('fecha_vencimiento'))}")
 
     fecha_inicio_nota = extraido.get("fecha_inicio_nota")
@@ -3681,7 +3690,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
         if fecha_inicio_valida is not None and pd.notna(fecha_inicio_valida) and ticker:
             precio_real = obtener_cierre_ticker_fecha(ticker, fecha_inicio_valida)
         filas_control.append({
-            "NOTA": int(numero_nota),
+            "NOTA": numero_nota,
             "TICKER": _marcar(t.get("ticker")),
             "PRECIO_COMPRA": _marcar(precio_real),
             "BARRERA_CUPON": _marcar(t.get("barrera_cupon_pct")),
@@ -3690,15 +3699,15 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             "BARRERA_CAPITAL": _marcar(t.get("barrera_capital_pct")),
         })
     df_control_preview = pd.DataFrame(filas_control)
-    df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key=f"editor_control_nueva_nota_{version}")
+    df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key=f"editor_control_nota_{numero_nota}")
 
     st.markdown("#### Calendario de observación/pago (se guardará en CALENDARIO_NOTAS)")
     filas_cal = []
     for evento in extraido.get("calendario", []):
-        filas_cal.append({"NOTA": int(numero_nota), "TIPO_EVENTO": "OBSERVACION", "FECHA": _marcar(evento.get("observacion"))})
-        filas_cal.append({"NOTA": int(numero_nota), "TIPO_EVENTO": "PAGO", "FECHA": _marcar(evento.get("pago"))})
+        filas_cal.append({"NOTA": numero_nota, "TIPO_EVENTO": "OBSERVACION", "FECHA": _marcar(evento.get("observacion"))})
+        filas_cal.append({"NOTA": numero_nota, "TIPO_EVENTO": "PAGO", "FECHA": _marcar(evento.get("pago"))})
     df_cal_preview = pd.DataFrame(filas_cal)
-    df_cal_editado = st.data_editor(df_cal_preview, use_container_width=True, num_rows="dynamic", key=f"editor_cal_nueva_nota_{version}")
+    df_cal_editado = st.data_editor(df_cal_preview, use_container_width=True, num_rows="dynamic", key=f"editor_cal_nota_{numero_nota}")
 
     # Fecha de inicio sugerida para INVERSIONES: primer PAGO menos 1 mes
     fechas_pago = pd.to_datetime(
@@ -3717,9 +3726,9 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
         )
 
     st.markdown("#### Fechas de posible call (se guardará en CALENDARIO_CALLS)")
-    filas_calls = [{"NOTA": int(numero_nota), "FECHA_CALL": _marcar(f), "ESTADO": None, "OBSERVACIONES": None} for f in extraido.get("fechas_call", [])]
+    filas_calls = [{"NOTA": numero_nota, "FECHA_CALL": _marcar(f), "ESTADO": None, "OBSERVACIONES": None} for f in extraido.get("fechas_call", [])]
     df_calls_preview = pd.DataFrame(filas_calls)
-    df_calls_editado = st.data_editor(df_calls_preview, use_container_width=True, num_rows="dynamic", key=f"editor_calls_nueva_nota_{version}")
+    df_calls_editado = st.data_editor(df_calls_preview, use_container_width=True, num_rows="dynamic", key=f"editor_calls_nota_{numero_nota}")
 
     hay_revisar = (
         df_control_editado.astype(str).apply(lambda c: c.str.contains("REVISAR", na=False)).any().any()
@@ -3729,18 +3738,24 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
     if hay_revisar:
         st.warning("Hay campos marcados con ⚠️ REVISAR — corrígelos en las tablas de arriba antes de guardar.")
 
-    if st.button("💾 Guardar nota en el Excel", type="primary", disabled=hay_revisar):
-        hojas = leer_todas_las_hojas_excel()
-        if not hojas or "CONTROL_NOTAS" not in hojas or "CALENDARIO_NOTAS" not in hojas:
-            st.error("No se pudo leer el Excel actual para guardar los cambios.")
-        else:
-            hojas["CONTROL_NOTAS"] = pd.concat([hojas["CONTROL_NOTAS"], df_control_editado], ignore_index=True)
-            hojas["CALENDARIO_NOTAS"] = pd.concat([hojas["CALENDARIO_NOTAS"], df_cal_editado], ignore_index=True)
-            if "CALENDARIO_CALLS" in hojas and not df_calls_editado.empty:
-                hojas["CALENDARIO_CALLS"] = pd.concat([hojas["CALENDARIO_CALLS"], df_calls_editado], ignore_index=True)
-            guardar_excel_completo_desde_hojas(hojas)
-            del st.session_state["nueva_nota_extraida"]
-            st.success(f"Nota {int(numero_nota)} guardada en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS.")
+    col_guardar, col_descartar = st.columns([1, 1])
+    with col_guardar:
+        if st.button(f"💾 Guardar Nota {numero_nota} en el Excel", type="primary", disabled=hay_revisar):
+            hojas = leer_todas_las_hojas_excel()
+            if not hojas or "CONTROL_NOTAS" not in hojas or "CALENDARIO_NOTAS" not in hojas:
+                st.error("No se pudo leer el Excel actual para guardar los cambios.")
+            else:
+                hojas["CONTROL_NOTAS"] = pd.concat([hojas["CONTROL_NOTAS"], df_control_editado], ignore_index=True)
+                hojas["CALENDARIO_NOTAS"] = pd.concat([hojas["CALENDARIO_NOTAS"], df_cal_editado], ignore_index=True)
+                if "CALENDARIO_CALLS" in hojas and not df_calls_editado.empty:
+                    hojas["CALENDARIO_CALLS"] = pd.concat([hojas["CALENDARIO_CALLS"], df_calls_editado], ignore_index=True)
+                guardar_excel_completo_desde_hojas(hojas)
+                del almacen[numero_nota]
+                st.success(f"Nota {numero_nota} guardada en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS.")
+    with col_descartar:
+        if st.button(f"🗑️ Descartar previsualización de la Nota {numero_nota}"):
+            del almacen[numero_nota]
+            st.rerun()
 
 
 def seccion_notas_archivo():
