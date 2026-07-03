@@ -49,6 +49,15 @@ TASA_ANUAL_PARAGUAY = 0.15
 TASA_ANUAL_BOLIVIA = 0.15
 TASA_ANUAL_BITCOIN = 0.20
 
+# Posición real del fondo en el ETF de Bitcoin, según confirmación de compra StoneX/Aragon Capital
+BITCOIN_ETF_TICKER = "IBIT"
+BITCOIN_ETF_NOMBRE = "iShares Bitcoin Trust ETF"
+BITCOIN_ETF_UNIDADES = 1030
+BITCOIN_ETF_PRECIO_COMPRA = 38.2899
+BITCOIN_ETF_FECHA_COMPRA = pd.Timestamp("2026-03-30")
+BITCOIN_ETF_CAPITAL_INVERTIDO = 40000.0   # capital aportado por los inversores (Jordi Especial + Chaparro Fernández)
+BITCOIN_ETF_COSTE_REAL = 39443.55         # total pagado en la compra, incluida comisión
+
 MESES_ES_EMAIL = {
     1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
     5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
@@ -2914,6 +2923,76 @@ def boton_descarga_excel(df: pd.DataFrame, nombre_archivo: str, label: str = "�
     )
 
 
+@st.cache_data(show_spinner=False, ttl=1800)
+def obtener_estado_bitcoin_etf():
+    """
+    Precio actual y variación del ETF de Bitcoin (IBIT) respecto al precio de compra,
+    más histórico de precios de los últimos 6 meses para el gráfico desplegable.
+    """
+    resultado = {
+        "precio_actual": None,
+        "variacion_%": None,
+        "valor_actual_posicion": None,
+        "ganancia_perdida": None,
+        "historico": pd.DataFrame(),
+    }
+    if yf is None:
+        return resultado
+    try:
+        ticker_obj = yf.Ticker(BITCOIN_ETF_TICKER)
+        hist = ticker_obj.history(period="6mo")
+        if hist is not None and not hist.empty:
+            cierres = hist["Close"].dropna()
+            if not cierres.empty:
+                precio_actual = float(cierres.iloc[-1])
+                resultado["precio_actual"] = precio_actual
+                resultado["variacion_%"] = (precio_actual - BITCOIN_ETF_PRECIO_COMPRA) / BITCOIN_ETF_PRECIO_COMPRA * 100
+                valor_actual = precio_actual * BITCOIN_ETF_UNIDADES
+                resultado["valor_actual_posicion"] = valor_actual
+                resultado["ganancia_perdida"] = valor_actual - BITCOIN_ETF_COSTE_REAL
+                cierres.index = pd.to_datetime(cierres.index)
+                if cierres.index.tz is not None:
+                    cierres.index = cierres.index.tz_localize(None)
+                resultado["historico"] = cierres
+    except Exception:
+        pass
+    return resultado
+
+
+def tarjeta_bitcoin_etf():
+    """Tarjeta desplegable del Dashboard con precio actualizado y gráfico del ETF de Bitcoin (IBIT)."""
+    estado = obtener_estado_bitcoin_etf()
+    precio_actual = estado.get("precio_actual")
+    variacion = estado.get("variacion_%")
+    valor_actual = estado.get("valor_actual_posicion")
+    ganancia = estado.get("ganancia_perdida")
+
+    if precio_actual is None:
+        st.info(f"No se pudo obtener el precio actual de {BITCOIN_ETF_TICKER} en este momento.")
+        return
+
+    color_estado = "positivo" if variacion is not None and variacion >= 0 else "negativo"
+    flecha = "▲" if variacion is not None and variacion >= 0 else "▼"
+
+    with st.expander(f"₿ {BITCOIN_ETF_NOMBRE} ({BITCOIN_ETF_TICKER}) — {precio_actual:,.2f} $ {flecha} {variacion:+.2f}%", expanded=False):
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            tarjeta_kpi("Precio de compra", f"${BITCOIN_ETF_PRECIO_COMPRA:,.4f}", f"{BITCOIN_ETF_UNIDADES:,} unidades · 30/03/2026", "normal")
+        with b2:
+            tarjeta_kpi("Precio actual", f"${precio_actual:,.4f}", "Última cotización disponible", color_estado)
+        with b3:
+            tarjeta_kpi("Variación", f"{variacion:+.2f}%", "vs. precio de compra", color_estado)
+        with b4:
+            tarjeta_kpi("Valor posición hoy", fmt(valor_actual), f"{'Ganancia' if ganancia >= 0 else 'Pérdida'}: {fmt(ganancia)}", color_estado)
+
+        historico = estado.get("historico")
+        if historico is not None and not historico.empty:
+            df_chart = historico.rename("Precio IBIT").to_frame()
+            df_chart["Precio de compra"] = BITCOIN_ETF_PRECIO_COMPRA
+            st.line_chart(df_chart, height=280)
+        st.caption(f"Compra: {BITCOIN_ETF_UNIDADES:,} unidades a ${BITCOIN_ETF_PRECIO_COMPRA:,.4f} el 30/03/2026 · Coste total ${BITCOIN_ETF_COSTE_REAL:,.2f} · Capital fondo ${BITCOIN_ETF_CAPITAL_INVERTIDO:,.2f}")
+
+
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
 
@@ -3007,6 +3086,8 @@ def dashboard_financiero():
         tarjeta_kpi("% pagado inversores mes", fmt_pct(resumen["rentabilidad_pagada_inversor_mes"]), "Pago inversores / capital", "riesgo")
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
+
+    tarjeta_bitcoin_etf()
 
     if vista_dashboard in ["General", "Notas"]:
         fecha_analisis_notas = pd.Timestamp(anio_dashboard, mes_dashboard, ultimo_dia_mes(anio_dashboard, mes_dashboard)).normalize()
