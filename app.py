@@ -3648,11 +3648,17 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             st.error(f"No se pudieron extraer los datos: {resultado['error']}")
         else:
             st.session_state["nueva_nota_extraida"] = resultado
+            st.session_state["nueva_nota_extraida_numero"] = int(numero_nota)
+            # Se incrementa en cada extracción para forzar claves de widget nuevas
+            # (evita que las tablas editables arrastren datos de una nota anterior).
+            st.session_state["nueva_nota_version"] = st.session_state.get("nueva_nota_version", 0) + 1
             st.success("Datos extraídos. Revisa la previsualización antes de guardar.")
 
     extraido = st.session_state.get("nueva_nota_extraida")
     if not extraido:
         return
+
+    version = st.session_state.get("nueva_nota_version", 0)
 
     def _marcar(valor):
         return "⚠️ REVISAR" if (valor is None or str(valor).strip().upper() == "REVISAR") else valor
@@ -3684,7 +3690,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             "BARRERA_CAPITAL": _marcar(t.get("barrera_capital_pct")),
         })
     df_control_preview = pd.DataFrame(filas_control)
-    df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key="editor_control_nueva_nota")
+    df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key=f"editor_control_nueva_nota_{version}")
 
     st.markdown("#### Calendario de observación/pago (se guardará en CALENDARIO_NOTAS)")
     filas_cal = []
@@ -3692,7 +3698,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
         filas_cal.append({"NOTA": int(numero_nota), "TIPO_EVENTO": "OBSERVACION", "FECHA": _marcar(evento.get("observacion"))})
         filas_cal.append({"NOTA": int(numero_nota), "TIPO_EVENTO": "PAGO", "FECHA": _marcar(evento.get("pago"))})
     df_cal_preview = pd.DataFrame(filas_cal)
-    df_cal_editado = st.data_editor(df_cal_preview, use_container_width=True, num_rows="dynamic", key="editor_cal_nueva_nota")
+    df_cal_editado = st.data_editor(df_cal_preview, use_container_width=True, num_rows="dynamic", key=f"editor_cal_nueva_nota_{version}")
 
     # Fecha de inicio sugerida para INVERSIONES: primer PAGO menos 1 mes
     fechas_pago = pd.to_datetime(
@@ -3713,7 +3719,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
     st.markdown("#### Fechas de posible call (se guardará en CALENDARIO_CALLS)")
     filas_calls = [{"NOTA": int(numero_nota), "FECHA_CALL": _marcar(f), "ESTADO": None, "OBSERVACIONES": None} for f in extraido.get("fechas_call", [])]
     df_calls_preview = pd.DataFrame(filas_calls)
-    df_calls_editado = st.data_editor(df_calls_preview, use_container_width=True, num_rows="dynamic", key="editor_calls_nueva_nota")
+    df_calls_editado = st.data_editor(df_calls_preview, use_container_width=True, num_rows="dynamic", key=f"editor_calls_nueva_nota_{version}")
 
     hay_revisar = (
         df_control_editado.astype(str).apply(lambda c: c.str.contains("REVISAR", na=False)).any().any()
@@ -3734,12 +3740,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
                 hojas["CALENDARIO_CALLS"] = pd.concat([hojas["CALENDARIO_CALLS"], df_calls_editado], ignore_index=True)
             guardar_excel_completo_desde_hojas(hojas)
             del st.session_state["nueva_nota_extraida"]
-            st.success(
-                f"Nota {int(numero_nota)} guardada correctamente en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS. "
-                "Recuerda subir también el Excel actualizado a Google Drive para que el cambio sea permanente "
-                "(pestaña 'Gestión de Excel' → 'Descargar copia')."
-            )
-            st.rerun()
+            st.success(f"Nota {int(numero_nota)} guardada en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS.")
 
 
 def seccion_notas_archivo():
@@ -5376,12 +5377,56 @@ def excel_hojas_a_bytes(hojas: dict) -> bytes:
     return salida.getvalue()
 
 
+def subir_excel_a_drive(hojas: dict) -> tuple[bool, str]:
+    """
+    Sube el Excel actualizado (todas las hojas) al Google Sheet del fondo,
+    usando la cuenta de servicio configurada en st.secrets['gcp_service_account'].
+    Devuelve (exito, mensaje).
+    """
+    if "gcp_service_account" not in st.secrets:
+        return False, "No hay credenciales de Google configuradas en Secrets (falta [gcp_service_account])."
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+    except ImportError:
+        return False, "Faltan las librerías google-api-python-client y google-auth. Añádelas a requirements.txt."
+
+    try:
+        credenciales = service_account.Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        servicio = build("drive", "v3", credentials=credenciales)
+        contenido = excel_hojas_a_bytes(hojas)
+        media = MediaIoBaseUpload(
+            BytesIO(contenido),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=False,
+        )
+        servicio.files().update(fileId=GDRIVE_FILE_ID, media_body=media).execute()
+        return True, "Excel actualizado correctamente en Google Drive."
+    except Exception as e:
+        return False, f"No se pudo subir el Excel a Google Drive: {e}"
+
+
 def guardar_excel_completo_desde_hojas(hojas: dict):
-    """Guarda todas las hojas en inversiones.xlsx y limpia la caché."""
+    """Guarda todas las hojas en inversiones.xlsx localmente y, si hay credenciales
+    de Google configuradas, también las sube automáticamente al Google Sheet del fondo."""
     contenido = excel_hojas_a_bytes(hojas)
     with open(ARCHIVO, "wb") as f:
         f.write(contenido)
     st.cache_data.clear()
+
+    if "gcp_service_account" in st.secrets:
+        exito, mensaje = subir_excel_a_drive(hojas)
+        if exito:
+            st.success(f"☁️ {mensaje}")
+        else:
+            st.warning(
+                f"⚠️ Se guardó localmente pero no se pudo subir a Google Drive automáticamente: {mensaje}\n\n"
+                "Puedes subirlo manualmente desde 'Gestión de Excel' → 'Descargar copia'."
+            )
 
 
 def aplicar_formula_simple(df: pd.DataFrame, operacion: str, columna_a: str, columna_b: str | None, nueva_columna: str) -> pd.DataFrame:
