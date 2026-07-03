@@ -3577,12 +3577,14 @@ Devuelve ÚNICAMENTE un JSON válido, sin texto antes ni después, sin backticks
   "emisor": "string, ej. BNP Paribas",
   "cupon_anual_pct": number entre 0 y 1 (ej. 0.375 para 37.5%),
   "fecha_vencimiento": "YYYY-MM-DD",
+  "fecha_inicio_nota": "YYYY-MM-DD, la Initial Valuation Date (o Pricing Date si no hay Initial Valuation Date separada) de la nota",
   "tickers": [
-    {"ticker": "string en mayúsculas", "precio_inicial": number, "barrera_cupon_pct": number entre 0 y 1, "barrera_capital_pct": number entre 0 y 1, "call_level_pct": number, normalmente 1.0 si el call requiere estar al 100% o más del precio inicial}
+    {"ticker": "string en mayúsculas", "barrera_cupon_pct": number entre 0 y 1, "barrera_capital_pct": number entre 0 y 1, "call_level_pct": number, normalmente 1.0 si el call requiere estar al 100% o más del precio inicial}
   ],
   "calendario": [
     {"observacion": "YYYY-MM-DD", "pago": "YYYY-MM-DD"}
-  ]
+  ],
+  "fechas_call": ["YYYY-MM-DD"]
 }
 
 REGLAS:
@@ -3590,6 +3592,8 @@ REGLAS:
 - "barrera_capital_pct" es el umbral para el capital al vencimiento (normalmente igual a barrera_cupon_pct, a veces distinto).
 - "call_level_pct" es el umbral (como fracción del precio inicial) que activa la llamada anticipada (call) — normalmente 1.0 (100% del precio inicial).
 - "calendario" debe incluir TODAS las fechas de Coupon/Review Valuation Date y su correspondiente Coupon/Interest Payment Date que aparezcan en el documento, en el mismo orden.
+- "fechas_call" es la lista de fechas en las que la nota PODRÍA ser llamada anticipadamente por el emisor — normalmente aparecen en una tabla separada llamada "Early Redemption Date", "Call Settlement Date" o similar (usa la fecha en la que se haría efectivo el call, no la fecha de notificación previa si son distintas).
+- "fecha_inicio_nota" es la fecha exacta que se usará para consultar el precio de cierre REAL de mercado de cada ticker (no hace falta que extraigas ningún precio en dólares del texto — solo esta fecha). Aunque el documento sea un borrador "SUBJECT TO COMPLETION" con precios en $[●], la fecha de Initial Valuation Date suele estar indicada igualmente (a veces entre corchetes tipo "September [9], 2025", en cuyo caso usa esa fecha igualmente).
 - Si un dato concreto no aparece en el documento o no estás seguro, usa el string "REVISAR" en ese campo en vez de inventar un número o fecha.
 - No añadas ningún campo que no esté en el esquema. No expliques nada, solo el JSON."""
 
@@ -3656,13 +3660,24 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
     st.markdown("---")
     st.markdown(f"**Emisor:** {_marcar(extraido.get('emisor'))}  |  **Cupón anual:** {_marcar(extraido.get('cupon_anual_pct'))}  |  **Vencimiento:** {_marcar(extraido.get('fecha_vencimiento'))}")
 
+    fecha_inicio_nota = extraido.get("fecha_inicio_nota")
+    fecha_inicio_valida = None
+    if fecha_inicio_nota and str(fecha_inicio_nota).strip().upper() != "REVISAR":
+        fecha_inicio_valida = pd.to_datetime(fecha_inicio_nota, errors="coerce")
+    st.markdown(f"**Fecha de inicio de la nota (Initial Valuation Date):** {_marcar(fecha_inicio_nota)}")
+
     st.markdown("#### Tickers y barreras (se guardará en CONTROL_NOTAS)")
+    st.caption("El precio de compra se consulta en vivo con el cierre real de mercado de cada ticker en la fecha de inicio — no se extrae del texto del PDF.")
     filas_control = []
     for t in extraido.get("tickers", []):
+        ticker = str(t.get("ticker", "")).strip().upper()
+        precio_real = None
+        if fecha_inicio_valida is not None and pd.notna(fecha_inicio_valida) and ticker:
+            precio_real = obtener_cierre_ticker_fecha(ticker, fecha_inicio_valida)
         filas_control.append({
             "NOTA": int(numero_nota),
             "TICKER": _marcar(t.get("ticker")),
-            "PRECIO_COMPRA": _marcar(t.get("precio_inicial")),
+            "PRECIO_COMPRA": _marcar(precio_real),
             "BARRERA_CUPON": _marcar(t.get("barrera_cupon_pct")),
             "PRECIO_ACTUAL": None,
             "CALL_LEVEL": _marcar(t.get("call_level_pct")),
@@ -3679,9 +3694,31 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
     df_cal_preview = pd.DataFrame(filas_cal)
     df_cal_editado = st.data_editor(df_cal_preview, use_container_width=True, num_rows="dynamic", key="editor_cal_nueva_nota")
 
+    # Fecha de inicio sugerida para INVERSIONES: primer PAGO menos 1 mes
+    fechas_pago = pd.to_datetime(
+        [e.get("pago") for e in extraido.get("calendario", []) if e.get("pago") and str(e.get("pago")).strip().upper() != "REVISAR"],
+        errors="coerce",
+    )
+    fechas_pago = fechas_pago.dropna() if len(fechas_pago) else fechas_pago
+    if len(fechas_pago) > 0:
+        primer_pago = min(fechas_pago)
+        fecha_inversion_sugerida = primer_pago - pd.DateOffset(months=1)
+        st.info(
+            f"📌 **Fecha de inicio para INVERSIONES (pago a inversores):** {fecha_inversion_sugerida.strftime('%d/%m/%Y')} "
+            f"— calculada como la primera fecha de PAGO ({primer_pago.strftime('%d/%m/%Y')}) menos 1 mes. "
+            "Usa esta fecha como `fecha_inversion` al dar de alta al inversor de esta nota en `INVERSIONES` "
+            "(este wizard no toca esa hoja, hazlo desde Centro de Control)."
+        )
+
+    st.markdown("#### Fechas de posible call (se guardará en CALENDARIO_CALLS)")
+    filas_calls = [{"NOTA": int(numero_nota), "FECHA_CALL": _marcar(f), "ESTADO": None, "OBSERVACIONES": None} for f in extraido.get("fechas_call", [])]
+    df_calls_preview = pd.DataFrame(filas_calls)
+    df_calls_editado = st.data_editor(df_calls_preview, use_container_width=True, num_rows="dynamic", key="editor_calls_nueva_nota")
+
     hay_revisar = (
         df_control_editado.astype(str).apply(lambda c: c.str.contains("REVISAR", na=False)).any().any()
         or df_cal_editado.astype(str).apply(lambda c: c.str.contains("REVISAR", na=False)).any().any()
+        or df_calls_editado.astype(str).apply(lambda c: c.str.contains("REVISAR", na=False)).any().any()
     )
     if hay_revisar:
         st.warning("Hay campos marcados con ⚠️ REVISAR — corrígelos en las tablas de arriba antes de guardar.")
@@ -3693,10 +3730,12 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
         else:
             hojas["CONTROL_NOTAS"] = pd.concat([hojas["CONTROL_NOTAS"], df_control_editado], ignore_index=True)
             hojas["CALENDARIO_NOTAS"] = pd.concat([hojas["CALENDARIO_NOTAS"], df_cal_editado], ignore_index=True)
+            if "CALENDARIO_CALLS" in hojas and not df_calls_editado.empty:
+                hojas["CALENDARIO_CALLS"] = pd.concat([hojas["CALENDARIO_CALLS"], df_calls_editado], ignore_index=True)
             guardar_excel_completo_desde_hojas(hojas)
             del st.session_state["nueva_nota_extraida"]
             st.success(
-                f"Nota {int(numero_nota)} guardada correctamente en CONTROL_NOTAS y CALENDARIO_NOTAS. "
+                f"Nota {int(numero_nota)} guardada correctamente en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS. "
                 "Recuerda subir también el Excel actualizado a Google Drive para que el cambio sea permanente "
                 "(pestaña 'Gestión de Excel' → 'Descargar copia')."
             )
@@ -6663,6 +6702,8 @@ def seccion_asistente_ia_fondo():
 10. VENCIMIENTO DE UNA NOTA SIN CALL PREVIO: si una nota llega a su fecha de vencimiento (maturity) sin haber sido llamada antes, se trata exactamente igual que un call — el capital se reinvierte en otro activo/nota, y el inversor sigue cobrando su fijo igual durante todo el proceso. En los datos, esto se marca con motivo "call final" (distinto de "call", que es la llamada anticipada por el emisor), pero a efectos de negocio ambos son equivalentes: la nota se cierra y su capital se reinvierte.
 
 11. LA HOJA RESULTADOS_OBSERVACION NO SE USA NUNCA: no está mantenida y puede contener datos obsoletos. Si el usuario pregunta por ella, dile que esa hoja no se usa como fuente y que el estado real de cada nota se calcula en vivo con precios actuales.
+
+12. FECHA DE INICIO DE UNA NOTA PARA EFECTOS DE PAGO AL INVERSOR: no es la fecha en la que arranca la nota en el mercado (Initial Valuation Date), sino la PRIMERA FECHA DE PAGO (cobro) del calendario de esa nota, menos 1 mes. Ej.: si la nota empieza el 19/09 y el primer pago es el 25/10, la fecha de inicio que cuenta para calcular los intereses del inversor es el 25/09 (un mes antes del primer pago), no el 19/09.
 
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
