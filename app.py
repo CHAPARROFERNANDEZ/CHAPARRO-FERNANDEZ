@@ -3790,14 +3790,20 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
     numero_nota = st.selectbox("Nota a auditar", notas_existentes, key="auditar_nota_numero")
     pdf_subido = st.file_uploader(f"Documento oficial de la Nota {numero_nota} (PDF)", type=["pdf"], key=f"auditar_pdf_{numero_nota}")
 
-    if not st.button("🔍 Auditar nota", type="primary", disabled=pdf_subido is None):
-        return
+    if "auditoria_extraidos" not in st.session_state:
+        st.session_state["auditoria_extraidos"] = {}
+    almacen_auditoria = st.session_state["auditoria_extraidos"]
 
-    with st.spinner("Leyendo el documento y comparando contra el Excel..."):
-        extraido = extraer_datos_nota_con_ia(pdf_subido.read())
+    if st.button("🔍 Auditar nota", type="primary", disabled=pdf_subido is None):
+        with st.spinner("Leyendo el documento y comparando contra el Excel..."):
+            resultado = extraer_datos_nota_con_ia(pdf_subido.read())
+        if "error" in resultado:
+            st.error(f"No se pudieron extraer los datos del PDF: {resultado['error']}")
+            return
+        almacen_auditoria[numero_nota] = resultado
 
-    if "error" in extraido:
-        st.error(f"No se pudieron extraer los datos del PDF: {extraido['error']}")
+    extraido = almacen_auditoria.get(numero_nota)
+    if not extraido:
         return
 
     st.markdown("---")
@@ -3906,6 +3912,8 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
         pagos_pasados = df_cal[(df_cal.get("nota") == numero_nota) & (df_cal.get("tipo_evento") == "PAGO") & (df_cal["fecha"].notna())].sort_values("fecha") if "nota" in df_cal.columns else pd.DataFrame()
         fecha_ref = pagos_pasados.iloc[-1]["fecha"] if not pagos_pasados.empty else None
 
+    capital_total_guardar = cobro_total_guardar = pago_total_guardar = beneficio_total_guardar = None
+
     if fecha_ref is None:
         st.info("No hay fechas de pago en el calendario de esta nota para poder validar el cálculo económico.")
     else:
@@ -3914,6 +3922,7 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
             st.info(f"No hay inversores activos en la Nota {numero_nota} en la fecha {pd.Timestamp(fecha_ref).strftime('%d/%m/%Y')}.")
         else:
             capital_total = float(activas["capital_invertido"].sum())
+            capital_total_guardar = capital_total
             tasas_nota_distintas = sorted(activas["interes_nota_anual"].dropna().unique())
             st.markdown(f"**Capital total invertido:** {fmt(capital_total)} ({len(activas)} posiciones) — fecha de referencia: {pd.Timestamp(fecha_ref).strftime('%d/%m/%Y')}")
 
@@ -3946,6 +3955,53 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
                     f"Pago a inversores {fmt(detalle_nota['pago_inversor'].sum())} · "
                     f"Beneficio {fmt(detalle_nota['beneficio_empresa'].sum())}"
                 )
+                capital_total_guardar = capital_total
+                cobro_total_guardar = float(detalle_nota["cobro_compania"].sum())
+                pago_total_guardar = float(detalle_nota["pago_inversor"].sum())
+                beneficio_total_guardar = float(detalle_nota["beneficio_empresa"].sum())
+    st.markdown("---")
+    if st.button(f"💾 Guardar esta auditoría de la Nota {numero_nota}", type="primary"):
+        ahora = pd.Timestamp.now()
+        filas_guardar = []
+        for fila in filas_diff:
+            filas_guardar.append({
+                "FECHA_AUDITORIA": ahora,
+                "NOTA": numero_nota,
+                "CAMPO": fila["Campo"],
+                "EN_EXCEL": fila["En Excel"],
+                "EN_PDF": fila["En el PDF"],
+                "ESTADO": fila["Estado"],
+            })
+        filas_guardar.append({
+            "FECHA_AUDITORIA": ahora,
+            "NOTA": numero_nota,
+            "CAMPO": "RESUMEN — Memoria / One-star",
+            "EN_EXCEL": "",
+            "EN_PDF": ", ".join(etiquetas) if etiquetas else "Ninguna",
+            "ESTADO": "ℹ️ Informativo",
+        })
+        filas_guardar.append({
+            "FECHA_AUDITORIA": ahora,
+            "NOTA": numero_nota,
+            "CAMPO": "RESUMEN — Capital / Cobro / Pago / Beneficio",
+            "EN_EXCEL": "",
+            "EN_PDF": (
+                f"Capital {fmt(capital_total_guardar)} · Cobro {fmt(cobro_total_guardar)} · "
+                f"Pago inv. {fmt(pago_total_guardar)} · Beneficio {fmt(beneficio_total_guardar)}"
+                if capital_total_guardar is not None else "No calculado"
+            ),
+            "ESTADO": "ℹ️ Informativo",
+        })
+
+        hojas = leer_todas_las_hojas_excel()
+        df_nuevo = pd.DataFrame(filas_guardar)
+        if "AUDITORIA_NOTAS" in hojas and not hojas["AUDITORIA_NOTAS"].empty:
+            hojas["AUDITORIA_NOTAS"] = pd.concat([hojas["AUDITORIA_NOTAS"], df_nuevo], ignore_index=True)
+        else:
+            hojas["AUDITORIA_NOTAS"] = df_nuevo
+        guardar_excel_completo_desde_hojas(hojas)
+        del almacen_auditoria[numero_nota]
+        st.success(f"Auditoría de la Nota {numero_nota} guardada en la hoja AUDITORIA_NOTAS.")
 
 
 def seccion_notas_archivo():
