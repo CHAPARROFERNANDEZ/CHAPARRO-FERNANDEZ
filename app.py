@@ -3555,11 +3555,162 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
             st.rerun()
 
 
+def extraer_datos_nota_con_ia(pdf_bytes: bytes) -> dict:
+    """
+    Envía el PDF oficial de una nota estructurada a la API de Claude y le pide
+    que devuelva ÚNICAMENTE JSON con los datos clave (tickers, precios iniciales,
+    barreras, cupón, vencimiento y calendario observación/pago).
+    Si algún dato no se puede determinar con confianza, la IA debe usar el string
+    "REVISAR" en vez de inventarlo, para que el usuario lo revise en la previsualización.
+    """
+    import base64
+    import json as _json
+
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+
+    system = """Extraes datos estructurados de documentos oficiales (pricing supplement) de notas estructuradas (structured notes).
+
+Devuelve ÚNICAMENTE un JSON válido, sin texto antes ni después, sin backticks de markdown, con este esquema exacto:
+
+{
+  "emisor": "string, ej. BNP Paribas",
+  "cupon_anual_pct": number entre 0 y 1 (ej. 0.375 para 37.5%),
+  "fecha_vencimiento": "YYYY-MM-DD",
+  "tickers": [
+    {"ticker": "string en mayúsculas", "precio_inicial": number, "barrera_cupon_pct": number entre 0 y 1, "barrera_capital_pct": number entre 0 y 1, "call_level_pct": number, normalmente 1.0 si el call requiere estar al 100% o más del precio inicial}
+  ],
+  "calendario": [
+    {"observacion": "YYYY-MM-DD", "pago": "YYYY-MM-DD"}
+  ]
+}
+
+REGLAS:
+- "barrera_cupon_pct" es el umbral mínimo (como fracción del precio inicial) para que se pague el cupón condicional ese periodo (ej. 0.60 para "60% of Initial Price").
+- "barrera_capital_pct" es el umbral para el capital al vencimiento (normalmente igual a barrera_cupon_pct, a veces distinto).
+- "call_level_pct" es el umbral (como fracción del precio inicial) que activa la llamada anticipada (call) — normalmente 1.0 (100% del precio inicial).
+- "calendario" debe incluir TODAS las fechas de Coupon/Review Valuation Date y su correspondiente Coupon/Interest Payment Date que aparezcan en el documento, en el mismo orden.
+- Si un dato concreto no aparece en el documento o no estás seguro, usa el string "REVISAR" en ese campo en vez de inventar un número o fecha.
+- No añadas ningún campo que no esté en el esquema. No expliques nada, solo el JSON."""
+
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        json={
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 4000,
+            "system": system,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}, "title": "NOTA_PDF"},
+                    {"type": "text", "text": "Extrae los datos de esta nota estructurada según el esquema JSON indicado."},
+                ],
+            }],
+        },
+        timeout=90,
+    )
+    data = resp.json()
+    texto = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    if not texto:
+        return {"error": data.get("error", {}).get("message", "La IA no devolvió ninguna respuesta.")}
+
+    texto_limpio = texto.strip()
+    if texto_limpio.startswith("```"):
+        texto_limpio = texto_limpio.strip("`")
+        if texto_limpio.lower().startswith("json"):
+            texto_limpio = texto_limpio[4:]
+    try:
+        return _json.loads(texto_limpio)
+    except Exception as e:
+        return {"error": f"No se pudo interpretar la respuesta de la IA como JSON: {e}", "respuesta_cruda": texto}
+
+
+def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
+    st.caption(
+        "Sube el documento oficial (pricing supplement) de una nota nueva. La IA extrae automáticamente "
+        "tickers, precios iniciales, barreras, cupón y el calendario de observación/pago. "
+        "Revisa siempre la previsualización antes de guardar — cualquier dato marcado con ⚠️ REVISAR "
+        "no se pudo determinar con confianza y hay que rellenarlo a mano."
+    )
+
+    numero_nota = st.number_input("Número de nota (ej. 28)", min_value=1, max_value=999, step=1, key="nueva_nota_numero")
+    pdf_subido = st.file_uploader("Documento oficial de la nota (PDF)", type=["pdf"], key="nueva_nota_pdf")
+
+    if st.button("🔎 Extraer datos con IA", type="primary", disabled=pdf_subido is None):
+        with st.spinner("Leyendo el documento y extrayendo los datos..."):
+            resultado = extraer_datos_nota_con_ia(pdf_subido.read())
+        if "error" in resultado:
+            st.error(f"No se pudieron extraer los datos: {resultado['error']}")
+        else:
+            st.session_state["nueva_nota_extraida"] = resultado
+            st.success("Datos extraídos. Revisa la previsualización antes de guardar.")
+
+    extraido = st.session_state.get("nueva_nota_extraida")
+    if not extraido:
+        return
+
+    def _marcar(valor):
+        return "⚠️ REVISAR" if (valor is None or str(valor).strip().upper() == "REVISAR") else valor
+
+    st.markdown("---")
+    st.markdown(f"**Emisor:** {_marcar(extraido.get('emisor'))}  |  **Cupón anual:** {_marcar(extraido.get('cupon_anual_pct'))}  |  **Vencimiento:** {_marcar(extraido.get('fecha_vencimiento'))}")
+
+    st.markdown("#### Tickers y barreras (se guardará en CONTROL_NOTAS)")
+    filas_control = []
+    for t in extraido.get("tickers", []):
+        filas_control.append({
+            "NOTA": int(numero_nota),
+            "TICKER": _marcar(t.get("ticker")),
+            "PRECIO_COMPRA": _marcar(t.get("precio_inicial")),
+            "BARRERA_CUPON": _marcar(t.get("barrera_cupon_pct")),
+            "PRECIO_ACTUAL": None,
+            "CALL_LEVEL": _marcar(t.get("call_level_pct")),
+            "BARRERA_CAPITAL": _marcar(t.get("barrera_capital_pct")),
+        })
+    df_control_preview = pd.DataFrame(filas_control)
+    df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key="editor_control_nueva_nota")
+
+    st.markdown("#### Calendario de observación/pago (se guardará en CALENDARIO_NOTAS)")
+    filas_cal = []
+    for evento in extraido.get("calendario", []):
+        filas_cal.append({"NOTA": int(numero_nota), "TIPO_EVENTO": "OBSERVACION", "FECHA": _marcar(evento.get("observacion"))})
+        filas_cal.append({"NOTA": int(numero_nota), "TIPO_EVENTO": "PAGO", "FECHA": _marcar(evento.get("pago"))})
+    df_cal_preview = pd.DataFrame(filas_cal)
+    df_cal_editado = st.data_editor(df_cal_preview, use_container_width=True, num_rows="dynamic", key="editor_cal_nueva_nota")
+
+    hay_revisar = (
+        df_control_editado.astype(str).apply(lambda c: c.str.contains("REVISAR", na=False)).any().any()
+        or df_cal_editado.astype(str).apply(lambda c: c.str.contains("REVISAR", na=False)).any().any()
+    )
+    if hay_revisar:
+        st.warning("Hay campos marcados con ⚠️ REVISAR — corrígelos en las tablas de arriba antes de guardar.")
+
+    if st.button("💾 Guardar nota en el Excel", type="primary", disabled=hay_revisar):
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas or "CONTROL_NOTAS" not in hojas or "CALENDARIO_NOTAS" not in hojas:
+            st.error("No se pudo leer el Excel actual para guardar los cambios.")
+        else:
+            hojas["CONTROL_NOTAS"] = pd.concat([hojas["CONTROL_NOTAS"], df_control_editado], ignore_index=True)
+            hojas["CALENDARIO_NOTAS"] = pd.concat([hojas["CALENDARIO_NOTAS"], df_cal_editado], ignore_index=True)
+            guardar_excel_completo_desde_hojas(hojas)
+            del st.session_state["nueva_nota_extraida"]
+            st.success(
+                f"Nota {int(numero_nota)} guardada correctamente en CONTROL_NOTAS y CALENDARIO_NOTAS. "
+                "Recuerda subir también el Excel actualizado a Google Drive para que el cambio sea permanente "
+                "(pestaña 'Gestión de Excel' → 'Descargar copia')."
+            )
+            st.rerun()
+
+
 def seccion_notas_archivo():
     df_inv, df_cal, df_control = cargar_excel_completo()
     st.header("🧾 Notas")
 
-    tab_resumen, = st.tabs(["📊 Resumen y alertas"])
+    tab_resumen, tab_nueva = st.tabs(["📊 Resumen y alertas", "➕ Añadir nota nueva"])
+
+    with tab_nueva:
+        _tab_añadir_nota_nueva(df_control, df_cal)
 
     with tab_resumen:
         st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
@@ -3583,7 +3734,10 @@ def seccion_notas_archivo():
         hoy = pd.Timestamp.today().normalize()
         notas_con_call = set()
         if "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
-            notas_df = df_inv[df_inv["motivo"].astype(str).str.lower().str.strip() == "call"].copy()
+            motivo_normalizado = df_inv["motivo"].astype(str).str.lower().str.strip()
+            # "call" = llamada anticipada por el emisor. "call final" = vencimiento natural sin
+            # call previo, tratado igual que un call (capital reinvertido, nota cerrada).
+            notas_df = df_inv[motivo_normalizado.isin(["call", "call final"])].copy()
             notas_df["fecha_final_inversion"] = pd.to_datetime(notas_df["fecha_final_inversion"], errors="coerce")
             notas_df["nota_num"] = notas_df["nombre_activo"].apply(extraer_numero_nota)
             for nota_num, grupo in notas_df.groupby("nota_num"):
@@ -6131,19 +6285,9 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"\n=== ESTADO DE RIESGO DE NOTAS ===")
             hoy_r = pd.Timestamp.today().normalize()
 
-            # 1. Últimos resultados reales por nota (RESULTADOS_OBSERVACION)
-            try:
-                df_res = leer_hoja_excel("RESULTADOS_OBSERVACION")
-                df_res.columns = [str(c).strip().lower() for c in df_res.columns]
-                df_res = df_res.dropna(subset=["nota","resultado"])
-                df_res["nota"] = pd.to_numeric(df_res["nota"], errors="coerce")
-                df_res["fecha_observacion"] = pd.to_datetime(df_res.get("fecha_observacion"), errors="coerce")
-                df_res = df_res.dropna(subset=["nota"])
-                ultima_res = df_res.sort_values("fecha_observacion").groupby("nota").last().reset_index()
-                estado_por_nota = {int(r["nota"]): (str(r["resultado"]).upper(), r.get("detalle","")) 
-                                   for _, r in ultima_res.iterrows()}
-            except:
-                estado_por_nota = {}
+            # NOTA: la hoja RESULTADOS_OBSERVACION NO se usa — no se mantiene actualizada.
+            # El estado real de cada nota se calcula en vivo comparando CONTROL_NOTAS
+            # (precio_compra/barrera) contra precios actuales de yfinance, más abajo.
 
             # 2. Precios actuales via yfinance + barreras (CONTROL_NOTAS)
             try:
@@ -6231,8 +6375,12 @@ def seccion_asistente_ia_fondo():
                 if ni not in prox_call_dict:
                     prox_call_dict[ni] = pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y")
 
-            # Clasificar notas
-            todas_notas = sorted(set(list(estado_por_nota.keys()) + list(prox_obs_dict.keys())))
+            # Universo de notas a evaluar: todas las que están en CONTROL_NOTAS (fuente fiable)
+            # más cualquiera con observación futura programada.
+            notas_en_control = set()
+            if "nota" in df_control.columns:
+                notas_en_control = set(int(n) for n in pd.to_numeric(df_control["nota"], errors="coerce").dropna().unique())
+            todas_notas = sorted(notas_en_control | set(prox_obs_dict.keys()))
             negativas, pendientes, positivas = [], [], []
 
             for nota_id in todas_notas:
@@ -6509,6 +6657,12 @@ def seccion_asistente_ia_fondo():
 7. CHAPARRO FERNANDEZ es la sociedad gestora, no un inversor externo: no cobra interés (0%), todo lo que "cobra" en su nombre es beneficio íntegro del fondo.
 
 8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos) y el reparto de dividendos AUMENTAN esa deuda.
+
+9. MOTOCLICK — CASO ESPECIAL: a diferencia de Paraguay/Bolivia/Fútbol, el ingreso que MotoClick genera para el fondo NO es simplemente capital_invertido × 25% / 12. El capital que los inversores tienen "en el papel" asignado a MotoClick no siempre coincide con el capital que realmente está desplegado ahí día a día (puede haber devoluciones temporales de capital y reinyecciones posteriores). Por eso el ingreso real se calcula con el capital promedio diario efectivamente activo ese mes. El pago al inversor, en cambio, SIEMPRE se mantiene fijo sobre su capital nominal, sin este ajuste — solo el ingreso de la compañía varía.
+
+10. VENCIMIENTO DE UNA NOTA SIN CALL PREVIO: si una nota llega a su fecha de vencimiento (maturity) sin haber sido llamada antes, se trata exactamente igual que un call — el capital se reinvierte en otro activo/nota, y el inversor sigue cobrando su fijo igual durante todo el proceso. En los datos, esto se marca con motivo "call final" (distinto de "call", que es la llamada anticipada por el emisor), pero a efectos de negocio ambos son equivalentes: la nota se cierra y su capital se reinvierte.
+
+11. LA HOJA RESULTADOS_OBSERVACION NO SE USA NUNCA: no está mantenida y puede contener datos obsoletos. Si el usuario pregunta por ella, dile que esa hoja no se usa como fuente y que el estado real de cada nota se calcula en vivo con precios actuales.
 
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
