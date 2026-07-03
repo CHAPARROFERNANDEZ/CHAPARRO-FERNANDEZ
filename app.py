@@ -3566,7 +3566,21 @@ def extraer_datos_nota_con_ia(pdf_bytes: bytes) -> dict:
     import base64
     import json as _json
 
-    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    # La API de Claude rechaza cualquier PDF de más de 100 páginas (límite duro, no de tokens).
+    # Los pricing supplements suelen traer anexos legales larguísimos — si pasa de 100 páginas,
+    # extraemos el texto en Python y lo mandamos como texto plano en vez de como documento.
+    usar_texto_plano = False
+    texto_extraido = None
+    try:
+        from pypdf import PdfReader
+        lector = PdfReader(BytesIO(pdf_bytes))
+        n_paginas = len(lector.pages)
+        if n_paginas > 100:
+            usar_texto_plano = True
+            texto_extraido = "\n\n".join((pagina.extract_text() or "") for pagina in lector.pages)
+    except Exception:
+        pass  # Si algo falla aquí, seguimos con el envío normal como documento.
+
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
 
     system = """Extraes datos estructurados de documentos oficiales (pricing supplement) de notas estructuradas (structured notes).
@@ -3593,13 +3607,32 @@ REGLAS:
 - "barrera_cupon_pct" es el umbral mínimo (como fracción del precio inicial) para que se pague el cupón condicional ese periodo (ej. 0.60 para "60% of Initial Price").
 - "barrera_capital_pct" es el umbral para el capital al vencimiento (normalmente igual a barrera_cupon_pct, a veces distinto).
 - "call_level_pct" es el umbral (como fracción del precio inicial) que activa la llamada anticipada (call) — normalmente 1.0 (100% del precio inicial).
-- "calendario" debe incluir TODAS las fechas de Coupon/Review Valuation Date y su correspondiente Coupon/Interest Payment Date que aparezcan en el documento, en el mismo orden.
-- "fechas_call" es la lista de fechas en las que la nota PODRÍA ser llamada anticipadamente por el emisor — normalmente aparecen en una tabla separada llamada "Early Redemption Date", "Call Settlement Date" o similar (usa la fecha en la que se haría efectivo el call, no la fecha de notificación previa si son distintas).
+- "calendario" debe incluir TODAS las fechas de Coupon/Review/Contingent Interest Observation Date y su correspondiente Coupon/Interest/Contingent Interest Payment Date que aparezcan en el documento, en el mismo orden. Hay TRES formatos posibles según el emisor, identifica cuál aplica:
+  a) TABLA de dos columnas ya emparejadas (ej. BNP Paribas: "Coupon Valuation Date | Coupon Payment Date") — léela directamente.
+  b) DOS LISTAS separadas por comas en un párrafo (ej. JPMorgan: "Review Dates: fecha1, fecha2..." y "Interest Payment Dates: fecha1, fecha2..." por separado) — empareja por posición (1ª con 1ª, 2ª con 2ª, etc.), ambas listas tienen el mismo número de fechas.
+  c) REGLA DE REPETICIÓN en texto, sin fechas explícitas (ej. TD Bank: "Monthly, on the 2nd calendar day of each month, commencing on January 2, 2026 and ending on December 4, 2028"). En este caso DEBES GENERAR tú mismo la lista completa de fechas aplicando la regla exactamente (mismo día del mes, cada mes/trimestre según corresponda, desde la fecha de inicio hasta la de fin, ambas incluidas). Para la fecha de pago, si el texto dice algo como "the third Business Day following the relevant Observation Date", suma esos días naturales a la fecha de observación como aproximación razonable (no necesitas calcular festivos bancarios exactos) — EXCEPTO la última fecha de pago, que casi siempre es explícitamente la Maturity Date, usa esa fecha tal cual en vez de la aproximación.
+- La terminología de barreras y call varía mucho entre emisores — no busques una frase exacta, busca el CONCEPTO: la "barrera de cupón" puede llamarse "Conditional Coupon Barrier Price", "Interest Barrier", "Trigger Value" o "Contingent Interest Barrier Value" según el emisor; la "barrera de capital" puede ser "Barrier Price" o "Barrier Value"; el "nivel de call" puede ser "Initial Value" (call si el precio vuelve a superarlo, sin nombre propio) o tener nombre explícito como "Call Threshold Value". Identifica el concepto correcto aunque el nombre exacto cambie.
+- "fechas_call" es la lista de fechas en las que la nota PODRÍA ser llamada anticipadamente por el emisor. Hay tres formatos posibles, igual que con el calendario de cupón — busca el que aplique:
+  a) Una tabla separada llamada "Early Redemption Date", "Call Settlement Date" o similar, con fechas explícitas — usa esas fechas directamente.
+  b) Si el texto dice que el call se paga en "the first/next Interest Payment Date immediately following" cada Review/Observation Date (excluyendo la primera y la última) — usa esas mismas fechas de PAGO del calendario, excluyendo la primera y la última.
+  c) Si las "Call Observation Dates" se describen como una REGLA DE REPETICIÓN propia y distinta a la del cupón (ej. TD Bank: "Quarterly, on the 2nd calendar day of each March, June, September and December, commencing on..."), genera tú mismo esa lista de fechas aplicando la regla (nota que puede tener una periodicidad distinta a la del cupón — ej. cupón mensual pero call solo trimestral), y usa como fecha de call la correspondiente Payment/Call Payment Date de cada una (aplicando la misma lógica de aproximación de días hábiles que en el calendario).
 - "fecha_inicio_nota" es la fecha exacta que se usará para consultar el precio de cierre REAL de mercado de cada ticker (no hace falta que extraigas ningún precio en dólares del texto — solo esta fecha). Aunque el documento sea un borrador "SUBJECT TO COMPLETION" con precios en $[●], la fecha de Initial Valuation Date suele estar indicada igualmente (a veces entre corchetes tipo "September [9], 2025", en cuyo caso usa esa fecha igualmente).
 - "tiene_memoria": true SOLO si el documento describe un cupón "memoria" — es decir, si un periodo no se cumple la condición de barrera, ese cupón no se pierde, sino que se acumula y se paga junto con un cupón futuro cuando sí se cumpla. Reconócelo por fórmulas del tipo "N x cupón% x (1 + T)" donde T es el número de periodos sin pago desde el último cupón pagado, o por texto explícito tipo "Memory Coupon" / "Memory Interest". Si el cupón de cada periodo es independiente (lo que no se cobra un mes se pierde para siempre, sin acumular), pon false.
 - "tiene_one_star": true SOLO si la condición de pago del cupón (o del call) requiere que BASTE CON UNA SOLA de las acciones subyacentes esté por encima de la barrera para que se pague (en vez de exigir que TODAS lo estén, que es lo habitual en notas "worst-of"). Reconócelo por frases tipo "if the Closing Price of at least one Underlying Asset is greater than or equal to..." en vez de "if the Closing Price of each Underlying Asset is greater than or equal to...". Si la condición exige que TODAS las acciones estén por encima (worst-of, lo más común), pon false.
 - Si un dato concreto no aparece en el documento o no estás seguro, usa el string "REVISAR" en ese campo en vez de inventar un número o fecha.
 - No añadas ningún campo que no esté en el esquema. No expliques nada, solo el JSON."""
+
+    if usar_texto_plano:
+        contenido = [
+            {"type": "text", "text": f"Documento (texto extraído, {n_paginas} páginas — demasiado largo para enviarlo como PDF; los términos clave y el calendario siempre están en las primeras páginas):\n\n{texto_extraido[:250000]}"},
+            {"type": "text", "text": "Extrae los datos de esta nota estructurada según el esquema JSON indicado."},
+        ]
+    else:
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        contenido = [
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}, "title": "NOTA_PDF"},
+            {"type": "text", "text": "Extrae los datos de esta nota estructurada según el esquema JSON indicado."},
+        ]
 
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -3608,13 +3641,7 @@ REGLAS:
             "model": "claude-sonnet-4-5",
             "max_tokens": 4000,
             "system": system,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}, "title": "NOTA_PDF"},
-                    {"type": "text", "text": "Extrae los datos de esta nota estructurada según el esquema JSON indicado."},
-                ],
-            }],
+            "messages": [{"role": "user", "content": contenido}],
         },
         timeout=90,
     )
