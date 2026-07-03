@@ -3578,6 +3578,8 @@ Devuelve ÚNICAMENTE un JSON válido, sin texto antes ni después, sin backticks
   "cupon_anual_pct": number entre 0 y 1 (ej. 0.375 para 37.5%),
   "fecha_vencimiento": "YYYY-MM-DD",
   "fecha_inicio_nota": "YYYY-MM-DD, la Initial Valuation Date (o Pricing Date si no hay Initial Valuation Date separada) de la nota",
+  "tiene_memoria": true o false,
+  "tiene_one_star": true o false,
   "tickers": [
     {"ticker": "string en mayúsculas", "barrera_cupon_pct": number entre 0 y 1, "barrera_capital_pct": number entre 0 y 1, "call_level_pct": number, normalmente 1.0 si el call requiere estar al 100% o más del precio inicial}
   ],
@@ -3594,6 +3596,8 @@ REGLAS:
 - "calendario" debe incluir TODAS las fechas de Coupon/Review Valuation Date y su correspondiente Coupon/Interest Payment Date que aparezcan en el documento, en el mismo orden.
 - "fechas_call" es la lista de fechas en las que la nota PODRÍA ser llamada anticipadamente por el emisor — normalmente aparecen en una tabla separada llamada "Early Redemption Date", "Call Settlement Date" o similar (usa la fecha en la que se haría efectivo el call, no la fecha de notificación previa si son distintas).
 - "fecha_inicio_nota" es la fecha exacta que se usará para consultar el precio de cierre REAL de mercado de cada ticker (no hace falta que extraigas ningún precio en dólares del texto — solo esta fecha). Aunque el documento sea un borrador "SUBJECT TO COMPLETION" con precios en $[●], la fecha de Initial Valuation Date suele estar indicada igualmente (a veces entre corchetes tipo "September [9], 2025", en cuyo caso usa esa fecha igualmente).
+- "tiene_memoria": true SOLO si el documento describe un cupón "memoria" — es decir, si un periodo no se cumple la condición de barrera, ese cupón no se pierde, sino que se acumula y se paga junto con un cupón futuro cuando sí se cumpla. Reconócelo por fórmulas del tipo "N x cupón% x (1 + T)" donde T es el número de periodos sin pago desde el último cupón pagado, o por texto explícito tipo "Memory Coupon" / "Memory Interest". Si el cupón de cada periodo es independiente (lo que no se cobra un mes se pierde para siempre, sin acumular), pon false.
+- "tiene_one_star": true SOLO si la condición de pago del cupón (o del call) requiere que BASTE CON UNA SOLA de las acciones subyacentes esté por encima de la barrera para que se pague (en vez de exigir que TODAS lo estén, que es lo habitual en notas "worst-of"). Reconócelo por frases tipo "if the Closing Price of at least one Underlying Asset is greater than or equal to..." en vez de "if the Closing Price of each Underlying Asset is greater than or equal to...". Si la condición exige que TODAS las acciones estén por encima (worst-of, lo más común), pon false.
 - Si un dato concreto no aparece en el documento o no estás seguro, usa el string "REVISAR" en ese campo en vez de inventar un número o fecha.
 - No añadas ningún campo que no esté en el esquema. No expliques nada, solo el JSON."""
 
@@ -3674,6 +3678,13 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
     st.markdown("---")
     st.markdown(f"### Nota {numero_nota}")
     st.markdown(f"**Emisor:** {_marcar(extraido.get('emisor'))}  |  **Cupón anual:** {_marcar(extraido.get('cupon_anual_pct'))}  |  **Vencimiento:** {_marcar(extraido.get('fecha_vencimiento'))}")
+    etiquetas = []
+    if extraido.get("tiene_memoria") is True:
+        etiquetas.append("🧠 Memoria")
+    if extraido.get("tiene_one_star") is True:
+        etiquetas.append("⭐ One-star")
+    if etiquetas:
+        st.markdown("  |  ".join(f"**{e}**" for e in etiquetas))
 
     fecha_inicio_nota = extraido.get("fecha_inicio_nota")
     fecha_inicio_valida = None
@@ -3697,6 +3708,8 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             "PRECIO_ACTUAL": None,
             "CALL_LEVEL": _marcar(t.get("call_level_pct")),
             "BARRERA_CAPITAL": _marcar(t.get("barrera_capital_pct")),
+            "TIENE_MEMORIA": "SI" if extraido.get("tiene_memoria") is True else "NO",
+            "TIENE_ONE_STAR": "SI" if extraido.get("tiene_one_star") is True else "NO",
         })
     df_control_preview = pd.DataFrame(filas_control)
     df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key=f"editor_control_nota_{numero_nota}")
@@ -3758,14 +3771,197 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             st.rerun()
 
 
+def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, df_calls: pd.DataFrame):
+    st.caption(
+        "Sube el documento oficial de una nota que ya está en el Excel. La IA lo lee de nuevo y Python "
+        "compara, campo a campo, lo que dice el PDF contra lo que hay guardado en CONTROL_NOTAS, "
+        "CALENDARIO_NOTAS y CALENDARIO_CALLS — así detectas tipos de interés, fechas de cobro, "
+        "observación o call mal cargados, sin que la IA tenga que comparar números de memoria."
+    )
+
+    notas_existentes = sorted(
+        int(n) for n in pd.to_numeric(df_control.get("nota", pd.Series(dtype=float)), errors="coerce").dropna().unique()
+    ) if df_control is not None and not df_control.empty else []
+
+    if not notas_existentes:
+        st.info("No hay notas en CONTROL_NOTAS todavía para auditar.")
+        return
+
+    numero_nota = st.selectbox("Nota a auditar", notas_existentes, key="auditar_nota_numero")
+    pdf_subido = st.file_uploader(f"Documento oficial de la Nota {numero_nota} (PDF)", type=["pdf"], key=f"auditar_pdf_{numero_nota}")
+
+    if not st.button("🔍 Auditar nota", type="primary", disabled=pdf_subido is None):
+        return
+
+    with st.spinner("Leyendo el documento y comparando contra el Excel..."):
+        extraido = extraer_datos_nota_con_ia(pdf_subido.read())
+
+    if "error" in extraido:
+        st.error(f"No se pudieron extraer los datos del PDF: {extraido['error']}")
+        return
+
+    st.markdown("---")
+    etiquetas = []
+    if extraido.get("tiene_memoria") is True:
+        etiquetas.append("🧠 Memoria")
+    if extraido.get("tiene_one_star") is True:
+        etiquetas.append("⭐ One-star")
+    if etiquetas:
+        st.markdown("  |  ".join(f"**{e}**" for e in etiquetas))
+
+    def _es_revisar(v):
+        return v is None or str(v).strip().upper() == "REVISAR"
+
+    filas_diff = []
+
+    def _comparar(campo, valor_excel, valor_pdf, tolerancia=None):
+        if _es_revisar(valor_pdf):
+            estado = "⚠️ IA no pudo leerlo del PDF"
+        elif valor_excel is None or (isinstance(valor_excel, float) and pd.isna(valor_excel)):
+            estado = "ℹ️ No hay dato en Excel"
+        else:
+            try:
+                ve, vp = float(valor_excel), float(valor_pdf)
+                coincide = abs(ve - vp) <= (tolerancia or 0.001)
+            except (TypeError, ValueError):
+                coincide = str(valor_excel).strip().upper() == str(valor_pdf).strip().upper()
+            estado = "✅ Coincide" if coincide else "❌ DISCREPANCIA"
+        filas_diff.append({"Campo": campo, "En Excel": valor_excel, "En el PDF": valor_pdf, "Estado": estado})
+
+    # --- Tickers y barreras (CONTROL_NOTAS) ---
+    control_nota = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == numero_nota].copy() if "nota" in df_control.columns else pd.DataFrame()
+    for t in extraido.get("tickers", []):
+        ticker = str(t.get("ticker", "")).strip().upper()
+        fila_excel = control_nota[control_nota.get("ticker", pd.Series(dtype=str)).astype(str).str.upper() == ticker]
+        if fila_excel.empty:
+            filas_diff.append({"Campo": f"{ticker}: presencia", "En Excel": "No existe", "En el PDF": ticker, "Estado": "❌ DISCREPANCIA — ticker no está en CONTROL_NOTAS"})
+            continue
+        fila_excel = fila_excel.iloc[0]
+        _comparar(f"{ticker}: barrera cupón", fila_excel.get("barrera_cupon"), t.get("barrera_cupon_pct"))
+        col_bc = "barrera_capital" if "barrera_capital" in fila_excel.index else "contingency"
+        _comparar(f"{ticker}: barrera capital", fila_excel.get(col_bc), t.get("barrera_capital_pct"))
+        _comparar(f"{ticker}: call level", fila_excel.get("call_level"), t.get("call_level_pct"))
+
+    # --- Cupón anual (comparado contra INVERSIONES de esa nota) ---
+    nombre_nota = f"NOTA_{numero_nota:02d}"
+    inv_nota = df_inv[df_inv.get("nombre_activo", pd.Series(dtype=str)).astype(str).str.upper().str.replace(" ", "_") == nombre_nota] if "nombre_activo" in df_inv.columns else pd.DataFrame()
+    if not inv_nota.empty and "interes_nota_anual" in inv_nota.columns:
+        tasas_excel = inv_nota["interes_nota_anual"].dropna().unique()
+        tasa_excel = float(tasas_excel[0]) if len(tasas_excel) else None
+        _comparar("Cupón anual", tasa_excel, extraido.get("cupon_anual_pct"))
+
+    # --- Calendario de observación/pago (CALENDARIO_NOTAS) ---
+    cal_nota = df_cal[df_cal.get("nota") == numero_nota].copy() if "nota" in df_cal.columns else pd.DataFrame()
+    obs_excel = set(pd.to_datetime(cal_nota[cal_nota["tipo_evento"] == "OBSERVACION"]["fecha"], errors="coerce").dt.strftime("%Y-%m-%d").dropna()) if not cal_nota.empty else set()
+    pago_excel = set(pd.to_datetime(cal_nota[cal_nota["tipo_evento"] == "PAGO"]["fecha"], errors="coerce").dt.strftime("%Y-%m-%d").dropna()) if not cal_nota.empty else set()
+    obs_pdf = set(e.get("observacion") for e in extraido.get("calendario", []) if e.get("observacion") and not _es_revisar(e.get("observacion")))
+    pago_pdf = set(e.get("pago") for e in extraido.get("calendario", []) if e.get("pago") and not _es_revisar(e.get("pago")))
+
+    faltan_obs_excel = sorted(obs_pdf - obs_excel)
+    sobran_obs_excel = sorted(obs_excel - obs_pdf)
+    faltan_pago_excel = sorted(pago_pdf - pago_excel)
+    sobran_pago_excel = sorted(pago_excel - pago_pdf)
+
+    if faltan_obs_excel or sobran_obs_excel or faltan_pago_excel or sobran_pago_excel:
+        if faltan_obs_excel:
+            filas_diff.append({"Campo": "Fechas OBSERVACION en el PDF pero no en Excel", "En Excel": "—", "En el PDF": ", ".join(faltan_obs_excel), "Estado": "❌ DISCREPANCIA"})
+        if sobran_obs_excel:
+            filas_diff.append({"Campo": "Fechas OBSERVACION en Excel pero no en el PDF", "En Excel": ", ".join(sobran_obs_excel), "En el PDF": "—", "Estado": "❌ DISCREPANCIA"})
+        if faltan_pago_excel:
+            filas_diff.append({"Campo": "Fechas PAGO en el PDF pero no en Excel", "En Excel": "—", "En el PDF": ", ".join(faltan_pago_excel), "Estado": "❌ DISCREPANCIA"})
+        if sobran_pago_excel:
+            filas_diff.append({"Campo": "Fechas PAGO en Excel pero no en el PDF", "En Excel": ", ".join(sobran_pago_excel), "En el PDF": "—", "Estado": "❌ DISCREPANCIA"})
+    else:
+        filas_diff.append({"Campo": "Calendario observación/pago", "En Excel": f"{len(obs_excel)} obs / {len(pago_excel)} pagos", "En el PDF": f"{len(obs_pdf)} obs / {len(pago_pdf)} pagos", "Estado": "✅ Coincide"})
+
+    # --- Fechas de call (CALENDARIO_CALLS) ---
+    calls_nota = df_calls[df_calls.get("nota") == numero_nota].copy() if df_calls is not None and not df_calls.empty and "nota" in df_calls.columns else pd.DataFrame()
+    calls_excel = set(pd.to_datetime(calls_nota["fecha_call"], errors="coerce").dt.strftime("%Y-%m-%d").dropna()) if not calls_nota.empty else set()
+    calls_pdf = set(f for f in extraido.get("fechas_call", []) if f and not _es_revisar(f))
+    faltan_calls_excel = sorted(calls_pdf - calls_excel)
+    sobran_calls_excel = sorted(calls_excel - calls_pdf)
+    if faltan_calls_excel or sobran_calls_excel:
+        if faltan_calls_excel:
+            filas_diff.append({"Campo": "Fechas de CALL en el PDF pero no en Excel", "En Excel": "—", "En el PDF": ", ".join(faltan_calls_excel), "Estado": "❌ DISCREPANCIA"})
+        if sobran_calls_excel:
+            filas_diff.append({"Campo": "Fechas de CALL en Excel pero no en el PDF", "En Excel": ", ".join(sobran_calls_excel), "En el PDF": "—", "Estado": "❌ DISCREPANCIA"})
+    else:
+        filas_diff.append({"Campo": "Fechas de posible call", "En Excel": f"{len(calls_excel)} fechas", "En el PDF": f"{len(calls_pdf)} fechas", "Estado": "✅ Coincide"})
+
+    df_diff = pd.DataFrame(filas_diff)
+    n_discrepancias = int(df_diff["Estado"].astype(str).str.startswith("❌").sum())
+    if n_discrepancias > 0:
+        st.error(f"Se encontraron {n_discrepancias} discrepancia(s) entre el Excel y el documento oficial.")
+    else:
+        st.success("No se encontraron discrepancias entre el Excel y el documento oficial.")
+
+    st.dataframe(df_diff, use_container_width=True, hide_index=True)
+
+    # --- Validación económica: capital, tasa, cobro, pago a inversores y beneficio ---
+    st.markdown("---")
+    st.markdown("#### Validación económica (capital, cobro, pago a inversores y beneficio)")
+
+    fecha_ref = proximo_evento_nota(df_cal, numero_nota, "PAGO")
+    if fecha_ref is None:
+        pagos_pasados = df_cal[(df_cal.get("nota") == numero_nota) & (df_cal.get("tipo_evento") == "PAGO") & (df_cal["fecha"].notna())].sort_values("fecha") if "nota" in df_cal.columns else pd.DataFrame()
+        fecha_ref = pagos_pasados.iloc[-1]["fecha"] if not pagos_pasados.empty else None
+
+    if fecha_ref is None:
+        st.info("No hay fechas de pago en el calendario de esta nota para poder validar el cálculo económico.")
+    else:
+        activas = inversiones_activas_para_nota(df_inv, numero_nota, fecha_ref)
+        if activas.empty:
+            st.info(f"No hay inversores activos en la Nota {numero_nota} en la fecha {pd.Timestamp(fecha_ref).strftime('%d/%m/%Y')}.")
+        else:
+            capital_total = float(activas["capital_invertido"].sum())
+            tasas_nota_distintas = sorted(activas["interes_nota_anual"].dropna().unique())
+            st.markdown(f"**Capital total invertido:** {fmt(capital_total)} ({len(activas)} posiciones) — fecha de referencia: {pd.Timestamp(fecha_ref).strftime('%d/%m/%Y')}")
+
+            if len(tasas_nota_distintas) > 1:
+                st.warning(f"⚠️ Hay más de una tasa de nota distinta entre los inversores de esta nota en INVERSIONES: {[f'{t*100:.3f}%' for t in tasas_nota_distintas]}. Debería ser una sola.")
+
+            cupon_pdf = extraido.get("cupon_anual_pct")
+            if tasas_nota_distintas and not _es_revisar(cupon_pdf):
+                for tasa in tasas_nota_distintas:
+                    if abs(float(tasa) - float(cupon_pdf)) > 0.001:
+                        st.error(f"❌ La tasa de nota en INVERSIONES ({float(tasa)*100:.3f}%) no coincide con el cupón anual del PDF ({float(cupon_pdf)*100:.3f}%).")
+
+            # Recalcula cobro/pago/beneficio con la MISMA lógica que usa el Dashboard,
+            # para validar de extremo a extremo (incluye la periodicidad detectada y la evaluación de barrera).
+            df_pagos_evento = pd.DataFrame([{"nota": numero_nota, "tipo_evento": "PAGO", "fecha": pd.Timestamp(fecha_ref)}])
+            detalle = preparar_detalle_notas(df_inv, df_pagos_evento, df_cal=df_cal, df_control=df_control)
+            detalle_nota = detalle[detalle["nota"] == numero_nota] if not detalle.empty else pd.DataFrame()
+            if detalle_nota.empty:
+                st.info("No se pudo calcular el desglose económico para esta fecha.")
+            else:
+                cols_mostrar = ["inversor", "capital_invertido", "interes_nota_anual", "interes_inversor_anual", "cobro_compania", "pago_inversor", "beneficio_empresa", "resultado_observacion"]
+                cols_mostrar = [c for c in cols_mostrar if c in detalle_nota.columns]
+                st.dataframe(
+                    preparar_tabla_monetaria(detalle_nota[cols_mostrar], ["capital_invertido", "cobro_compania", "pago_inversor", "beneficio_empresa"]),
+                    use_container_width=True, hide_index=True,
+                )
+                st.markdown(
+                    f"**Totales calculados para el {pd.Timestamp(fecha_ref).strftime('%d/%m/%Y')}:** "
+                    f"Cobro compañía {fmt(detalle_nota['cobro_compania'].sum())} · "
+                    f"Pago a inversores {fmt(detalle_nota['pago_inversor'].sum())} · "
+                    f"Beneficio {fmt(detalle_nota['beneficio_empresa'].sum())}"
+                )
+
+
 def seccion_notas_archivo():
     df_inv, df_cal, df_control = cargar_excel_completo()
+    df_calls = leer_hoja_excel("CALENDARIO_CALLS")
+    if not df_calls.empty and "nota" in df_calls.columns:
+        df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
 
-    tab_resumen, tab_nueva = st.tabs(["📊 Resumen y alertas", "➕ Añadir nota nueva"])
+    tab_resumen, tab_nueva, tab_auditar = st.tabs(["📊 Resumen y alertas", "➕ Añadir nota nueva", "🔍 Auditar nota existente"])
 
     with tab_nueva:
         _tab_añadir_nota_nueva(df_control, df_cal)
+
+    with tab_auditar:
+        _tab_auditar_nota(df_inv, df_cal, df_control, df_calls)
 
     with tab_resumen:
         st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
