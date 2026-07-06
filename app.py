@@ -3678,6 +3678,13 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
 
     numero_nota = int(st.number_input("Número de nota (ej. 28)", min_value=1, max_value=999, step=1, key="nueva_nota_numero"))
 
+    # Si no está en memoria de esta sesión, intenta recuperar el borrador persistente
+    # (sobrevive a reinicios de la app, actualizaciones de código, etc.)
+    if numero_nota not in almacen:
+        borrador = cargar_borrador_nota("nueva", numero_nota)
+        if borrador:
+            almacen[numero_nota] = borrador
+
     extraido_guardado = almacen.get(numero_nota)
 
     if extraido_guardado:
@@ -3692,7 +3699,9 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             st.error(f"No se pudieron extraer los datos: {resultado['error']}")
         else:
             almacen[numero_nota] = resultado
-            st.success(f"Datos extraídos para la Nota {numero_nota}. Revisa la previsualización antes de guardar.")
+            with st.spinner("Guardando borrador automático..."):
+                guardar_borrador_nota("nueva", numero_nota, resultado)
+            st.success(f"Datos extraídos para la Nota {numero_nota} y guardados como borrador — no se perderán aunque se reinicie la app.")
             st.rerun()
 
     extraido = almacen.get(numero_nota)
@@ -3789,12 +3798,17 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
                 hojas["CALENDARIO_NOTAS"] = pd.concat([hojas["CALENDARIO_NOTAS"], df_cal_editado], ignore_index=True)
                 if "CALENDARIO_CALLS" in hojas and not df_calls_editado.empty:
                     hojas["CALENDARIO_CALLS"] = pd.concat([hojas["CALENDARIO_CALLS"], df_calls_editado], ignore_index=True)
+                # Quitamos el borrador de esta misma tanda de hojas para no escribir el Excel dos veces
+                if "BORRADORES_NOTAS" in hojas and not hojas["BORRADORES_NOTAS"].empty:
+                    df_b = hojas["BORRADORES_NOTAS"]
+                    hojas["BORRADORES_NOTAS"] = df_b[~((df_b["TIPO"] == "nueva") & (pd.to_numeric(df_b["NOTA"], errors="coerce") == numero_nota))]
                 guardar_excel_completo_desde_hojas(hojas)
                 del almacen[numero_nota]
                 st.success(f"Nota {numero_nota} guardada en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS.")
     with col_descartar:
         if st.button(f"🗑️ Descartar previsualización de la Nota {numero_nota}"):
             del almacen[numero_nota]
+            borrar_borrador_nota("nueva", numero_nota)
             st.rerun()
 
 
@@ -3821,6 +3835,12 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
         st.session_state["auditoria_extraidos"] = {}
     almacen_auditoria = st.session_state["auditoria_extraidos"]
 
+    if numero_nota not in almacen_auditoria:
+        borrador = cargar_borrador_nota("auditar", numero_nota)
+        if borrador:
+            almacen_auditoria[numero_nota] = borrador
+            st.info(f"📂 Se recuperó una auditoría en curso para la Nota {numero_nota} (guardada automáticamente).")
+
     if st.button("🔍 Auditar nota", type="primary", disabled=pdf_subido is None):
         with st.spinner("Leyendo el documento y comparando contra el Excel..."):
             resultado = extraer_datos_nota_con_ia(pdf_subido.read())
@@ -3828,6 +3848,8 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
             st.error(f"No se pudieron extraer los datos del PDF: {resultado['error']}")
             return
         almacen_auditoria[numero_nota] = resultado
+        with st.spinner("Guardando borrador automático..."):
+            guardar_borrador_nota("auditar", numero_nota, resultado)
 
     extraido = almacen_auditoria.get(numero_nota)
     if not extraido:
@@ -4026,6 +4048,9 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
             hojas["AUDITORIA_NOTAS"] = pd.concat([hojas["AUDITORIA_NOTAS"], df_nuevo], ignore_index=True)
         else:
             hojas["AUDITORIA_NOTAS"] = df_nuevo
+        if "BORRADORES_NOTAS" in hojas and not hojas["BORRADORES_NOTAS"].empty:
+            df_b = hojas["BORRADORES_NOTAS"]
+            hojas["BORRADORES_NOTAS"] = df_b[~((df_b["TIPO"] == "auditar") & (pd.to_numeric(df_b["NOTA"], errors="coerce") == numero_nota))]
         guardar_excel_completo_desde_hojas(hojas)
         del almacen_auditoria[numero_nota]
         st.success(f"Auditoría de la Nota {numero_nota} guardada en la hoja AUDITORIA_NOTAS.")
@@ -5698,8 +5723,15 @@ def subir_excel_a_drive(hojas: dict) -> tuple[bool, str]:
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             resumable=False,
         )
-        servicio.files().update(fileId=GDRIVE_FILE_ID, media_body=media).execute()
-        return True, "Excel actualizado correctamente en Google Drive."
+        # Forzamos explícitamente que el destino siga siendo un Google Sheet nativo
+        # (si no se especifica, la conversión del xlsx subido puede no aplicarse bien).
+        archivo_actualizado = servicio.files().update(
+            fileId=GDRIVE_FILE_ID,
+            media_body=media,
+            body={"mimeType": "application/vnd.google-apps.spreadsheet"},
+            fields="id, modifiedTime, mimeType",
+        ).execute()
+        return True, f"Excel actualizado correctamente en Google Drive (modificado: {archivo_actualizado.get('modifiedTime', '?')})."
     except Exception as e:
         return False, f"No se pudo subir el Excel a Google Drive: {e}"
 
@@ -5721,6 +5753,73 @@ def guardar_excel_completo_desde_hojas(hojas: dict):
                 f"⚠️ Se guardó localmente pero no se pudo subir a Google Drive automáticamente: {mensaje}\n\n"
                 "Puedes subirlo manualmente desde 'Gestión de Excel' → 'Descargar copia'."
             )
+
+
+def guardar_borrador_nota(tipo_wizard: str, numero_nota: int, datos: dict):
+    """
+    Guarda automáticamente (sin que el usuario tenga que pulsar nada) el resultado de una
+    extracción de IA en la hoja BORRADORES_NOTAS, para que sobreviva a reinicios de la app
+    (actualizaciones de código, redeploys, etc.) — independiente de CONTROL_NOTAS/CALENDARIO_NOTAS.
+    """
+    import json as _json
+    try:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas:
+            return
+        fila_nueva = pd.DataFrame([{
+            "TIPO": tipo_wizard,
+            "NOTA": int(numero_nota),
+            "JSON_DATOS": _json.dumps(datos, ensure_ascii=False),
+            "FECHA_GUARDADO": pd.Timestamp.now(),
+        }])
+        if "BORRADORES_NOTAS" in hojas and not hojas["BORRADORES_NOTAS"].empty:
+            df_b = hojas["BORRADORES_NOTAS"]
+            df_b = df_b[~((df_b["TIPO"] == tipo_wizard) & (pd.to_numeric(df_b["NOTA"], errors="coerce") == numero_nota))]
+            hojas["BORRADORES_NOTAS"] = pd.concat([df_b, fila_nueva], ignore_index=True)
+        else:
+            hojas["BORRADORES_NOTAS"] = fila_nueva
+        contenido = excel_hojas_a_bytes(hojas)
+        with open(ARCHIVO, "wb") as f:
+            f.write(contenido)
+        st.cache_data.clear()
+        if "gcp_service_account" in st.secrets:
+            subir_excel_a_drive(hojas)  # silencioso: si falla, el borrador sigue disponible localmente en esta sesión
+    except Exception:
+        pass  # el borrador es una comodidad, nunca debe romper el flujo principal del wizard
+
+
+def cargar_borrador_nota(tipo_wizard: str, numero_nota: int) -> dict | None:
+    """Recupera el borrador guardado (si existe) para esa nota y ese wizard."""
+    import json as _json
+    try:
+        df_b = leer_hoja_excel("BORRADORES_NOTAS")
+        if df_b.empty:
+            return None
+        df_b.columns = [str(c).strip().upper() for c in df_b.columns]
+        fila = df_b[(df_b["TIPO"] == tipo_wizard) & (pd.to_numeric(df_b["NOTA"], errors="coerce") == numero_nota)]
+        if fila.empty:
+            return None
+        return _json.loads(fila.iloc[-1]["JSON_DATOS"])
+    except Exception:
+        return None
+
+
+def borrar_borrador_nota(tipo_wizard: str, numero_nota: int):
+    """Elimina el borrador de una nota (se llama cuando ya se ha guardado de verdad, o al descartarla)."""
+    try:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas or "BORRADORES_NOTAS" not in hojas or hojas["BORRADORES_NOTAS"].empty:
+            return
+        df_b = hojas["BORRADORES_NOTAS"]
+        hojas["BORRADORES_NOTAS"] = df_b[~((df_b["TIPO"] == tipo_wizard) & (pd.to_numeric(df_b["NOTA"], errors="coerce") == numero_nota))]
+        contenido = excel_hojas_a_bytes(hojas)
+        with open(ARCHIVO, "wb") as f:
+            f.write(contenido)
+        st.cache_data.clear()
+        if "gcp_service_account" in st.secrets:
+            subir_excel_a_drive(hojas)
+    except Exception:
+        pass
 
 
 def aplicar_formula_simple(df: pd.DataFrame, operacion: str, columna_a: str, columna_b: str | None, nueva_columna: str) -> pd.DataFrame:
