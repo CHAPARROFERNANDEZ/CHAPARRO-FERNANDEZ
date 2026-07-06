@@ -11,6 +11,7 @@ from email.mime.text import MIMEText
 from io import BytesIO
 from typing import Optional
 
+import time
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -1521,36 +1522,72 @@ def columna_barrera_control(df_control: pd.DataFrame, preferida="contingency"):
 # ANÁLISIS DE COMPAÑÍA + SIMULACIÓN MONTE CARLO PARA NOTAS ESTRUCTURADAS
 # ══════════════════════════════════════════════════════════════════════
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=900)
 def obtener_datos_fundamentales(ticker: str) -> dict:
     """
     Precio actual, objetivo de precio de consenso de analistas, volatilidad histórica
     anualizada, próxima fecha de resultados y datos generales de la compañía.
     Todo dato real de mercado (yfinance) — nada inventado ni "previsto" por IA.
+
+    NOTA DE FIABILIDAD: el endpoint de "info" de Yahoo Finance (de donde sale el precio
+    objetivo de analistas) es conocido por ser inestable, especialmente desde servidores
+    en la nube — a veces Yahoo limita o bloquea temporalmente estas peticiones. Por eso
+    se reintenta y se distingue entre "sin cobertura de analistas" (dato real: no hay
+    analistas cubriendo esta acción) y "no se pudo consultar" (fallo temporal de conexión).
     """
     resultado = {
         "ticker": ticker, "precio_actual": None, "sector": None, "nombre": None,
         "market_cap": None, "target_medio": None, "target_alto": None, "target_bajo": None,
         "n_analistas": None, "recomendacion": None, "volatilidad_anual_pct": None,
         "proxima_fecha_resultados": None, "variacion_1m_pct": None, "variacion_ytd_pct": None,
-        "error": None,
+        "error": None, "aviso_analistas": None,
     }
     if yf is None:
         resultado["error"] = "yfinance no disponible"
         return resultado
     try:
         t = yf.Ticker(ticker)
-        info = t.info or {}
-        resultado["nombre"] = info.get("longName") or info.get("shortName")
-        resultado["sector"] = info.get("sector")
-        resultado["market_cap"] = info.get("marketCap")
-        resultado["target_medio"] = info.get("targetMeanPrice")
-        resultado["target_alto"] = info.get("targetHighPrice")
-        resultado["target_bajo"] = info.get("targetLowPrice")
-        resultado["n_analistas"] = info.get("numberOfAnalystOpinions")
-        resultado["recomendacion"] = info.get("recommendationKey")
 
-        hist = t.history(period="1y")
+        # El endpoint "info" es el más inestable de yfinance/Yahoo — reintenta un par de veces.
+        info = {}
+        for intento in range(3):
+            try:
+                info = t.info or {}
+                if info and len(info) > 5:
+                    break
+            except Exception:
+                pass
+            if intento < 2:
+                time.sleep(1.2)
+
+        if not info or len(info) <= 5:
+            resultado["aviso_analistas"] = (
+                "Yahoo Finance no devolvió datos de analistas/fundamentales en este momento "
+                "(suele ser un límite temporal de peticiones, no que falten datos de verdad). Prueba de nuevo en un rato."
+            )
+        else:
+            resultado["nombre"] = info.get("longName") or info.get("shortName")
+            resultado["sector"] = info.get("sector")
+            resultado["market_cap"] = info.get("marketCap")
+            resultado["target_medio"] = info.get("targetMeanPrice")
+            resultado["target_alto"] = info.get("targetHighPrice")
+            resultado["target_bajo"] = info.get("targetLowPrice")
+            resultado["n_analistas"] = info.get("numberOfAnalystOpinions")
+            resultado["recomendacion"] = info.get("recommendationKey")
+            if info.get("targetMeanPrice") is None:
+                resultado["aviso_analistas"] = "Esta compañía no tiene cobertura de analistas en Yahoo Finance (dato real, no es un fallo)."
+
+        hist = None
+        for intento in range(2):
+            try:
+                hist = t.history(period="1y")
+                if hist is not None and not hist.empty:
+                    break
+            except Exception:
+                pass
+            if intento == 0:
+                time.sleep(1.0)
+
         if hist is not None and not hist.empty:
             cierres = hist["Close"].dropna()
             resultado["precio_actual"] = float(cierres.iloc[-1])
@@ -1561,6 +1598,8 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
             primer_dia_anio = cierres[cierres.index.year == cierres.index[-1].year]
             if len(primer_dia_anio) > 1:
                 resultado["variacion_ytd_pct"] = float((cierres.iloc[-1] / primer_dia_anio.iloc[0] - 1) * 100)
+        else:
+            resultado["error"] = "No se pudo obtener el histórico de precios (fallo de conexión con Yahoo Finance, prueba de nuevo)."
 
         try:
             cal = t.calendar
@@ -4398,11 +4437,19 @@ def _tab_ficha_compania(df_control: pd.DataFrame):
             sub = f"{var_target:+.1f}% vs precio actual" if var_target is not None else ""
             tarjeta_kpi("Precio objetivo (consenso)", f"${datos['target_medio']:,.2f}", sub, "positivo" if (var_target or 0) >= 0 else "negativo")
         else:
-            tarjeta_kpi("Precio objetivo (consenso)", "N/D", "Sin cobertura de analistas", "normal")
+            tarjeta_kpi("Precio objetivo (consenso)", "N/D", "Ver aviso abajo", "normal")
     with c3:
         tarjeta_kpi("Volatilidad anual histórica", f"{datos['volatilidad_anual_pct']:.1f}%" if datos.get("volatilidad_anual_pct") else "N/D", "Últimos 12 meses", "riesgo" if (datos.get("volatilidad_anual_pct") or 0) > 40 else "normal")
     with c4:
         tarjeta_kpi("Variación 1 mes", f"{datos['variacion_1m_pct']:+.1f}%" if datos.get("variacion_1m_pct") is not None else "N/D", f"YTD: {datos['variacion_ytd_pct']:+.1f}%" if datos.get("variacion_ytd_pct") is not None else "", "positivo" if (datos.get("variacion_1m_pct") or 0) >= 0 else "negativo")
+
+    if datos.get("aviso_analistas"):
+        st.info(f"ℹ️ {datos['aviso_analistas']}")
+    if datos.get("error"):
+        st.error(f"⚠️ {datos['error']}")
+        if st.button("🔄 Reintentar", key=f"retry_{ticker}"):
+            obtener_datos_fundamentales.clear()
+            st.rerun()
 
     if datos.get("target_alto") or datos.get("target_bajo"):
         st.caption(f"Rango de analistas: ${datos.get('target_bajo', 0):,.2f} — ${datos.get('target_alto', 0):,.2f}  |  {datos.get('n_analistas', '?')} analistas  |  Recomendación consenso: {datos.get('recomendacion', 'N/D')}")
@@ -4709,9 +4756,16 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
     for _, fila in control_nota.iterrows():
         ticker = str(fila.get("ticker", "")).strip().upper()
         fd = datos_por_ticker.get(ticker, {})
-        if not ticker or fd.get("error"):
+        if not ticker:
             continue
         st.markdown(f"### {fd.get('nombre') or ticker} ({ticker})")
+
+        if fd.get("error"):
+            st.error(f"⚠️ {fd['error']}")
+            if st.button("🔄 Reintentar este ticker", key=f"retry_nota_{ticker}"):
+                obtener_datos_fundamentales.clear()
+                st.rerun()
+
         c1, c2, c3, c4 = st.columns(4)
         precio_compra = fila.get("precio_compra")
         with c1:
@@ -4722,9 +4776,11 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
                         f"{var_actual:+.1f}% vs compra" if var_actual is not None else "", "positivo" if (var_actual or 0) >= 0 else "negativo")
         with c3:
             tarjeta_kpi("Precio objetivo analistas", f"${fd.get('target_medio', 0):,.2f}" if fd.get("target_medio") else "N/D",
-                        f"{fd.get('n_analistas', '?')} analistas", "normal")
+                        f"{fd.get('n_analistas', '?')} analistas" if fd.get("target_medio") else "Ver aviso", "normal")
         with c4:
             tarjeta_kpi("Volatilidad anual", f"{fd.get('volatilidad_anual_pct', 0):.1f}%" if fd.get("volatilidad_anual_pct") else "N/D", "", "riesgo" if (fd.get("volatilidad_anual_pct") or 0) > 40 else "normal")
+        if fd.get("aviso_analistas"):
+            st.info(f"ℹ️ {fd['aviso_analistas']}")
         if fd.get("proxima_fecha_resultados"):
             st.caption(f"📅 Próxima fecha de resultados: {fd['proxima_fecha_resultados']}")
 
@@ -4753,6 +4809,12 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
             df_prob_cupon = pd.DataFrame([{"Días": e["dias"], "Prob. cupón (%)": round(e["probabilidad"]*100, 1)} for e in eventos_cupon])
             st.line_chart(df_prob_cupon.set_index("Días"))
         st.caption("⚠️ Estimación con volatilidad histórica, sin correlación entre tickers ni deriva de precio — no es una predicción, es una probabilidad bajo supuestos.")
+    else:
+        st.error(
+            "⚠️ No se pudo ejecutar la simulación Monte Carlo porque no se consiguió precio/volatilidad "
+            "de ningún ticker de esta nota (fallo de conexión con Yahoo Finance). Revisa los avisos de arriba "
+            "y prueba a reintentar en unos minutos."
+        )
 
 
 def seccion_notas_archivo():
