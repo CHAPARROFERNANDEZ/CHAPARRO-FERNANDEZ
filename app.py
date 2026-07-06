@@ -3318,7 +3318,105 @@ def obtener_estado_bitcoin_etf():
     return resultado
 
 
-def tarjeta_bitcoin_etf():
+def calcular_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFrame) -> dict:
+    """
+    Concentración del capital activo hoy por (1) emisor/banco de las notas y (2) sector/industria
+    de las compañías subyacentes. El sector/industria viene de Yahoo Finance (clasificación real,
+    no una categoría "IA" inventada — Yahoo no tiene esa granularidad, se usa su campo 'industry',
+    que es más fino que 'sector' pero tampoco es una etiqueta de "inteligencia artificial" como tal).
+    """
+    hoy = pd.Timestamp.today().normalize()
+    resultado = {"por_emisor": pd.DataFrame(), "por_sector": pd.DataFrame(), "por_industria": pd.DataFrame(), "notas_sin_emisor": []}
+    if df_control is None or df_control.empty or "nota" not in df_control.columns:
+        return resultado
+
+    control = df_control.copy()
+    control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
+    control = control.dropna(subset=["nota"])
+
+    filas_emisor, filas_sector, notas_sin_emisor = [], [], []
+    for nota_num in sorted(control["nota"].unique()):
+        filas_nota = control[control["nota"] == nota_num]
+        nombre_activo = f"NOTA_{int(nota_num):02d}"
+        capital_nota = capital_activo_en_fecha(
+            df_inv[df_inv.get("nombre_activo", pd.Series(dtype=str)).astype(str).str.upper().str.replace(" ", "_") == nombre_activo],
+            hoy,
+        )
+        if capital_nota <= 0:
+            continue
+
+        emisor = filas_nota.get("emisor", pd.Series(dtype=str)).dropna()
+        emisor = str(emisor.iloc[0]).strip() if not emisor.empty and str(emisor.iloc[0]).strip() else None
+        if emisor:
+            filas_emisor.append({"Emisor": emisor, "Capital": capital_nota, "Nota": int(nota_num)})
+        else:
+            notas_sin_emisor.append(int(nota_num))
+            filas_emisor.append({"Emisor": "Sin emisor registrado", "Capital": capital_nota, "Nota": int(nota_num)})
+
+        primer_ticker = str(filas_nota.iloc[0].get("ticker", "")).strip().upper() if not filas_nota.empty else ""
+        if primer_ticker:
+            fd = obtener_datos_fundamentales(primer_ticker)
+            sector = fd.get("sector") or "Sin sector (Yahoo Finance no lo devolvió)"
+            filas_sector.append({"Sector": sector, "Capital": capital_nota, "Nota": int(nota_num), "Ticker representativo": primer_ticker})
+
+    if filas_emisor:
+        df_e = pd.DataFrame(filas_emisor).groupby("Emisor", as_index=False)["Capital"].sum().sort_values("Capital", ascending=False)
+        total_e = df_e["Capital"].sum()
+        df_e["% del total"] = (df_e["Capital"] / total_e * 100).round(1)
+        resultado["por_emisor"] = df_e
+
+    if filas_sector:
+        df_s = pd.DataFrame(filas_sector).groupby("Sector", as_index=False)["Capital"].sum().sort_values("Capital", ascending=False)
+        total_s = df_s["Capital"].sum()
+        df_s["% del total"] = (df_s["Capital"] / total_s * 100).round(1)
+        resultado["por_sector"] = df_s
+
+    resultado["notas_sin_emisor"] = notas_sin_emisor
+    return resultado
+
+
+def _tab_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFrame):
+    st.markdown("### 🧭 Concentración de la cartera de notas")
+    st.caption(
+        "Capital activo hoy repartido por emisor (banco) y por sector de la compañía subyacente "
+        "(clasificación real de Yahoo Finance — no hay una categoría específica de 'IA', se usa el "
+        "sector/industria tal como lo clasifica el mercado)."
+    )
+    with st.spinner("Calculando concentración..."):
+        conc = calcular_concentracion_cartera(df_inv, df_control)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### Por emisor (banco)")
+        if conc["por_emisor"].empty:
+            st.info("No hay datos suficientes (revisa que las notas tengan emisor guardado en CONTROL_NOTAS).")
+        else:
+            df_mostrar = conc["por_emisor"][["Emisor", "Capital", "% del total"]].copy()
+            df_mostrar["Capital"] = df_mostrar["Capital"].apply(lambda x: fmt(x))
+            df_mostrar["% del total"] = df_mostrar["% del total"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+            st.bar_chart(conc["por_emisor"].set_index("Emisor")["Capital"])
+
+    with col2:
+        st.markdown("#### Por sector (compañía subyacente)")
+        if conc["por_sector"].empty:
+            st.info("No hay datos suficientes.")
+        else:
+            df_mostrar = conc["por_sector"][["Sector", "Capital", "% del total"]].copy()
+            df_mostrar["Capital"] = df_mostrar["Capital"].apply(lambda x: fmt(x))
+            df_mostrar["% del total"] = df_mostrar["% del total"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+            st.bar_chart(conc["por_sector"].set_index("Sector")["Capital"])
+
+    if conc.get("notas_sin_emisor"):
+        st.warning(
+            f"⚠️ Estas notas no tienen emisor guardado y aparecen como 'Sin emisor registrado': "
+            f"{', '.join(str(n) for n in conc['notas_sin_emisor'])}. Es porque se añadieron antes de "
+            f"guardar el emisor — puedes rellenarlo directamente en la hoja CONTROL_NOTAS (columna EMISOR)."
+        )
+
+
+
     """Tarjeta desplegable del Dashboard con precio actualizado y gráfico del ETF de Bitcoin (IBIT)."""
     estado = obtener_estado_bitcoin_etf()
     precio_actual = estado.get("precio_actual")
@@ -3447,6 +3545,10 @@ def dashboard_financiero():
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
     tarjeta_bitcoin_etf()
+
+    st.markdown("---")
+    with st.expander("🧭 Concentración de la cartera (emisor y sector)", expanded=False):
+        _tab_concentracion_cartera(df_inv, df_control)
 
     if vista_dashboard in ["General", "Notas"]:
         fecha_analisis_notas = pd.Timestamp(anio_dashboard, mes_dashboard, ultimo_dia_mes(anio_dashboard, mes_dashboard)).normalize()
@@ -4103,6 +4205,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             "BARRERA_CAPITAL": _marcar(t.get("barrera_capital_pct")),
             "TIENE_MEMORIA": "SI" if extraido.get("tiene_memoria") is True else "NO",
             "TIENE_ONE_STAR": "SI" if extraido.get("tiene_one_star") is True else "NO",
+            "EMISOR": _marcar(extraido.get("emisor")),
         })
     df_control_preview = pd.DataFrame(filas_control)
     df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key=f"editor_control_nota_{numero_nota}")
@@ -6551,12 +6654,13 @@ def subir_excel_a_drive(hojas: dict) -> tuple[bool, str]:
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             resumable=False,
         )
-        # Forzamos explícitamente que el destino siga siendo un Google Sheet nativo
-        # (si no se especifica, la conversión del xlsx subido puede no aplicarse bien).
+        # NOTA: NO se especifica 'body' con mimeType aquí — Drive ya convierte automáticamente
+        # el xlsx subido al formato nativo de Google Sheets porque el archivo destino YA es un
+        # Google Sheet. Forzar el mimeType de destino explícitamente causaba el error
+        # "Invalid MIME type provided for the uploaded content".
         archivo_actualizado = servicio.files().update(
             fileId=GDRIVE_FILE_ID,
             media_body=media,
-            body={"mimeType": "application/vnd.google-apps.spreadsheet"},
             fields="id, modifiedTime, mimeType",
         ).execute()
         return True, f"Excel actualizado correctamente en Google Drive (modificado: {archivo_actualizado.get('modifiedTime', '?')})."
