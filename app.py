@@ -818,11 +818,16 @@ aplicar_estilo_profesional()
 # LOGIN
 # =========================
 USUARIOS = {"Yuri": "1234", "Jordi": "12345", "Alan": "123456"}
+# Portal de inversores: acceso limitado, solo ven su propia posición.
+# El "usuario" debe coincidir exactamente (en mayúsculas) con el valor de la columna 'inversor' en INVERSIONES.
+USUARIOS_INVERSORES = {"PAM": "Pam2026Wealth!"}
 
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 if "usuario" not in st.session_state:
     st.session_state.usuario = None
+if "tipo_usuario" not in st.session_state:
+    st.session_state.tipo_usuario = None  # "admin" o "inversor"
 
 if not st.session_state.autenticado:
     st.markdown(
@@ -835,17 +840,33 @@ if not st.session_state.autenticado:
         """,
         unsafe_allow_html=True,
     )
-    with st.form("login_form"):
-        usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
-        password = st.text_input("Contraseña", type="password")
-        entrar = st.form_submit_button("Entrar")
-    if entrar:
-        if USUARIOS.get(usuario) == password:
-            st.session_state.autenticado = True
-            st.session_state.usuario = usuario
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrectos")
+    tipo_acceso = st.radio("Tipo de acceso", ["Equipo interno", "Portal de inversor"], horizontal=True, label_visibility="collapsed")
+    if tipo_acceso == "Equipo interno":
+        with st.form("login_form"):
+            usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
+            password = st.text_input("Contraseña", type="password")
+            entrar = st.form_submit_button("Entrar")
+        if entrar:
+            if USUARIOS.get(usuario) == password:
+                st.session_state.autenticado = True
+                st.session_state.usuario = usuario
+                st.session_state.tipo_usuario = "admin"
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos")
+    else:
+        with st.form("login_form_inversor"):
+            usuario_inv = st.selectbox("Inversor", list(USUARIOS_INVERSORES.keys()))
+            password_inv = st.text_input("Contraseña", type="password", key="pwd_inversor")
+            entrar_inv = st.form_submit_button("Entrar")
+        if entrar_inv:
+            if USUARIOS_INVERSORES.get(usuario_inv) == password_inv:
+                st.session_state.autenticado = True
+                st.session_state.usuario = usuario_inv
+                st.session_state.tipo_usuario = "inversor"
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos")
     st.stop()
 
 st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
@@ -854,6 +875,7 @@ st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá 
 if st.sidebar.button("Cerrar sesión"):
     st.session_state.autenticado = False
     st.session_state.usuario = None
+    st.session_state.tipo_usuario = None
     st.rerun()
 
 
@@ -1212,7 +1234,120 @@ def capital_activo_en_fecha(df_base: pd.DataFrame, fecha_consulta, activo: Optio
     return float(filtrado["capital_invertido"].sum()) if not filtrado.empty else 0.0
 
 
-def total_pagado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: float) -> float:
+def calcular_intereses_acumulados_inversor(df_inv: pd.DataFrame, inversor: str, fecha_fin=None) -> dict:
+    """
+    Total de intereses generados por un inversor desde su primera posición hasta fecha_fin (hoy por defecto),
+    usando la misma lógica de extractos (solo NUEVA/CANCELADA, ignorando fecha_final_inversion en filas NUEVA).
+    Devuelve total acumulado, capital activo hoy y tasa media ponderada.
+    """
+    fecha_fin = pd.Timestamp(fecha_fin).normalize() if fecha_fin is not None else pd.Timestamp.today().normalize()
+    df = df_inv.copy()
+    df["inversor"] = df["inversor"].astype(str).str.strip().str.upper()
+    df["tipo_operacion"] = df["tipo_operacion"].astype(str).str.strip().str.lower()
+    df = df[df["inversor"] == inversor.strip().upper()]
+    df = df[df["tipo_operacion"].isin(["nueva", "cancelada"])].copy()
+    if df.empty:
+        return {"total_intereses": 0.0, "capital_activo": 0.0, "tasa_media": 0.0, "fecha_inicio": None}
+
+    df["fecha_inversion"] = pd.to_datetime(df["fecha_inversion"], errors="coerce", dayfirst=True)
+    df["fecha_final_inversion"] = pd.to_datetime(df["fecha_final_inversion"], errors="coerce", dayfirst=True)
+    df["capital_invertido"] = pd.to_numeric(df["capital_invertido"], errors="coerce").fillna(0)
+    df["interes_inversor_anual"] = pd.to_numeric(df["interes_inversor_anual"], errors="coerce").fillna(0)
+
+    fecha_inicio_global = df["fecha_inversion"].min()
+    if pd.isna(fecha_inicio_global):
+        return {"total_intereses": 0.0, "capital_activo": 0.0, "tasa_media": 0.0, "fecha_inicio": None}
+
+    total_intereses = 0.0
+    f_iter = pd.Timestamp(fecha_inicio_global.year, fecha_inicio_global.month, 1)
+    while f_iter <= fecha_fin:
+        dias_m = ultimo_dia_mes(f_iter.year, f_iter.month)
+        inicio_mes = datetime(f_iter.year, f_iter.month, 1)
+        fin_mes = datetime(f_iter.year, f_iter.month, dias_m)
+        for _, row in df.iterrows():
+            fi = row["fecha_inversion"]
+            if pd.isna(fi):
+                continue
+            fi_dt = fi.to_pydatetime()
+            ff = row["fecha_final_inversion"]
+            if row["tipo_operacion"] == "cancelada" and pd.notna(ff):
+                fecha_fin_row = min(ff.to_pydatetime(), fin_mes)
+            else:
+                fecha_fin_row = fin_mes
+            inicio_calc = max(fi_dt, inicio_mes)
+            fin_calc = min(fecha_fin_row, fin_mes, fecha_fin.to_pydatetime())
+            if inicio_calc > fin_calc:
+                continue
+            dias = (fin_calc - inicio_calc).days + 1
+            total_intereses += row["capital_invertido"] * row["interes_inversor_anual"] / 12 * dias / dias_m
+        f_iter += pd.DateOffset(months=1)
+
+    capital_activo = capital_activo_en_fecha(df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == inversor.strip().upper()], fecha_fin)
+    activas_hoy = df[(df["fecha_inversion"] <= fecha_fin) & ((df["tipo_operacion"] != "cancelada") | (df["fecha_final_inversion"] >= fecha_fin))]
+    tasa_media = float((activas_hoy["capital_invertido"] * activas_hoy["interes_inversor_anual"]).sum() / activas_hoy["capital_invertido"].sum()) if not activas_hoy.empty and activas_hoy["capital_invertido"].sum() > 0 else 0.0
+
+    return {
+        "total_intereses": round(total_intereses, 2),
+        "capital_activo": capital_activo,
+        "tasa_media": tasa_media,
+        "fecha_inicio": fecha_inicio_global,
+    }
+
+
+def seccion_portal_inversor(nombre_inversor: str):
+    """Portal de acceso limitado para un inversor: solo ve su propia posición, nunca la de otros."""
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    hoy = pd.Timestamp.today().normalize()
+
+    mostrar_hero(f"{nombre_inversor} (Portal de inversor)")
+    st.header(f"👋 Bienvenido/a, {nombre_inversor}")
+    st.caption("Este es tu portal personal — solo tú puedes ver esta información. Ningún otro inversor tiene acceso a tu posición.")
+
+    datos = calcular_intereses_acumulados_inversor(df_inv, nombre_inversor, hoy)
+
+    if datos["fecha_inicio"] is None:
+        st.warning("No se encontraron posiciones registradas a tu nombre.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        tarjeta_kpi("💰 Capital activo hoy", fmt(datos["capital_activo"]), f"Invirtiendo desde {datos['fecha_inicio'].strftime('%d/%m/%Y')}", "normal")
+    with c2:
+        tarjeta_kpi("📈 Intereses totales ganados", fmt(datos["total_intereses"]), "Acumulado desde tu primera inversión", "positivo")
+    with c3:
+        tarjeta_kpi("🎯 Tu rentabilidad contratada", fmt_pct(datos["tasa_media"]), "Tasa anual media ponderada", "positivo")
+
+    st.markdown("---")
+    st.markdown("### 📄 Tu extracto")
+    col_mes, col_anio = st.columns(2)
+    with col_mes:
+        mes_extracto = st.selectbox("Mes", list(range(1, 13)), index=hoy.month - 1, format_func=lambda m: ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][m-1])
+    with col_anio:
+        anio_extracto = st.number_input("Año", min_value=2024, max_value=hoy.year, value=hoy.year, step=1)
+
+    if st.button("🔎 Ver mi extracto", type="primary"):
+        archivos = generar_extractos(df_inv, "Un inversor", nombre_inversor, anio_extracto, mes_extracto)
+        if not archivos:
+            st.warning("No se encontró extracto para ese mes — puede que no tuvieras capital activo entonces.")
+        else:
+            nombre_archivo, contenido = archivos[0]
+            st.session_state["portal_extracto_actual"] = (nombre_archivo, contenido)
+
+    extracto_actual = st.session_state.get("portal_extracto_actual")
+    if extracto_actual:
+        nombre_archivo, contenido = extracto_actual
+        st.download_button("⬇️ Descargar mi extracto (Excel)", contenido, file_name=nombre_archivo,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary")
+        try:
+            detalle = pd.read_excel(BytesIO(contenido), sheet_name="DETALLE", header=None)
+            st.markdown("#### Vista previa del detalle")
+            st.dataframe(detalle, use_container_width=True, hide_index=True)
+        except Exception:
+            st.info("Descarga el archivo para ver el detalle completo.")
+
+
+
     df_activo = filtrar_activo(df_base, activo)
     if df_activo.empty:
         return 0.0
@@ -7848,6 +7983,11 @@ Responde SIEMPRE en español. Sé conciso cuando el dato es directo; desarrolla 
         if st.button("🗑️ Limpiar conversación", key="btn_limpiar_ia_cf"):
             st.session_state["chat_ia_cf"] = []
             st.rerun()
+
+# ── Portal de inversor: acceso limitado, se corta aquí antes del menú de administración ──
+if st.session_state.get("tipo_usuario") == "inversor":
+    seccion_portal_inversor(st.session_state.usuario)
+    st.stop()
 
 menu = st.sidebar.selectbox(
     "Menú principal",
