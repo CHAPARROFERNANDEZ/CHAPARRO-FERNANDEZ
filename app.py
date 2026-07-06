@@ -848,6 +848,7 @@ if not st.session_state.autenticado:
     st.stop()
 
 st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+st.sidebar.caption("🔧 Build de prueba: persistencia de borradores (v2)")
 st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá automáticamente.")
 if st.sidebar.button("Cerrar sesión"):
     st.session_state.autenticado = False
