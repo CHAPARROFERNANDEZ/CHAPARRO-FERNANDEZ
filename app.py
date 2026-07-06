@@ -1330,7 +1330,7 @@ def seccion_portal_inversor(nombre_inversor: str):
         if not archivos:
             st.warning("No se encontró extracto para ese mes — puede que no tuvieras capital activo entonces.")
         else:
-            nombre_archivo, contenido = archivos[0]
+            nombre_archivo, contenido, _ = archivos[0]
             st.session_state["portal_extracto_actual"] = (nombre_archivo, contenido)
 
     extracto_actual = st.session_state.get("portal_extracto_actual")
