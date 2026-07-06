@@ -6503,8 +6503,17 @@ def seccion_asistente_ia_fondo():
         # Detectar mes mencionado en la pregunta
         meses_map = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
                      "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
-        mes_pregunta = next((v for k,v in meses_map.items() if k in p), mes_hoy)
-        anio_pregunta = anio_hoy
+        mes_mencionado = next((v for k,v in meses_map.items() if k in p), None)
+        mes_pregunta = mes_mencionado if mes_mencionado is not None else mes_hoy
+
+        # Detectar un año explícito de 4 dígitos (ej. "2025") en la pregunta.
+        import re as _re
+        anio_match = _re.search(r"\b(20\d{2})\b", p)
+        anio_pregunta = int(anio_match.group(1)) if anio_match else anio_hoy
+
+        # Si se menciona un año pero NO un mes concreto, se interpreta como petición de TOTAL ANUAL
+        # (ej. "cuántos intereses se pagaron a PAM en 2025" → los 12 meses de 2025, no solo el mes actual).
+        pedir_total_anual = (anio_match is not None) and (mes_mencionado is None)
 
         # Calcular resumen dashboard al inicio para usarlo en todos los bloques
         try:
@@ -6572,9 +6581,6 @@ def seccion_asistente_ia_fondo():
         #    Solo NUEVA y CANCELADA. Reinversiones NO generan pago independiente.
         # ══════════════════════════════════════════════════════════════════════
         try:
-            lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES {mes_pregunta}/{anio_pregunta} (fuente: lógica Extractos) ===")
-            lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas.")
-
             df_ext = df_inv.copy()
             for col in ["inversor","tipo_inversion","subtipo_inversion","nombre_activo","tipo_operacion","id_inversion"]:
                 if col in df_ext.columns:
@@ -6586,76 +6592,97 @@ def seccion_asistente_ia_fondo():
             df_ext["capital_invertido"] = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
             df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-            dias_mes_ext = ultimo_dia_mes(anio_pregunta, mes_pregunta)
-            fecha_corte_ext = pd.Timestamp(datetime(anio_pregunta, mes_pregunta, dias_mes_ext))
             INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
             CORTE_TRAMO = datetime(2026, 2, 1)
             fin_tramo1 = datetime(2026, 1, 31)
 
-            filas_int = []
-            for _, row in df_ext.iterrows():
-                fi = row.get("fecha_inversion")
-                if pd.isna(fi):
-                    continue
-                fi_dt = fi.to_pydatetime()
-                tipo_op = row["tipo_op_n"]
-                ff = row.get("fecha_final_inversion")
-
-                if tipo_op == "CANCELADA":
-                    if pd.isna(ff):
+            def _calcular_intereses_mes(anio_m, mes_m):
+                dias_mes_ext = ultimo_dia_mes(anio_m, mes_m)
+                fecha_corte_ext = pd.Timestamp(datetime(anio_m, mes_m, dias_mes_ext))
+                filas = []
+                for _, row in df_ext.iterrows():
+                    fi = row.get("fecha_inversion")
+                    if pd.isna(fi):
                         continue
-                    fecha_fin_dt = min(ff.to_pydatetime(), fecha_corte_ext.to_pydatetime())
-                else:
-                    fecha_fin_dt = fecha_corte_ext.to_pydatetime()
+                    fi_dt = fi.to_pydatetime()
+                    tipo_op = row["tipo_op_n"]
+                    ff = row.get("fecha_final_inversion")
 
-                inicio_mes_dt = datetime(anio_pregunta, mes_pregunta, 1)
-                fin_mes_dt = datetime(anio_pregunta, mes_pregunta, dias_mes_ext)
-                inicio_calc = max(fi_dt, inicio_mes_dt)
-                fin_calc = min(fecha_fin_dt, fin_mes_dt)
-                if inicio_calc > fin_calc:
-                    continue
+                    if tipo_op == "CANCELADA":
+                        if pd.isna(ff):
+                            continue
+                        fecha_fin_dt = min(ff.to_pydatetime(), fecha_corte_ext.to_pydatetime())
+                    else:
+                        fecha_fin_dt = fecha_corte_ext.to_pydatetime()
 
-                dias = (fin_calc - inicio_calc).days + 1
-                capital = float(row["capital_invertido"])
-                tasa = float(row["interes_inversor_anual"])
-                inv_upper = str(row.get("inversor","")).strip().upper()
+                    inicio_mes_dt = datetime(anio_m, mes_m, 1)
+                    fin_mes_dt = datetime(anio_m, mes_m, dias_mes_ext)
+                    inicio_calc = max(fi_dt, inicio_mes_dt)
+                    fin_calc = min(fecha_fin_dt, fin_mes_dt)
+                    if inicio_calc > fin_calc:
+                        continue
 
-                if inv_upper in INVERSORES_TRAMO:
-                    interes_mes = 0.0
-                    if inicio_calc <= fin_tramo1:
-                        fin_t1 = min(fin_calc, fin_tramo1)
-                        dias_t1 = (fin_t1 - inicio_calc).days + 1
-                        interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_ext, 2)
-                    if fin_calc >= CORTE_TRAMO:
-                        ini_t2 = max(inicio_calc, CORTE_TRAMO)
-                        dias_t2 = (fin_calc - ini_t2).days + 1
-                        interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_ext, 2)
-                else:
-                    interes_mes = round((capital * tasa / 12) * dias / dias_mes_ext, 2)
+                    dias = (fin_calc - inicio_calc).days + 1
+                    capital = float(row["capital_invertido"])
+                    tasa = float(row["interes_inversor_anual"])
+                    inv_upper = str(row.get("inversor","")).strip().upper()
 
-                filas_int.append({
-                    "inversor": str(row.get("inversor","")),
-                    "nombre_activo": str(row.get("nombre_activo","")),
-                    "capital": capital,
-                    "tasa_anual": tasa,
-                    "dias": dias,
-                    "interes_mes": interes_mes,
-                })
+                    if inv_upper in INVERSORES_TRAMO:
+                        interes_mes = 0.0
+                        if inicio_calc <= fin_tramo1:
+                            fin_t1 = min(fin_calc, fin_tramo1)
+                            dias_t1 = (fin_t1 - inicio_calc).days + 1
+                            interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_ext, 2)
+                        if fin_calc >= CORTE_TRAMO:
+                            ini_t2 = max(inicio_calc, CORTE_TRAMO)
+                            dias_t2 = (fin_calc - ini_t2).days + 1
+                            interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_ext, 2)
+                    else:
+                        interes_mes = round((capital * tasa / 12) * dias / dias_mes_ext, 2)
+
+                    filas.append({
+                        "mes": f"{mes_m:02d}/{anio_m}",
+                        "inversor": str(row.get("inversor","")),
+                        "nombre_activo": str(row.get("nombre_activo","")),
+                        "capital": capital,
+                        "tasa_anual": tasa,
+                        "dias": dias,
+                        "interes_mes": interes_mes,
+                    })
+                return filas
+
+            if pedir_total_anual:
+                lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES — TOTAL AÑO {anio_pregunta} (fuente: lógica Extractos) ===")
+                lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas. Suma de los 12 meses del año solicitado.")
+                filas_int = []
+                for m in range(1, 13):
+                    filas_int.extend(_calcular_intereses_mes(anio_pregunta, m))
+            else:
+                lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES {mes_pregunta}/{anio_pregunta} (fuente: lógica Extractos) ===")
+                lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas.")
+                filas_int = _calcular_intereses_mes(anio_pregunta, mes_pregunta)
 
             if filas_int:
                 df_int = pd.DataFrame(filas_int)
-                # Por inversor agrupado
+                # Por inversor agrupado (total del periodo solicitado, sea un mes o el año completo)
                 por_inv = df_int.groupby("inversor")["interes_mes"].sum().sort_values(ascending=False)
                 total_int = por_inv.sum()
                 for inv, val in por_inv.items():
                     lineas.append(f"  {inv}: ${val:,.2f}")
                 lineas.append(f"  >> TOTAL INTERESES A PAGAR: ${total_int:,.2f}")
-                # Detalle por posición
-                lineas.append("\nDetalle por posición:")
-                for r in filas_int:
-                    lineas.append(f"  {r['inversor']} | {r['nombre_activo']} | Capital: ${r['capital']:,.2f} | Tasa: {r['tasa_anual']*100:.1f}% | Días: {r['dias']} | Interés: ${r['interes_mes']:,.2f}")
+                if pedir_total_anual:
+                    lineas.append("\nDesglose mensual por inversor (para el año solicitado):")
+                    desglose = df_int.groupby(["inversor","mes"])["interes_mes"].sum().reset_index()
+                    for inv in por_inv.index:
+                        sub = desglose[desglose["inversor"] == inv]
+                        detalle_meses = ", ".join(f"{r['mes']}: ${r['interes_mes']:,.2f}" for _, r in sub.iterrows())
+                        lineas.append(f"  {inv} → {detalle_meses}")
+                else:
+                    lineas.append("\nDetalle por posición:")
+                    for r in filas_int:
+                        lineas.append(f"  {r['inversor']} | {r['nombre_activo']} | Capital: ${r['capital']:,.2f} | Tasa: {r['tasa_anual']*100:.1f}% | Días: {r['dias']} | Interés: ${r['interes_mes']:,.2f}")
             else:
-                lineas.append("  Sin datos de intereses para ese mes.")
+                lineas.append("  Sin datos de intereses para ese periodo.")
         except Exception as e:
             lineas.append(f"[Error intereses extracto: {e}]")
 
@@ -7143,6 +7170,24 @@ def seccion_asistente_ia_fondo():
 11. LA HOJA RESULTADOS_OBSERVACION NO SE USA NUNCA: no está mantenida y puede contener datos obsoletos. Si el usuario pregunta por ella, dile que esa hoja no se usa como fuente y que el estado real de cada nota se calcula en vivo con precios actuales.
 
 12. FECHA DE INICIO DE UNA NOTA PARA EFECTOS DE PAGO AL INVERSOR: no es la fecha en la que arranca la nota en el mercado (Initial Valuation Date), sino la PRIMERA FECHA DE PAGO (cobro) del calendario de esa nota, menos 1 mes. Ej.: si la nota empieza el 19/09 y el primer pago es el 25/10, la fecha de inicio que cuenta para calcular los intereses del inversor es el 25/09 (un mes antes del primer pago), no el 19/09.
+
+13. LA HOJA REINVERSIONES ES SOLO TRAZABILIDAD HISTÓRICA, no una fuente de cálculo financiero. Vincula cada operación de reinversión (id_inversion_destino) con de dónde venía originalmente ese capital (id_inversion_origen), para poder responder preguntas del tipo "¿de dónde viene el capital de esta nota?" aunque haya pasado por muchas reinversiones. Los importes de esta hoja NO tienen por qué cuadrar exactamente con el capital_invertido actual de la posición destino — no la uses para calcular capital, ingresos ni beneficios, solo para explicar el origen/historial de un capital si te lo preguntan explícitamente.
+
+14. LOS CALLS SIEMPRE SON TOTALES: cuando una nota es llamada, se cancela el 100% de su capital de golpe, nunca una parte. Si un documento menciona la posibilidad de un call parcial por sorteo entre tenedores (algunos prospectos legales lo mencionan como cláusula genérica), ignóralo — en la operativa real del fondo nunca ha pasado y no debe asumirse salvo que el usuario diga lo contrario explícitamente.
+
+15. DIVISA Y REDONDEO: todo el fondo opera en dólares estadounidenses (USD). Los importes siempre se redondean a 2 decimales.
+
+16. TRASPASOS ENTRE INVERSORES: si un inversor cede su posición a otro (ej. Jordi le pasa capital a Eva), se registra como una CANCELACIÓN de la posición del que cede + una inversión NUEVA (o una REINVERSIÓN, si el capital que se traspasa proviene de una posición previa que venció por call o vencimiento) del que recibe. Si ves una cancelación y una nueva/reinversión con fechas coincidentes y capital similar, puede tratarse de un traspaso de este tipo.
+
+17. NO EXISTE EL RETIRO PARCIAL DE CAPITAL: un inversor solo puede retirar los intereses que genera su capital, nunca una parte del principal. Para sacar dinero del principal, la única vía es cancelar la posición COMPLETA (fila entera). Si un inversor tenía $50,000 y ahora aparece con $30,000, eso NO es un retiro parcial — implica que se canceló la posición de $50,000 y se abrió una nueva de $30,000 (dos operaciones distintas, no un ajuste de la misma).
+
+18. NO SE PUEDE ENTRAR CON CAPITAL NUEVO A MITAD DE VIDA DE UNA NOTA YA ACTIVA: la única forma de que un inversor gane exposición a una nota que ya lleva tiempo funcionando es comprando la posición de otro inversor que ya estaba dentro (un traspaso, ver punto 16) — nunca aportando capital fresco directamente a una nota en curso. En un traspaso de este tipo, todos los términos de la nota (precio de compra, barreras, fechas de calendario, calls) se mantienen EXACTAMENTE igual que en la posición original — solo cambia el nombre del inversor en esa fila de INVERSIONES.
+
+19. CUANDO UNA NOTA CON VARIOS INVERSORES ES LLAMADA (call), el capital de cada inversor se reinvierte de forma INDEPENDIENTE, pudiendo acabar en sitios distintos (ej. si la nota tenía 4 inversores, cada uno puede terminar reinvertido en una nota o activo diferente, no necesariamente juntos). No asumas que todos los inversores de una nota llamada siguen juntos después del call.
+
+20. NO HAY COMISIÓN DE GESTIÓN ADICIONAL: el spread (diferencia entre lo que cobra el fondo del activo y lo que paga al inversor) es la ÚNICA fuente de ingreso del fondo. No existe ningún "management fee" u otra comisión extra sobre el capital de los inversores.
+
+21. EL PAGO AL INVERSOR ES UNA GARANTÍA UNIVERSAL, EN CUALQUIER TIPO DE ACTIVO: no es exclusivo de las notas estructuradas — si un activo fijo (Paraguay, MotoClick, Fútbol, Bolivia) no paga su % pactado algún mes por el motivo que sea, el fondo sigue pagando al inversor su tasa fija igualmente, asumiendo la pérdida él mismo. El inversor cobra su fijo pase lo que pase, sea cual sea el activo donde esté su capital.
 
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
