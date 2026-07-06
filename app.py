@@ -6687,6 +6687,64 @@ def seccion_asistente_ia_fondo():
             lineas.append(f"[Error intereses extracto: {e}]")
 
         # ══════════════════════════════════════════════════════════════════════
+        # 2b. CAPITAL DE CHAPARRO FERNÁNDEZ Y BENEFICIO REAL DE LA COMPAÑÍA
+        #     (precalculado para que la IA no tenga que sumar decenas de filas ella misma)
+        # ══════════════════════════════════════════════════════════════════════
+        try:
+            df_cf = df_ext.copy()  # ya filtrado a NUEVA/CANCELADA, con pago_intereses disponible
+            df_cf["inversor_up"] = df_cf["inversor"].str.upper()
+            df_cf["pago_intereses"] = df_cf.get("pago_intereses", "").fillna("").astype(str).str.strip().str.lower()
+
+            # Capital hoy a nombre de Chaparro Fernández — se usa la misma función canónica que
+            # el Centro de Control (capital_activo_en_fecha), que ya excluye correctamente las
+            # posiciones "nueva" que fueron reinvertidas (fecha_final_inversion pasada), evitando
+            # duplicar capital entre una fila nueva ya cerrada y su reinversión sucesora.
+            df_inv_cf = df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == "CHAPARRO FERNANDEZ"].copy()
+            capital_cf_hoy = capital_activo_en_fecha(df_inv_cf, hoy)
+
+            # Intereses devengados y NO pagados acumulados: todos los inversores con pago_intereses="reinvierte",
+            # EXCLUYENDO a JEP (que sí cobra en efectivo) y a Chaparro Fernández (no se debe nada a sí mismo).
+            # Se suman TODOS los meses desde que empezó cada posición hasta hoy (deuda acumulada, nunca se resetea).
+            df_reinv = df_cf[(df_cf["pago_intereses"] == "reinvierte") & (df_cf["inversor_up"] != "CHAPARRO FERNANDEZ")]
+            if not df_reinv.empty:
+                fecha_min_reinv = df_reinv["fecha_inversion"].min()
+                total_devengado_no_pagado = 0.0
+                por_inv_devengado = {}
+                f_iter = pd.Timestamp(fecha_min_reinv.year, fecha_min_reinv.month, 1)
+                while f_iter <= hoy:
+                    for _, r in df_reinv.iterrows():
+                        v = 0.0
+                        fi = r.get("fecha_inversion")
+                        if pd.isna(fi):
+                            continue
+                        dias_m = ultimo_dia_mes(f_iter.year, f_iter.month)
+                        inicio_mes_r = datetime(f_iter.year, f_iter.month, 1)
+                        fin_mes_r = datetime(f_iter.year, f_iter.month, dias_m)
+                        ff = r.get("fecha_final_inversion")
+                        if r["tipo_op_n"] == "CANCELADA" and pd.notna(ff):
+                            fecha_fin_r = min(ff.to_pydatetime(), fin_mes_r)
+                        else:
+                            fecha_fin_r = fin_mes_r
+                        inicio_calc_r = max(fi.to_pydatetime(), inicio_mes_r)
+                        fin_calc_r = min(fecha_fin_r, fin_mes_r)
+                        if inicio_calc_r > fin_calc_r:
+                            continue
+                        dias_r = (fin_calc_r - inicio_calc_r).days + 1
+                        v = round(float(r["capital_invertido"]) * float(r["interes_inversor_anual"]) / 12 * dias_r / dias_m, 2)
+                        total_devengado_no_pagado += v
+                        por_inv_devengado[r["inversor"]] = por_inv_devengado.get(r["inversor"], 0) + v
+                    f_iter += pd.DateOffset(months=1)
+
+                beneficio_real = capital_cf_hoy - total_devengado_no_pagado
+                lineas.append(f"\n=== CAPITAL CHAPARRO FERNÁNDEZ Y BENEFICIO REAL DE LA COMPAÑÍA (precalculado) ===")
+                lineas.append(f"Capital hoy a nombre de CHAPARRO FERNANDEZ: ${capital_cf_hoy:,.2f}")
+                lineas.append(f"Intereses devengados y NO pagados acumulados (todos los inversores excepto JEP, desde que empezó cada uno hasta hoy): ${total_devengado_no_pagado:,.2f}")
+                lineas.append(f"  Desglose: " + ", ".join(f"{k}: ${v:,.2f}" for k, v in sorted(por_inv_devengado.items(), key=lambda x: -x[1])))
+                lineas.append(f">> BENEFICIO REAL DE LA COMPAÑÍA = ${capital_cf_hoy:,.2f} - ${total_devengado_no_pagado:,.2f} = ${beneficio_real:,.2f}")
+        except Exception as e:
+            lineas.append(f"[Error cálculo beneficio real Chaparro Fernández: {e}]")
+
+        # ══════════════════════════════════════════════════════════════════════
         # 3. INGRESOS EMPRESA DEL MES — fuente: obtener_resumen_dashboard (EXACTAMENTE igual que el Dashboard)
         # ══════════════════════════════════════════════════════════════════════
         try:
@@ -7188,6 +7246,16 @@ def seccion_asistente_ia_fondo():
 20. NO HAY COMISIÓN DE GESTIÓN ADICIONAL: el spread (diferencia entre lo que cobra el fondo del activo y lo que paga al inversor) es la ÚNICA fuente de ingreso del fondo. No existe ningún "management fee" u otra comisión extra sobre el capital de los inversores.
 
 21. EL PAGO AL INVERSOR ES UNA GARANTÍA UNIVERSAL, EN CUALQUIER TIPO DE ACTIVO: no es exclusivo de las notas estructuradas — si un activo fijo (Paraguay, MotoClick, Fútbol, Bolivia) no paga su % pactado algún mes por el motivo que sea, el fondo sigue pagando al inversor su tasa fija igualmente, asumiendo la pérdida él mismo. El inversor cobra su fijo pase lo que pase, sea cual sea el activo donde esté su capital.
+
+22. RENTABILIDAD MEDIA — DOS PERSPECTIVAS DISTINTAS, no las confundas:
+   - "Rentabilidad que PAGA el fondo a los inversores" = media ponderada por capital de interes_inversor_anual sobre el capital activo de TODOS los inversores (excluyendo a Chaparro Fernández, que no es un inversor real). Esta es la perspectiva del COSTE del fondo.
+   - "Rentabilidad que OBTIENE Chaparro Fernández como inversor" (o "rentabilidad de las inversiones de Chaparro Fernández") = media ponderada por capital de interes_nota_anual / tasa fija del activo, SOLO sobre las filas donde inversor = CHAPARRO FERNANDEZ (incluyendo sus reinversiones). Esta es la perspectiva del RENDIMIENTO del capital propio de la compañía colocado en los activos, y será bastante más alta que la anterior (activos rinden 15-38%, muy por encima del 10-15% que se paga a inversores externos).
+   Si te preguntan "rentabilidad media de las inversiones de/en Chaparro Fernández" sin más contexto, usa la SEGUNDA interpretación (rendimiento del capital propio como inversor).
+
+23. BENEFICIO REAL DE LA COMPAÑÍA (distinto del "capital a nombre de Chaparro Fernández"): el capital que aparece invertido bajo el nombre "CHAPARRO FERNANDEZ" en INVERSIONES son los beneficios acumulados de la compañía que se han ido reinvirtiendo, PERO no todo ese capital es beneficio realmente disponible — una parte es, en realidad, intereses ya devengados a otros inversores que aún NO se les ha pagado en efectivo (porque su `pago_intereses = "reinvierte"`, es decir, todos los inversores EXCEPTO JEP, que es el único con `pago_intereses = "paga"`). Fórmula:
+   BENEFICIO REAL = (Capital total a nombre de CHAPARRO FERNANDEZ activo hoy — usando fecha_final_inversion para excluir posiciones ya cerradas/reinvertidas, sin duplicar entre una fila original cerrada y su reinversión sucesora)
+                     − (Suma de TODOS los intereses devengados desde el inicio de cada posición hasta hoy, de TODOS los inversores con pago_intereses="reinvierte", EXCLUYENDO a JEP y excluyendo al propio Chaparro Fernández)
+   Este cálculo de "intereses devengados y no pagados" es ACUMULADO desde que cada inversor empezó (no se resetea nunca, es una deuda pendiente continua) — usa la misma lógica de extractos (ignorar fecha_final_inversion en filas NUEVA sin reinversión sucesora, respetarla en CANCELADA).
 
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
