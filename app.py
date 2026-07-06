@@ -569,6 +569,11 @@ Luego recarga el Excel desde el menú Gestión de Excel.
             smtp_password = col2.text_input("Contraseña de aplicación", type="password", placeholder="xxxx xxxx xxxx xxxx", key="smtp_password_input")
             display_name  = st.text_input("Nombre remitente", value="Chaparro Fernández Wealth", key="smtp_display_name")
 
+    ocultar_activo_email = st.checkbox(
+        "🔒 Ocultar en qué está invertido (igual que en el Portal de inversor)",
+        value=True, key="email_ocultar_activo",
+    )
+
     st.divider()
 
     # ── Destinatarios: usar el inversor ya seleccionado arriba ────────────────
@@ -659,11 +664,13 @@ Luego recarga el Excel desde el menú Gestión de Excel.
             except Exception:
                 pass
 
+            extracto_bytes_envio = preparar_extracto_privado_inversor(extracto_bytes) if ocultar_activo_email else extracto_bytes
+
             progreso.progress((i + 0.5) / len(inversores_enviar), text=f"Enviando a {email_dest}...")
             ok, err = enviar_extracto_email(
                 destinatario=email_dest, inversor=inversor,
                 mes=mes_email, anio=anio_email,
-                extracto_bytes=extracto_bytes, nombre_archivo=nombre_archivo,
+                extracto_bytes=extracto_bytes_envio, nombre_archivo=nombre_archivo,
                 total_intereses=total_intereses_email,
                 smtp_sender=smtp_sender, smtp_password=smtp_password, display_name=display_name,
             )
@@ -6431,6 +6438,10 @@ def seccion_extractos():
 
     with tab_descargar:
         st.caption("Genera el extracto en Excel y descárgalo directamente.")
+        ocultar_activo = st.checkbox(
+            "🔒 Ocultar en qué está invertido (igual que en el Portal de inversor) — recomendado si se lo vas a dar al inversor",
+            value=True, key="ext_ocultar_activo",
+        )
 
         col_btn1, col_btn2 = st.columns(2)
         btn_completo = col_btn1.button("📄 Generar extracto completo", type="primary", key="ext_btn_descargar")
@@ -6445,7 +6456,7 @@ def seccion_extractos():
             elif len(archivos) == 1:
                 t = archivos[0]
                 nombre = t[0].replace(".xlsx", f"{sufijo}.xlsx")
-                contenido = t[1]
+                contenido = preparar_extracto_privado_inversor(t[1]) if ocultar_activo else t[1]
                 st.success(f"Extracto generado: {nombre}")
                 key_dl = f"ext_dl_uno{'_notas' if solo_notas else ''}"
                 st.download_button("⬇️ Descargar", contenido, file_name=nombre,
@@ -6456,7 +6467,8 @@ def seccion_extractos():
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                     for t in archivos:
                         nombre_zip = t[0].replace(".xlsx", f"{sufijo}.xlsx")
-                        zf.writestr(nombre_zip, t[1])
+                        contenido_zip = preparar_extracto_privado_inversor(t[1]) if ocultar_activo else t[1]
+                        zf.writestr(nombre_zip, contenido_zip)
                 st.success(f"Se han generado {len(archivos)} extractos.")
                 key_zip = f"ext_dl_zip{'_notas' if solo_notas else ''}"
                 zip_name = f"extractos{'_notas' if solo_notas else ''}_{mes}_{anio}.zip"
