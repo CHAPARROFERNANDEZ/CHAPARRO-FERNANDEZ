@@ -801,7 +801,6 @@ def mostrar_hero(usuario=None):
                 <div class="brand-logo">CF</div>
                 <div>
                     <div class="brand-title">Chaparro Fernández Wealth</div>
-                    <div class="brand-subtitle">Sistema privado de control, inversiones, notas, alertas y extractos</div>
                 </div>
             </div>
             <div class="brand-tag">{tag}</div>
@@ -1294,12 +1293,38 @@ def calcular_intereses_acumulados_inversor(df_inv: pd.DataFrame, inversor: str, 
     }
 
 
+def preparar_extracto_privado_inversor(contenido_bytes: bytes) -> bytes:
+    """
+    Quita del extracto, antes de dárselo a un inversor por su portal, cualquier columna que
+    revele EN QUÉ está invertido (columna 'Activo' y 'Estado intereses' de la hoja DETALLE).
+    El inversor solo debe ver: mes, fecha de inversión, capital e interés del mes.
+    PORTADA y RESUMEN MENSUAL ya son solo totales, no revelan activos, así que se dejan igual.
+    """
+    try:
+        wb = load_workbook(BytesIO(contenido_bytes))
+        if "DETALLE" in wb.sheetnames:
+            ws = wb["DETALLE"]
+            # Localizar en la fila de cabeceras (fila 4, la que dice "Activo | Mes | Fecha inversión | ...")
+            fila_cabecera = 4
+            columnas_a_borrar = []
+            for col_idx in range(ws.max_column, 0, -1):
+                valor = ws.cell(row=fila_cabecera, column=col_idx).value
+                if valor and str(valor).strip().lower() in ("activo", "estado intereses"):
+                    columnas_a_borrar.append(col_idx)
+            for col_idx in sorted(columnas_a_borrar, reverse=True):
+                ws.delete_cols(col_idx, 1)
+        salida = BytesIO()
+        wb.save(salida)
+        return salida.getvalue()
+    except Exception:
+        return contenido_bytes  # si algo falla, mejor devolver el original que romper la descarga
+
+
 def seccion_portal_inversor(nombre_inversor: str):
     """Portal de acceso limitado para un inversor: solo ve su propia posición, nunca la de otros."""
     df_inv, df_cal, df_control = cargar_excel_completo()
     hoy = pd.Timestamp.today().normalize()
 
-    mostrar_hero(f"{nombre_inversor} (Portal de inversor)")
     st.header(f"👋 Bienvenido/a, {nombre_inversor}")
     st.caption("Este es tu portal personal — solo tú puedes ver esta información. Ningún otro inversor tiene acceso a tu posición.")
 
@@ -1331,7 +1356,9 @@ def seccion_portal_inversor(nombre_inversor: str):
             st.warning("No se encontró extracto para ese mes — puede que no tuvieras capital activo entonces.")
         else:
             nombre_archivo, contenido, _ = archivos[0]
-            st.session_state["portal_extracto_actual"] = (nombre_archivo, contenido)
+            contenido_privado = preparar_extracto_privado_inversor(contenido)
+            st.session_state["portal_extracto_actual"] = (nombre_archivo, contenido_privado)
+            st.success("Extracto listo.")
 
     extracto_actual = st.session_state.get("portal_extracto_actual")
     if extracto_actual:
@@ -1339,12 +1366,6 @@ def seccion_portal_inversor(nombre_inversor: str):
         st.download_button("⬇️ Descargar mi extracto (Excel)", contenido, file_name=nombre_archivo,
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary")
-        try:
-            detalle = pd.read_excel(BytesIO(contenido), sheet_name="DETALLE", header=None)
-            st.markdown("#### Vista previa del detalle")
-            st.dataframe(detalle, use_container_width=True, hide_index=True)
-        except Exception:
-            st.info("Descarga el archivo para ver el detalle completo.")
 
 
 
@@ -6700,7 +6721,8 @@ def seccion_gestion_excel():
 # =========================
 # APP FINAL
 # =========================
-mostrar_hero(st.session_state.usuario)
+tag_sesion = st.session_state.usuario + (" (Portal de inversor)" if st.session_state.get("tipo_usuario") == "inversor" else "")
+mostrar_hero(tag_sesion)
 
 try:
     df_inv, df_cal, df_control = cargar_excel_completo()
