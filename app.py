@@ -4500,22 +4500,49 @@ def obtener_resumen_noticias_ia(ticker: str, nombre_compania: str) -> str:
                 "max_tokens": 800,
                 "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
                 "system": (
-                    "Buscas y resumes noticias RECIENTES (últimas 2-4 semanas) que puedan afectar al precio de una acción, "
+                    "Buscas y resumes noticias RECIENTES (últimos 1-2 meses) que puedan afectar al precio de una acción, "
                     "para un inversor en notas estructuradas ligadas a esa acción. Sé conciso (máximo 6-8 líneas): "
                     "resultados financieros recientes, cambios de rating de analistas, noticias regulatorias o legales, "
                     "eventos corporativos relevantes (fusiones, lanzamientos de producto, cambios de dirección). "
                     "NUNCA inventes un precio objetivo ni una predicción — solo resume hechos y opiniones ya publicadas, citando la fuente. "
-                    "Si no encuentras noticias relevantes recientes, dilo claramente en vez de inventar contenido."
+                    "Si de verdad no encuentras NADA relevante tras buscar, dilo claramente en vez de inventar contenido."
                 ),
-                "messages": [{"role": "user", "content": f"Noticias recientes relevantes sobre {nombre_compania} ({ticker}) que puedan afectar su cotización."}],
+                "messages": [{"role": "user", "content": f"Busca noticias recientes relevantes sobre {nombre_compania} ({ticker}) que puedan afectar su cotización."}],
             },
             timeout=60,
         )
         data = resp.json()
-        texto = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-        return texto.strip() or "No se encontraron noticias recientes relevantes."
+
+        # 1) Error a nivel de petición (API key sin permisos, rate limit, etc.)
+        if data.get("type") == "error" or data.get("error"):
+            msg = data.get("error", {}).get("message", str(data))
+            return (f"⚠️ No se pudo buscar noticias: error de la API ({msg}). "
+                    f"Si el error menciona permisos o la herramienta 'web_search', puede que la búsqueda web "
+                    f"no esté activada para esta cuenta en la Consola de Anthropic (Settings → hay que habilitarla).")
+
+        contenido = data.get("content", [])
+
+        # 2) Error a nivel de herramienta (la petición general fue 200 OK, pero la búsqueda en sí falló)
+        for bloque in contenido:
+            if bloque.get("type") == "web_search_tool_result":
+                resultado_bloque = bloque.get("content", {})
+                if isinstance(resultado_bloque, dict) and resultado_bloque.get("type") == "web_search_tool_result_error":
+                    codigo_error = resultado_bloque.get("error_code", "desconocido")
+                    return (f"⚠️ La búsqueda web falló (código: {codigo_error}). Si es 'unavailable' o similar, "
+                            f"probablemente la búsqueda web no está activada para esta cuenta en la Consola de Anthropic.")
+
+        # 3) ¿Llegó a intentar buscar? Si no hay ni un solo intento de búsqueda, algo no está bien configurado.
+        hubo_intento_busqueda = any(b.get("type") == "server_tool_use" and b.get("name") == "web_search" for b in contenido)
+
+        texto = "".join(b.get("text", "") for b in contenido if b.get("type") == "text")
+        if not texto.strip():
+            if not hubo_intento_busqueda:
+                return ("⚠️ La IA no llegó a intentar ninguna búsqueda web. Puede que la herramienta de búsqueda "
+                        "web no esté activada para esta cuenta — revísalo en la Consola de Anthropic (Settings → Web search).")
+            return "No se encontraron noticias recientes relevantes tras buscar."
+        return texto.strip()
     except Exception as e:
-        return f"[No se pudieron obtener noticias: {e}]"
+        return f"⚠️ No se pudieron obtener noticias (error de conexión): {e}"
 
 
 def _generar_horario_eventos(meses_vencimiento: int, periodicidad: int) -> list:
@@ -4806,8 +4833,11 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
                         f"Pérdida media si ocurre: {sim['perdida_pct_promedio_si_incumple']:.1f}%", "riesgo" if sim["probabilidad_perdida_capital"] > 0.15 else "normal")
 
         if len(eventos_cupon) > 1:
-            df_prob_cupon = pd.DataFrame([{"Días": e["dias"], "Prob. cupón (%)": round(e["probabilidad"]*100, 1)} for e in eventos_cupon])
-            st.line_chart(df_prob_cupon.set_index("Días"))
+            df_prob_cupon = pd.DataFrame([{"Días": e["dias"], "Prob. cupón (%)": round(e["probabilidad"] * 100, 1)} for e in eventos_cupon])
+            df_prob_cupon = df_prob_cupon.sort_values("Días").reset_index(drop=True)
+            st.line_chart(df_prob_cupon, x="Días", y="Prob. cupón (%)", height=300)
+            with st.expander("Ver datos exactos de la gráfica"):
+                st.dataframe(df_prob_cupon, use_container_width=True, hide_index=True)
         st.caption("⚠️ Estimación con volatilidad histórica, sin correlación entre tickers ni deriva de precio — no es una predicción, es una probabilidad bajo supuestos.")
     else:
         st.error(
