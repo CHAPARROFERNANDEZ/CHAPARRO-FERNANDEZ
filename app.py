@@ -4058,10 +4058,8 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
             st.error(f"No se pudieron extraer los datos: {resultado['error']}")
         else:
             almacen[numero_nota] = resultado
-            with st.spinner("Guardando borrador automático..."):
-                guardar_borrador_nota("nueva", numero_nota, resultado)
-            st.success(f"Datos extraídos para la Nota {numero_nota} y guardados como borrador — no se perderán aunque se reinicie la app.")
-            st.rerun()
+            st.success(f"Datos extraídos para la Nota {numero_nota}. Revisa la previsualización abajo.")
+            guardar_borrador_nota("nueva", numero_nota, resultado)
 
     extraido = almacen.get(numero_nota)
     if not extraido:
@@ -6585,17 +6583,20 @@ def guardar_excel_completo_desde_hojas(hojas: dict):
             )
 
 
-def guardar_borrador_nota(tipo_wizard: str, numero_nota: int, datos: dict):
+def guardar_borrador_nota(tipo_wizard: str, numero_nota: int, datos: dict) -> bool:
     """
     Guarda automáticamente (sin que el usuario tenga que pulsar nada) el resultado de una
     extracción de IA en la hoja BORRADORES_NOTAS, para que sobreviva a reinicios de la app
     (actualizaciones de código, redeploys, etc.) — independiente de CONTROL_NOTAS/CALENDARIO_NOTAS.
+    Devuelve True si quedó realmente a salvo en Google Drive (persistente de verdad),
+    False si solo se guardó en el disco local (se perderá en el próximo redeploy).
     """
     import json as _json
     try:
         hojas = leer_todas_las_hojas_excel()
         if not hojas:
-            return
+            st.error("⚠️ No se pudo leer el Excel para guardar el borrador — el resultado de esta extracción NO está a salvo todavía.")
+            return False
         fila_nueva = pd.DataFrame([{
             "TIPO": tipo_wizard,
             "NOTA": int(numero_nota),
@@ -6612,10 +6613,21 @@ def guardar_borrador_nota(tipo_wizard: str, numero_nota: int, datos: dict):
         with open(ARCHIVO, "wb") as f:
             f.write(contenido)
         st.cache_data.clear()
-        if "gcp_service_account" in st.secrets:
-            subir_excel_a_drive(hojas)  # silencioso: si falla, el borrador sigue disponible localmente en esta sesión
-    except Exception:
-        pass  # el borrador es una comodidad, nunca debe romper el flujo principal del wizard
+
+        if "gcp_service_account" not in st.secrets:
+            st.warning("⚠️ Borrador guardado solo localmente (no hay credenciales de Google configuradas) — se perderá si el servidor se reinicia o actualizas el código. Sube el Excel a Drive manualmente si quieres conservarlo.")
+            return False
+
+        exito, mensaje = subir_excel_a_drive(hojas)
+        if exito:
+            st.success(f"📝 Borrador guardado y a salvo en Google Drive — sobrevivirá aunque cambies el código.")
+            return True
+        else:
+            st.error(f"⚠️ El borrador se guardó solo localmente — la subida a Google Drive falló: {mensaje}. Si actualizas el código o el servidor se reinicia antes de solucionarlo, se PERDERÁ esta extracción.")
+            return False
+    except Exception as e:
+        st.error(f"⚠️ No se pudo guardar el borrador (error: {e}). Esta extracción no está a salvo todavía.")
+        return False
 
 
 def cargar_borrador_nota(tipo_wizard: str, numero_nota: int) -> dict | None:
@@ -6647,9 +6659,11 @@ def borrar_borrador_nota(tipo_wizard: str, numero_nota: int):
             f.write(contenido)
         st.cache_data.clear()
         if "gcp_service_account" in st.secrets:
-            subir_excel_a_drive(hojas)
-    except Exception:
-        pass
+            exito, mensaje = subir_excel_a_drive(hojas)
+            if not exito:
+                st.warning(f"⚠️ El borrador se borró localmente pero no se pudo sincronizar con Drive: {mensaje}")
+    except Exception as e:
+        st.warning(f"⚠️ No se pudo borrar el borrador correctamente: {e}")
 
 
 def aplicar_formula_simple(df: pd.DataFrame, operacion: str, columna_a: str, columna_b: str | None, nueva_columna: str) -> pd.DataFrame:
