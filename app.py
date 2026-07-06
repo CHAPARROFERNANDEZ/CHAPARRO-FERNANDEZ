@@ -1303,24 +1303,39 @@ def calcular_intereses_acumulados_inversor(df_inv: pd.DataFrame, inversor: str, 
 
 def preparar_extracto_privado_inversor(contenido_bytes: bytes) -> bytes:
     """
-    Quita del extracto, antes de dárselo a un inversor por su portal, cualquier columna que
-    revele EN QUÉ está invertido (columna 'Activo' y 'Estado intereses' de la hoja DETALLE).
-    El inversor solo debe ver: mes, fecha de inversión, capital e interés del mes.
+    Quita del extracto, antes de dárselo a un inversor, cualquier dato que revele EN QUÉ
+    está invertido (columnas 'Activo' y 'Estado intereses' de la hoja DETALLE), dejando
+    solo mes, fecha de inversión, capital e interés del mes.
+
+    IMPORTANTE: las filas de "CIERRE MENSUAL/ANUAL/FINAL" son celdas COMBINADAS que empiezan
+    justo en la columna 'Activo' — si se borrara esa columna entera, se destruiría también
+    la combinación y desaparecerían los totales de cierre. Por eso aquí NO se borran columnas:
+    se vacía únicamente el contenido de las filas de DETALLE individuales (una por posición),
+    dejando intactas las filas de cierre con sus totales de capital e interés.
     PORTADA y RESUMEN MENSUAL ya son solo totales, no revelan activos, así que se dejan igual.
     """
     try:
         wb = load_workbook(BytesIO(contenido_bytes))
         if "DETALLE" in wb.sheetnames:
             ws = wb["DETALLE"]
-            # Localizar en la fila de cabeceras (fila 4, la que dice "Activo | Mes | Fecha inversión | ...")
             fila_cabecera = 4
-            columnas_a_borrar = []
-            for col_idx in range(ws.max_column, 0, -1):
+            col_activo = col_estado = None
+            for col_idx in range(1, ws.max_column + 1):
                 valor = ws.cell(row=fila_cabecera, column=col_idx).value
-                if valor and str(valor).strip().lower() in ("activo", "estado intereses"):
-                    columnas_a_borrar.append(col_idx)
-            for col_idx in sorted(columnas_a_borrar, reverse=True):
-                ws.delete_cols(col_idx, 1)
+                if valor and str(valor).strip().lower() == "activo":
+                    col_activo = col_idx
+                elif valor and str(valor).strip().lower() == "estado intereses":
+                    col_estado = col_idx
+
+            for fila_idx in range(fila_cabecera + 1, ws.max_row + 1):
+                valor_col1 = ws.cell(row=fila_idx, column=1).value
+                es_fila_cierre = valor_col1 and str(valor_col1).strip().upper().startswith("CIERRE")
+                if es_fila_cierre:
+                    continue  # no tocar las filas de resumen (mensual/anual/final)
+                if col_activo:
+                    ws.cell(row=fila_idx, column=col_activo).value = None
+                if col_estado:
+                    ws.cell(row=fila_idx, column=col_estado).value = None
         salida = BytesIO()
         wb.save(salida)
         return salida.getvalue()
