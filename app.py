@@ -7710,17 +7710,24 @@ def seccion_asistente_ia_fondo():
                         ticker = str(r.get("ticker","")).strip().upper()
                         precio_actual = precios_live.get(ticker, pd.to_numeric(r.get("precio_actual"), errors="coerce"))
                         precio_compra = pd.to_numeric(r.get("precio_compra"), errors="coerce")
-                        barrera_cap = pd.to_numeric(r.get("barrera_capital"), errors="coerce")
-                        barrera_cup = pd.to_numeric(r.get("barrera_cupon"), errors="coerce")
-                        barrera = barrera_cap if not pd.isna(barrera_cap) else barrera_cup
+                        barrera_cap_pct = pd.to_numeric(r.get("barrera_capital"), errors="coerce")
+                        barrera_cup_pct = pd.to_numeric(r.get("barrera_cupon"), errors="coerce")
+                        barrera_pct = barrera_cap_pct if not pd.isna(barrera_cap_pct) else barrera_cup_pct
+                        if pd.notna(barrera_pct) and barrera_pct > 1:
+                            barrera_pct = barrera_pct / 100  # normaliza si viene como 60 en vez de 0.6
+                        # La barrera en CONTROL_NOTAS es un % (ej. 0.6 = 60%) del precio de compra, no un precio en dólares.
+                        barrera_dolares = (precio_compra * barrera_pct) if (not pd.isna(barrera_pct) and not pd.isna(precio_compra)) else None
                         if ticker:
                             p_s = f"${precio_actual:,.2f}" if not pd.isna(precio_actual) else "N/D"
-                            b_s = f"${barrera:,.2f}" if not pd.isna(barrera) else "N/D"
+                            b_s = f"${barrera_dolares:,.2f} ({barrera_pct*100:.0f}% del precio inicial)" if barrera_dolares is not None else "N/D"
                             # Calcular variación
                             if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0:
                                 var = (precio_actual - precio_compra) / precio_compra * 100
                                 var_s = f" ({var:+.1f}%)"
-                                alerta = " 🔴" if var <= -35 else (" 🟡" if var <= -25 else "")
+                                alerta = " 🔴 ROJO" if var <= -35 else (" 🟡 AMARILLO" if var <= -25 else " ✅ OK")
+                                if barrera_dolares is not None:
+                                    margen_a_barrera = (precio_actual - barrera_dolares) / barrera_dolares * 100
+                                    alerta += f" | margen a la barrera real: {margen_a_barrera:+.1f}%"
                             else:
                                 var_s = ""
                                 alerta = ""
@@ -8024,6 +8031,7 @@ def seccion_asistente_ia_fondo():
                     resp = _req_ia.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
                         json={"model":"claude-sonnet-4-5","max_tokens":2000,
+                              "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
                               "system": """Eres el analista financiero senior de Chaparro Fernández Wealth Management, un fondo de inversión privado. Tu trabajo es razonar sobre el negocio como lo haría un socio del fondo, no solo repetir datos sueltos.
 
 == CÓMO FUNCIONA EL NEGOCIO (esto es la base de todo razonamiento) ==
@@ -8086,6 +8094,17 @@ def seccion_asistente_ia_fondo():
    BENEFICIO REAL = (Capital total a nombre de CHAPARRO FERNANDEZ activo hoy — usando fecha_final_inversion para excluir posiciones ya cerradas/reinvertidas, sin duplicar entre una fila original cerrada y su reinversión sucesora)
                      − (Suma de TODOS los intereses devengados desde el inicio de cada posición hasta hoy, de TODOS los inversores con pago_intereses="reinvierte", EXCLUYENDO a JEP y excluyendo al propio Chaparro Fernández)
    Este cálculo de "intereses devengados y no pagados" es ACUMULADO desde que cada inversor empezó (no se resetea nunca, es una deuda pendiente continua) — usa la misma lógica de extractos (ignorar fecha_final_inversion en filas NUEVA sin reinversión sucesora, respetarla en CANCELADA).
+
+24. QUÉ ES UNA "NOTA EN RIESGO" — combina DOS criterios distintos, no los confundas:
+   a) ALERTA POR VARIACIÓN (umbral fijo, igual para todas las notas): mirando la sección ESTADO DE RIESGO DE NOTAS, cada ticker tiene una variación % respecto a su precio de compra. 🟡 AMARILLO si esa variación es ≤ -25% (ej. compra $100 → ahora ≤ $75). 🔴 ROJO si es ≤ -35% (ej. compra $100 → ahora ≤ $65). Esto es una alerta temprana genérica, igual para todas las notas independientemente de su barrera concreta.
+   b) ESTADO REAL DE BARRERA (específico de cada nota): cada nota tiene su propia barrera de cupón (normalmente 40-60% del precio inicial, verás el % exacto y el precio en dólares en ESTADO DE RIESGO DE NOTAS). Una nota está en riesgo REAL de dejar de pagar cupón cuando el precio actual está cerca de o por debajo de esa barrera concreta — mira el "margen a la barrera real" (%) que ya viene calculado: si es negativo, la nota YA está incumpliendo esa barrera; si es positivo pero pequeño (ej. <15%), está cerca de incumplirla.
+   Una nota puede estar en 🔴 ROJO por variación (ha caído mucho desde la compra) pero SEGUIR MUY LEJOS de su barrera real si esta era baja (ej. 40%) — y viceversa, puede estar en verde por variación pero cerca de una barrera alta (ej. 60%). SIEMPRE menciona ambos criterios cuando hables de riesgo, no solo uno.
+
+25. CUANDO TE PREGUNTEN POR NOTAS EN RIESGO (o por una nota en riesgo concreta), tu respuesta SIEMPRE debe incluir, para cada nota en riesgo:
+   - Los dos criterios de la regla 24 (variación % y margen real a la barrera).
+   - La PRÓXIMA FECHA DE OBSERVACIÓN de esa nota (bloque PRÓXIMAS OBSERVACIONES del contexto).
+   - La PRÓXIMA FECHA DE COBRO/CALL (bloque CALENDARIO NOTAS / PRÓXIMOS CALLS del contexto).
+   - Un breve informe de la situación actual de la(s) compañía(s) subyacente(s) — tienes herramienta de búsqueda web disponible, úsala para dar un resumen breve y factual (resultados recientes, noticias relevantes, cambios de rating) de por qué esa acción puede estar cayendo. No inventes explicaciones sin buscarlas.
 
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
