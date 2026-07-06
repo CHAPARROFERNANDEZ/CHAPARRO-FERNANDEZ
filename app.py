@@ -1348,6 +1348,7 @@ def seccion_portal_inversor(nombre_inversor: str):
 
 
 
+def total_pagado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: float) -> float:
     df_activo = filtrar_activo(df_base, activo)
     if df_activo.empty:
         return 0.0
