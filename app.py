@@ -11,6 +11,7 @@ from email.mime.text import MIMEText
 from io import BytesIO
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -1357,6 +1358,145 @@ def columna_barrera_control(df_control: pd.DataFrame, preferida="contingency"):
         if col in df_control.columns:
             return col
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ANÁLISIS DE COMPAÑÍA + SIMULACIÓN MONTE CARLO PARA NOTAS ESTRUCTURADAS
+# ══════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def obtener_datos_fundamentales(ticker: str) -> dict:
+    """
+    Precio actual, objetivo de precio de consenso de analistas, volatilidad histórica
+    anualizada, próxima fecha de resultados y datos generales de la compañía.
+    Todo dato real de mercado (yfinance) — nada inventado ni "previsto" por IA.
+    """
+    resultado = {
+        "ticker": ticker, "precio_actual": None, "sector": None, "nombre": None,
+        "market_cap": None, "target_medio": None, "target_alto": None, "target_bajo": None,
+        "n_analistas": None, "recomendacion": None, "volatilidad_anual_pct": None,
+        "proxima_fecha_resultados": None, "variacion_1m_pct": None, "variacion_ytd_pct": None,
+        "error": None,
+    }
+    if yf is None:
+        resultado["error"] = "yfinance no disponible"
+        return resultado
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        resultado["nombre"] = info.get("longName") or info.get("shortName")
+        resultado["sector"] = info.get("sector")
+        resultado["market_cap"] = info.get("marketCap")
+        resultado["target_medio"] = info.get("targetMeanPrice")
+        resultado["target_alto"] = info.get("targetHighPrice")
+        resultado["target_bajo"] = info.get("targetLowPrice")
+        resultado["n_analistas"] = info.get("numberOfAnalystOpinions")
+        resultado["recomendacion"] = info.get("recommendationKey")
+
+        hist = t.history(period="1y")
+        if hist is not None and not hist.empty:
+            cierres = hist["Close"].dropna()
+            resultado["precio_actual"] = float(cierres.iloc[-1])
+            retornos = np.log(cierres / cierres.shift(1)).dropna()
+            resultado["volatilidad_anual_pct"] = float(retornos.std() * np.sqrt(252) * 100)
+            if len(cierres) > 21:
+                resultado["variacion_1m_pct"] = float((cierres.iloc[-1] / cierres.iloc[-22] - 1) * 100)
+            primer_dia_anio = cierres[cierres.index.year == cierres.index[-1].year]
+            if len(primer_dia_anio) > 1:
+                resultado["variacion_ytd_pct"] = float((cierres.iloc[-1] / primer_dia_anio.iloc[0] - 1) * 100)
+
+        try:
+            cal = t.calendar
+            if isinstance(cal, dict) and cal.get("Earnings Date"):
+                fechas = cal["Earnings Date"]
+                resultado["proxima_fecha_resultados"] = str(fechas[0]) if isinstance(fechas, list) else str(fechas)
+            elif hasattr(cal, "empty") and not cal.empty and "Earnings Date" in cal.index:
+                resultado["proxima_fecha_resultados"] = str(cal.loc["Earnings Date"].iloc[0])
+        except Exception:
+            pass
+    except Exception as e:
+        resultado["error"] = str(e)
+    return resultado
+
+
+def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_simulaciones: int = 5000) -> dict:
+    """
+    Simulación Monte Carlo (movimiento browniano geométrico, sin drift — supuesto neutral)
+    para una nota worst-of con uno o varios tickers subyacentes.
+
+    tickers_datos: lista de dicts {precio_actual, precio_inicial, volatilidad_anual_pct, barrera_cupon_pct, call_level_pct, barrera_capital_pct}
+    dias_hasta_eventos: lista de dicts {dias, tipo} ordenada cronológicamente, tipo="cupon" o "call" o "vencimiento"
+
+    LIMITACIÓN HONESTA: asume independencia entre los distintos tickers (no modela correlación
+    real entre acciones) y usa volatilidad histórica (no implícita de opciones, más precisa pero
+    no disponible gratis). Es una estimación con supuestos simplificados, no una certeza.
+    """
+    np.random.seed(42)
+    n_tickers = len(tickers_datos)
+    max_dias = max(e["dias"] for e in dias_hasta_eventos) if dias_hasta_eventos else 1
+
+    # Simular trayectorias diarias para cada ticker (GBM, drift=0 -> supuesto neutral al riesgo)
+    precios_simulados = {}
+    for td in tickers_datos:
+        s0 = td["precio_actual"]
+        sigma = td["volatilidad_anual_pct"] / 100
+        dt = 1 / 252
+        pasos = max(max_dias, 1)
+        incrementos = np.random.normal((-0.5 * sigma**2) * dt, sigma * np.sqrt(dt), size=(n_simulaciones, pasos))
+        log_precios = np.log(s0) + np.cumsum(incrementos, axis=1)
+        precios_simulados[td["ticker"]] = np.exp(log_precios)  # shape (n_sim, pasos)
+
+    resultados_eventos = []
+    ya_llamada = np.zeros(n_simulaciones, dtype=bool)
+    for evento in sorted(dias_hasta_eventos, key=lambda e: e["dias"]):
+        idx_dia = min(evento["dias"], max_dias) - 1
+        cumple_todas_cupon = np.ones(n_simulaciones, dtype=bool)
+        cumple_todas_call = np.ones(n_simulaciones, dtype=bool)
+        cumple_todas_capital = np.ones(n_simulaciones, dtype=bool)
+        for td in tickers_datos:
+            precio_dia = precios_simulados[td["ticker"]][:, idx_dia]
+            precio_inicial = td["precio_inicial"]
+            cumple_todas_cupon &= (precio_dia >= precio_inicial * td["barrera_cupon_pct"])
+            cumple_todas_call &= (precio_dia >= precio_inicial * td["call_level_pct"])
+            cumple_todas_capital &= (precio_dia >= precio_inicial * td["barrera_capital_pct"])
+
+        if evento["tipo"] == "cupon":
+            prob = float(np.mean(cumple_todas_cupon & ~ya_llamada))
+            resultados_eventos.append({"tipo": "cupon", "dias": evento["dias"], "probabilidad": prob})
+        elif evento["tipo"] == "call":
+            call_ahora = cumple_todas_call & ~ya_llamada
+            prob = float(np.mean(call_ahora))
+            resultados_eventos.append({"tipo": "call", "dias": evento["dias"], "probabilidad": prob})
+            ya_llamada = ya_llamada | call_ahora
+        elif evento["tipo"] == "vencimiento":
+            no_llamadas = ~ya_llamada
+            incumple = ~cumple_todas_capital & no_llamadas
+            prob_perdida = float(np.mean(incumple))
+            # Pérdida media (%) en los escenarios que sí incumplen, usando el peor ticker (worst-of)
+            perdida_pct_promedio = 0.0
+            if incumple.sum() > 0:
+                peor_performance = np.ones(n_simulaciones)
+                for td in tickers_datos:
+                    precio_final = precios_simulados[td["ticker"]][:, idx_dia]
+                    performance = precio_final / td["precio_inicial"]
+                    peor_performance = np.minimum(peor_performance, performance)
+                perdida_pct_promedio = float(np.mean(1 - peor_performance[incumple]) * 100)
+            resultados_eventos.append({"tipo": "vencimiento_perdida_capital", "dias": evento["dias"], "probabilidad": prob_perdida, "perdida_pct_promedio": perdida_pct_promedio})
+
+    prob_call_total = sum(e["probabilidad"] for e in resultados_eventos if e["tipo"] == "call")
+    evento_venc = next((e for e in resultados_eventos if e["tipo"] == "vencimiento_perdida_capital"), None)
+    prob_perdida_capital = evento_venc["probabilidad"] if evento_venc else 0.0
+    perdida_pct_promedio = evento_venc.get("perdida_pct_promedio", 0.0) if evento_venc else 0.0
+
+    return {
+        "eventos": resultados_eventos,
+        "probabilidad_call_total": prob_call_total,
+        "probabilidad_perdida_capital": prob_perdida_capital,
+        "perdida_pct_promedio_si_incumple": perdida_pct_promedio,
+        "n_simulaciones": n_simulaciones,
+    }
+
+
 
 
 def evaluar_nota_en_fecha(df_control: pd.DataFrame, nota: int, fecha_obs, preferida="contingency") -> tuple[str, pd.DataFrame]:
@@ -4057,6 +4197,407 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
         st.success(f"Auditoría de la Nota {numero_nota} guardada en la hoja AUDITORIA_NOTAS.")
 
 
+def _tab_ficha_compania(df_control: pd.DataFrame):
+    st.caption(
+        "Análisis fundamental de una compañía subyacente: precio objetivo de consenso de analistas, "
+        "volatilidad histórica, próxima fecha de resultados y noticias recientes. "
+        "**Todo dato de mercado es real (Yahoo Finance)** — la única parte generada por IA es el resumen "
+        "de noticias, que es una síntesis de fuentes públicas, no una predicción de precio."
+    )
+
+    tickers_disponibles = sorted(df_control["ticker"].dropna().unique()) if df_control is not None and not df_control.empty and "ticker" in df_control.columns else []
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        ticker_elegido = st.selectbox("Ticker a analizar (de tus notas actuales)", tickers_disponibles) if tickers_disponibles else None
+    with col2:
+        ticker_manual = st.text_input("...o escribe cualquier otro ticker")
+    ticker = (ticker_manual.strip().upper() if ticker_manual.strip() else ticker_elegido)
+
+    if not ticker:
+        st.info("Elige o escribe un ticker para analizar.")
+        return
+
+    if st.button(f"🔎 Analizar {ticker}", type="primary"):
+        with st.spinner(f"Consultando datos de mercado de {ticker}..."):
+            datos = obtener_datos_fundamentales(ticker)
+        st.session_state[f"ficha_{ticker}"] = datos
+
+    datos = st.session_state.get(f"ficha_{ticker}")
+    if not datos:
+        return
+
+    if datos.get("error"):
+        st.error(f"No se pudieron obtener datos de {ticker}: {datos['error']}")
+        return
+
+    st.markdown("---")
+    st.markdown(f"### {datos.get('nombre') or ticker} ({ticker})")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        tarjeta_kpi("Precio actual", f"${datos['precio_actual']:,.2f}" if datos.get("precio_actual") else "N/D", datos.get("sector") or "", "normal")
+    with c2:
+        if datos.get("target_medio"):
+            var_target = (datos["target_medio"] / datos["precio_actual"] - 1) * 100 if datos.get("precio_actual") else None
+            sub = f"{var_target:+.1f}% vs precio actual" if var_target is not None else ""
+            tarjeta_kpi("Precio objetivo (consenso)", f"${datos['target_medio']:,.2f}", sub, "positivo" if (var_target or 0) >= 0 else "negativo")
+        else:
+            tarjeta_kpi("Precio objetivo (consenso)", "N/D", "Sin cobertura de analistas", "normal")
+    with c3:
+        tarjeta_kpi("Volatilidad anual histórica", f"{datos['volatilidad_anual_pct']:.1f}%" if datos.get("volatilidad_anual_pct") else "N/D", "Últimos 12 meses", "riesgo" if (datos.get("volatilidad_anual_pct") or 0) > 40 else "normal")
+    with c4:
+        tarjeta_kpi("Variación 1 mes", f"{datos['variacion_1m_pct']:+.1f}%" if datos.get("variacion_1m_pct") is not None else "N/D", f"YTD: {datos['variacion_ytd_pct']:+.1f}%" if datos.get("variacion_ytd_pct") is not None else "", "positivo" if (datos.get("variacion_1m_pct") or 0) >= 0 else "negativo")
+
+    if datos.get("target_alto") or datos.get("target_bajo"):
+        st.caption(f"Rango de analistas: ${datos.get('target_bajo', 0):,.2f} — ${datos.get('target_alto', 0):,.2f}  |  {datos.get('n_analistas', '?')} analistas  |  Recomendación consenso: {datos.get('recomendacion', 'N/D')}")
+    if datos.get("proxima_fecha_resultados"):
+        st.warning(f"📅 Próxima fecha de resultados (earnings): {datos['proxima_fecha_resultados']} — la volatilidad suele dispararse alrededor de esta fecha.")
+
+    # Notas actuales que incluyen este ticker, y su posición respecto a las barreras
+    if df_control is not None and not df_control.empty and "ticker" in df_control.columns:
+        notas_con_ticker = df_control[df_control["ticker"] == ticker]
+        if not notas_con_ticker.empty and datos.get("precio_actual"):
+            st.markdown("#### Tus notas con este ticker")
+            filas = []
+            for _, r in notas_con_ticker.iterrows():
+                precio_compra = r.get("precio_compra")
+                if pd.isna(precio_compra) or not precio_compra:
+                    continue
+                pct_vs_inicial = (datos["precio_actual"] / precio_compra - 1) * 100
+                barrera_cupon = r.get("barrera_cupon")
+                margen_barrera = (datos["precio_actual"] / (precio_compra * barrera_cupon) - 1) * 100 if pd.notna(barrera_cupon) else None
+                filas.append({
+                    "Nota": int(r.get("nota")) if pd.notna(r.get("nota")) else "?",
+                    "Precio compra": f"${precio_compra:,.2f}",
+                    "Precio actual": f"${datos['precio_actual']:,.2f}",
+                    "vs Inicial": f"{pct_vs_inicial:+.1f}%",
+                    "Margen a barrera cupón": f"{margen_barrera:+.1f}%" if margen_barrera is not None else "N/D",
+                })
+            if filas:
+                st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+
+    # Noticias recientes vía Claude con búsqueda web
+    st.markdown("#### 📰 Noticias y contexto reciente")
+    with st.spinner("Buscando noticias recientes..."):
+        noticias = obtener_resumen_noticias_ia(ticker, datos.get("nombre") or ticker)
+    st.markdown(noticias)
+    st.caption("⚠️ Este resumen es una síntesis de noticias públicas hecha por IA, no una recomendación de inversión ni una predicción de precio.")
+
+
+def obtener_resumen_noticias_ia(ticker: str, nombre_compania: str) -> str:
+    """Usa la API de Claude con la herramienta de búsqueda web para resumir noticias
+    recientes relevantes de una compañía. Devuelve texto, nunca cifras de precio inventadas."""
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 800,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                "system": (
+                    "Buscas y resumes noticias RECIENTES (últimas 2-4 semanas) que puedan afectar al precio de una acción, "
+                    "para un inversor en notas estructuradas ligadas a esa acción. Sé conciso (máximo 6-8 líneas): "
+                    "resultados financieros recientes, cambios de rating de analistas, noticias regulatorias o legales, "
+                    "eventos corporativos relevantes (fusiones, lanzamientos de producto, cambios de dirección). "
+                    "NUNCA inventes un precio objetivo ni una predicción — solo resume hechos y opiniones ya publicadas, citando la fuente. "
+                    "Si no encuentras noticias relevantes recientes, dilo claramente en vez de inventar contenido."
+                ),
+                "messages": [{"role": "user", "content": f"Noticias recientes relevantes sobre {nombre_compania} ({ticker}) que puedan afectar su cotización."}],
+            },
+            timeout=60,
+        )
+        data = resp.json()
+        texto = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        return texto.strip() or "No se encontraron noticias recientes relevantes."
+    except Exception as e:
+        return f"[No se pudieron obtener noticias: {e}]"
+
+
+def _generar_horario_eventos(meses_vencimiento: int, periodicidad: int) -> list:
+    """Genera un calendario sintético de eventos (cupón + call, excluyendo primera y última fecha
+    de call como es habitual) + vencimiento, en días desde hoy, según la periodicidad de la nota."""
+    eventos = []
+    mes = periodicidad
+    n_periodo = 0
+    while mes <= meses_vencimiento:
+        n_periodo += 1
+        dias = int(mes * 30.44)
+        eventos.append({"dias": max(dias, 1), "tipo": "cupon"})
+        es_primera = (n_periodo == 1)
+        es_ultima = (mes + periodicidad > meses_vencimiento)
+        if not es_primera and not es_ultima:
+            eventos.append({"dias": max(dias, 1), "tipo": "call"})
+        mes += periodicidad
+    eventos.append({"dias": int(meses_vencimiento * 30.44), "tipo": "vencimiento"})
+    return eventos
+
+
+def _tab_comparador_notas(df_control: pd.DataFrame):
+    st.caption(
+        "Introduce entre 1 y 3 notas candidatas con sus términos, y tu capital disponible. "
+        "Se simula cada una con Monte Carlo (usando la volatilidad histórica real de cada ticker) "
+        "para estimar probabilidades de cupón, call y pérdida de capital, y se calcula una "
+        "propuesta de reparto de capital razonada.\n\n"
+        "⚠️ **Esto es una estimación probabilística con supuestos simplificados** (volatilidad histórica, "
+        "sin correlación entre tickers, sin deriva de precio) — no una predicción ni garantía de resultado."
+    )
+
+    n_notas = st.radio("¿Cuántas notas quieres comparar?", [1, 2, 3], horizontal=True, index=1)
+    notas_input = []
+
+    cols = st.columns(n_notas)
+    for i in range(n_notas):
+        with cols[i]:
+            st.markdown(f"**Nota candidata {i+1}**")
+            nombre = st.text_input(f"Nombre/etiqueta", value=f"Nota {i+1}", key=f"comp_nombre_{i}")
+            n_tickers = st.number_input(f"Nº de tickers (worst-of)", min_value=1, max_value=3, value=1, key=f"comp_ntick_{i}")
+            tickers_nota = []
+            for j in range(n_tickers):
+                st.markdown(f"_Ticker {j+1}_")
+                tk = st.text_input(f"Símbolo", key=f"comp_tk_{i}_{j}").strip().upper()
+                bc = st.number_input(f"Barrera cupón (%)", min_value=1, max_value=100, value=60, key=f"comp_bc_{i}_{j}") / 100
+                bcap = st.number_input(f"Barrera capital (%)", min_value=1, max_value=100, value=60, key=f"comp_bcap_{i}_{j}") / 100
+                cl = st.number_input(f"Nivel de call (%)", min_value=50, max_value=200, value=100, key=f"comp_cl_{i}_{j}") / 100
+                if tk:
+                    tickers_nota.append({"ticker": tk, "barrera_cupon_pct": bc, "barrera_capital_pct": bcap, "call_level_pct": cl})
+            cupon_anual = st.number_input(f"Cupón anual (%)", min_value=0.0, max_value=100.0, value=25.0, key=f"comp_cupon_{i}") / 100
+            meses_venc = st.number_input(f"Meses hasta vencimiento", min_value=1, max_value=60, value=36, key=f"comp_meses_{i}")
+            periodicidad = st.selectbox(f"Periodicidad", [1, 3], format_func=lambda x: "Mensual" if x == 1 else "Trimestral", key=f"comp_period_{i}")
+            notas_input.append({"nombre": nombre, "tickers": tickers_nota, "cupon_anual": cupon_anual, "meses_venc": meses_venc, "periodicidad": periodicidad})
+
+    capital_disponible = st.number_input("💰 Capital disponible a repartir ($)", min_value=0.0, value=100000.0, step=1000.0)
+
+    if not st.button("⚖️ Comparar y recomendar", type="primary"):
+        return
+
+    resultados_notas = []
+    for nota in notas_input:
+        if not nota["tickers"]:
+            continue
+        with st.spinner(f"Simulando {nota['nombre']}..."):
+            tickers_datos = []
+            fundamentales_nota = []
+            for t in nota["tickers"]:
+                fd = obtener_datos_fundamentales(t["ticker"])
+                if fd.get("precio_actual") is None or fd.get("volatilidad_anual_pct") is None:
+                    st.error(f"No se pudo obtener precio/volatilidad de {t['ticker']} — se omite {nota['nombre']}.")
+                    tickers_datos = None
+                    break
+                tickers_datos.append({
+                    "ticker": t["ticker"], "precio_actual": fd["precio_actual"], "precio_inicial": fd["precio_actual"],
+                    "volatilidad_anual_pct": fd["volatilidad_anual_pct"],
+                    "barrera_cupon_pct": t["barrera_cupon_pct"], "barrera_capital_pct": t["barrera_capital_pct"], "call_level_pct": t["call_level_pct"],
+                })
+                fundamentales_nota.append(fd)
+            if not tickers_datos:
+                continue
+
+            eventos = _generar_horario_eventos(nota["meses_venc"], nota["periodicidad"])
+            sim = simular_montecarlo_nota(tickers_datos, eventos)
+
+            eventos_cupon = [e for e in sim["eventos"] if e["tipo"] == "cupon"]
+            prob_cupon_media = float(np.mean([e["probabilidad"] for e in eventos_cupon])) if eventos_cupon else 0.0
+            cupon_periodo = nota["cupon_anual"] / (12 / nota["periodicidad"])
+            n_periodos = len(eventos_cupon)
+            rentabilidad_esperada_cupones = sum(e["probabilidad"] * cupon_periodo for e in eventos_cupon) * (12 / nota["periodicidad"]) / (nota["meses_venc"] / 12)
+            perdida_esperada_anualizada = sim["probabilidad_perdida_capital"] * sim["perdida_pct_promedio_si_incumple"] / 100 / (nota["meses_venc"] / 12)
+            rentabilidad_neta_esperada = rentabilidad_esperada_cupones - perdida_esperada_anualizada
+
+            resultados_notas.append({
+                "nombre": nota["nombre"], "tickers": [t["ticker"] for t in nota["tickers"]],
+                "cupon_anual": nota["cupon_anual"], "meses_venc": nota["meses_venc"],
+                "prob_cupon_media": prob_cupon_media, "prob_call_total": sim["probabilidad_call_total"],
+                "prob_perdida_capital": sim["probabilidad_perdida_capital"], "perdida_pct_promedio": sim["perdida_pct_promedio_si_incumple"],
+                "rentabilidad_esperada_neta": rentabilidad_neta_esperada, "fundamentales": fundamentales_nota,
+            })
+
+    if not resultados_notas:
+        st.warning("No se pudo simular ninguna nota — revisa los tickers.")
+        return
+
+    st.markdown("---")
+    st.markdown("### 📊 Resultados de la simulación")
+    df_resumen = pd.DataFrame([{
+        "Nota": r["nombre"], "Tickers": ", ".join(r["tickers"]), "Cupón anual": f"{r['cupon_anual']*100:.1f}%",
+        "Prob. media cupón/periodo": f"{r['prob_cupon_media']*100:.1f}%", "Prob. call (total)": f"{r['prob_call_total']*100:.1f}%",
+        "Prob. pérdida capital": f"{r['prob_perdida_capital']*100:.1f}%", "Pérdida media si incumple": f"{r['perdida_pct_promedio']:.1f}%",
+        "Rentabilidad neta esperada (anual)": f"{r['rentabilidad_esperada_neta']*100:.2f}%",
+    } for r in resultados_notas])
+    st.dataframe(df_resumen, use_container_width=True, hide_index=True)
+
+    # Recomendación de reparto: razonada por Claude, usando SOLO los números ya calculados
+    with st.spinner("Generando recomendación..."):
+        resumen_texto = "\n".join(
+            f"- {r['nombre']} ({', '.join(r['tickers'])}): cupón {r['cupon_anual']*100:.1f}% anual, "
+            f"prob. media de cobro por periodo {r['prob_cupon_media']*100:.1f}%, prob. call total {r['prob_call_total']*100:.1f}%, "
+            f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%), "
+            f"rentabilidad neta esperada anualizada {r['rentabilidad_esperada_neta']*100:.2f}%"
+            for r in resultados_notas
+        )
+        api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+                json={
+                    "model": "claude-sonnet-4-5", "max_tokens": 1200,
+                    "system": (
+                        "Eres un analista de notas estructuradas. Se te dan métricas YA CALCULADAS (probabilidades de "
+                        "Monte Carlo y rentabilidad esperada) de varias notas candidatas — NO recalcules ni inventes "
+                        "ningún número, solo razona sobre los que se te dan. El criterio de decisión del usuario es: "
+                        "maximizar rentabilidad, pero minimizando riesgo salvo que el riesgo adicional sea MODERADO y "
+                        "claramente compensado por la rentabilidad. Puede recomendar repartir entre varias notas o "
+                        "poner todo el capital en una sola si está claramente justificado. "
+                        f"Capital disponible total: ${capital_disponible:,.2f}. "
+                        "Da una recomendación de reparto de capital en dólares para cada nota, con el razonamiento "
+                        "concreto (qué compensa qué), en español, conciso pero completo."
+                    ),
+                    "messages": [{"role": "user", "content": f"Notas candidatas:\n{resumen_texto}\n\nRecomienda cómo repartir el capital disponible."}],
+                },
+                timeout=60,
+            )
+            data = resp.json()
+            texto_recomendacion = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        except Exception as e:
+            texto_recomendacion = f"[No se pudo generar la recomendación: {e}]"
+
+    st.markdown("### 🎯 Recomendación de reparto")
+    st.markdown(texto_recomendacion or "No se pudo generar una recomendación.")
+    st.caption("Simulación Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.")
+
+
+def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, df_calls: pd.DataFrame):
+    st.caption(
+        "Elige una nota que ya tengas en el Excel — se cogen automáticamente sus tickers, barreras, "
+        "cupón y **las fechas reales de tu calendario** (no fechas sintéticas), y se hace el análisis "
+        "completo: fundamentales, probabilidades por Monte Carlo y noticias recientes de cada ticker."
+    )
+
+    notas_existentes = sorted(
+        int(n) for n in pd.to_numeric(df_control.get("nota", pd.Series(dtype=float)), errors="coerce").dropna().unique()
+    ) if df_control is not None and not df_control.empty else []
+    if not notas_existentes:
+        st.info("No hay notas en CONTROL_NOTAS todavía.")
+        return
+
+    numero_nota = st.selectbox("Nota a analizar", notas_existentes, key="analisis_nota_numero")
+
+    if not st.button(f"🔬 Analizar Nota {numero_nota} en profundidad", type="primary"):
+        return
+
+    control_nota = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == numero_nota]
+    if control_nota.empty:
+        st.error("No hay datos de tickers/barreras para esta nota en CONTROL_NOTAS.")
+        return
+
+    nombre_nota = f"NOTA_{numero_nota:02d}"
+    inv_nota = df_inv[df_inv.get("nombre_activo", pd.Series(dtype=str)).astype(str).str.upper().str.replace(" ", "_") == nombre_nota]
+    cupon_anual = float(inv_nota["interes_nota_anual"].dropna().iloc[0]) if not inv_nota.empty and inv_nota["interes_nota_anual"].notna().any() else None
+
+    # Construir eventos REALES desde el calendario (no sintéticos)
+    hoy = pd.Timestamp.today().normalize()
+    cal_nota = df_cal[pd.to_numeric(df_cal.get("nota"), errors="coerce") == numero_nota] if df_cal is not None and not df_cal.empty else pd.DataFrame()
+    eventos = []
+    obs_futuras = cal_nota[(cal_nota["tipo_evento"] == "OBSERVACION") & (cal_nota["fecha"] >= hoy)] if not cal_nota.empty else pd.DataFrame()
+    for _, r in obs_futuras.iterrows():
+        dias = (r["fecha"] - hoy).days
+        if dias > 0:
+            eventos.append({"dias": dias, "tipo": "cupon"})
+
+    calls_nota = df_calls[pd.to_numeric(df_calls.get("nota"), errors="coerce") == numero_nota] if df_calls is not None and not df_calls.empty else pd.DataFrame()
+    calls_futuras = pd.DataFrame()
+    if not calls_nota.empty and "fecha_call" in calls_nota.columns:
+        calls_nota = calls_nota.copy()
+        calls_nota["fecha_call"] = pd.to_datetime(calls_nota["fecha_call"], errors="coerce", dayfirst=True)
+        calls_futuras = calls_nota[calls_nota["fecha_call"] >= hoy]
+        for _, r in calls_futuras.iterrows():
+            dias = (r["fecha_call"] - hoy).days
+            if dias > 0:
+                eventos.append({"dias": dias, "tipo": "call"})
+
+    if not eventos:
+        st.warning("No hay eventos futuros en el calendario de esta nota (¿ya venció o está descalendarizada?).")
+        return
+
+    dias_vencimiento = max(e["dias"] for e in eventos)
+    eventos.append({"dias": dias_vencimiento, "tipo": "vencimiento"})
+
+    st.markdown("---")
+    st.markdown(f"## Nota {numero_nota}" + (f" — Cupón {cupon_anual*100:.2f}% anual" if cupon_anual else ""))
+    st.caption(f"{len(obs_futuras)} observaciones futuras, {len(calls_futuras)} fechas de posible call, vencimiento en {dias_vencimiento} días.")
+
+    tickers_datos = []
+    datos_por_ticker = {}
+    for _, fila in control_nota.iterrows():
+        ticker = str(fila.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        with st.spinner(f"Analizando {ticker}..."):
+            fd = obtener_datos_fundamentales(ticker)
+        datos_por_ticker[ticker] = fd
+        if fd.get("precio_actual") is None or fd.get("volatilidad_anual_pct") is None:
+            st.error(f"No se pudo obtener precio/volatilidad de {ticker} — se omite del cálculo de probabilidades.")
+            continue
+        precio_inicial = float(fila.get("precio_compra")) if pd.notna(fila.get("precio_compra")) else fd["precio_actual"]
+        tickers_datos.append({
+            "ticker": ticker, "precio_actual": fd["precio_actual"], "precio_inicial": precio_inicial,
+            "volatilidad_anual_pct": fd["volatilidad_anual_pct"],
+            "barrera_cupon_pct": float(fila.get("barrera_cupon", 0.6)),
+            "barrera_capital_pct": float(fila.get("barrera_capital", fila.get("barrera_cupon", 0.6))),
+            "call_level_pct": float(fila.get("call_level", 1.0)),
+        })
+
+    # --- Resumen por ticker: fundamentales + posición vs barreras + noticias ---
+    for _, fila in control_nota.iterrows():
+        ticker = str(fila.get("ticker", "")).strip().upper()
+        fd = datos_por_ticker.get(ticker, {})
+        if not ticker or fd.get("error"):
+            continue
+        st.markdown(f"### {fd.get('nombre') or ticker} ({ticker})")
+        c1, c2, c3, c4 = st.columns(4)
+        precio_compra = fila.get("precio_compra")
+        with c1:
+            tarjeta_kpi("Precio compra (nota)", f"${precio_compra:,.2f}" if pd.notna(precio_compra) else "N/D", "", "normal")
+        with c2:
+            var_actual = (fd["precio_actual"] / precio_compra - 1) * 100 if fd.get("precio_actual") and pd.notna(precio_compra) else None
+            tarjeta_kpi("Precio actual", f"${fd.get('precio_actual', 0):,.2f}" if fd.get("precio_actual") else "N/D",
+                        f"{var_actual:+.1f}% vs compra" if var_actual is not None else "", "positivo" if (var_actual or 0) >= 0 else "negativo")
+        with c3:
+            tarjeta_kpi("Precio objetivo analistas", f"${fd.get('target_medio', 0):,.2f}" if fd.get("target_medio") else "N/D",
+                        f"{fd.get('n_analistas', '?')} analistas", "normal")
+        with c4:
+            tarjeta_kpi("Volatilidad anual", f"{fd.get('volatilidad_anual_pct', 0):.1f}%" if fd.get("volatilidad_anual_pct") else "N/D", "", "riesgo" if (fd.get("volatilidad_anual_pct") or 0) > 40 else "normal")
+        if fd.get("proxima_fecha_resultados"):
+            st.caption(f"📅 Próxima fecha de resultados: {fd['proxima_fecha_resultados']}")
+
+        with st.spinner(f"Buscando noticias de {ticker}..."):
+            noticias = obtener_resumen_noticias_ia(ticker, fd.get("nombre") or ticker)
+        st.markdown(noticias)
+        st.markdown("---")
+
+    # --- Probabilidades Monte Carlo para la nota completa (worst-of) ---
+    if tickers_datos:
+        with st.spinner("Ejecutando simulación Monte Carlo..."):
+            sim = simular_montecarlo_nota(tickers_datos, eventos)
+        st.markdown("### 🎲 Probabilidades (simulación Monte Carlo, worst-of)")
+        eventos_cupon = [e for e in sim["eventos"] if e["tipo"] == "cupon"]
+        eventos_call = [e for e in sim["eventos"] if e["tipo"] == "call"]
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            tarjeta_kpi("Prob. próxima observación cumpla barrera", f"{eventos_cupon[0]['probabilidad']*100:.1f}%" if eventos_cupon else "N/D", "Cobro del próximo cupón", "positivo")
+        with c2:
+            tarjeta_kpi("Prob. call total (todas las fechas)", f"{sim['probabilidad_call_total']*100:.1f}%", f"{len(eventos_call)} fechas de call evaluadas", "normal")
+        with c3:
+            tarjeta_kpi("Prob. pérdida de capital al vencimiento", f"{sim['probabilidad_perdida_capital']*100:.1f}%",
+                        f"Pérdida media si ocurre: {sim['perdida_pct_promedio_si_incumple']:.1f}%", "riesgo" if sim["probabilidad_perdida_capital"] > 0.15 else "normal")
+
+        if len(eventos_cupon) > 1:
+            df_prob_cupon = pd.DataFrame([{"Días": e["dias"], "Prob. cupón (%)": round(e["probabilidad"]*100, 1)} for e in eventos_cupon])
+            st.line_chart(df_prob_cupon.set_index("Días"))
+        st.caption("⚠️ Estimación con volatilidad histórica, sin correlación entre tickers ni deriva de precio — no es una predicción, es una probabilidad bajo supuestos.")
+
+
 def seccion_notas_archivo():
     df_inv, df_cal, df_control = cargar_excel_completo()
     df_calls = leer_hoja_excel("CALENDARIO_CALLS")
@@ -4064,13 +4605,25 @@ def seccion_notas_archivo():
         df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
 
-    tab_resumen, tab_nueva, tab_auditar = st.tabs(["📊 Resumen y alertas", "➕ Añadir nota nueva", "🔍 Auditar nota existente"])
+    tab_resumen, tab_nueva, tab_auditar, tab_ficha, tab_analisis, tab_comparador = st.tabs([
+        "📊 Resumen y alertas", "➕ Añadir nota nueva", "🔍 Auditar nota existente",
+        "🏢 Ficha de compañía", "🔬 Análisis completo de nota", "⚖️ Comparador de notas",
+    ])
 
     with tab_nueva:
         _tab_añadir_nota_nueva(df_control, df_cal)
 
     with tab_auditar:
         _tab_auditar_nota(df_inv, df_cal, df_control, df_calls)
+
+    with tab_ficha:
+        _tab_ficha_compania(df_control)
+
+    with tab_analisis:
+        _tab_analisis_nota_existente(df_inv, df_cal, df_control, df_calls)
+
+    with tab_comparador:
+        _tab_comparador_notas(df_control)
 
     with tab_resumen:
         st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
