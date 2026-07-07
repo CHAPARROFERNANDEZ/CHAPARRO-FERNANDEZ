@@ -3416,7 +3416,7 @@ def _tab_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFrame):
         )
 
 
-
+def tarjeta_bitcoin_etf():
     """Tarjeta desplegable del Dashboard con precio actualizado y gráfico del ETF de Bitcoin (IBIT)."""
     estado = obtener_estado_bitcoin_etf()
     precio_actual = estado.get("precio_actual")
