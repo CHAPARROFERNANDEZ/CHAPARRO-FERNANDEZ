@@ -685,13 +685,14 @@ Luego recarga el Excel desde el menú Gestión de Excel.
 
             t = archivos[0]
             nombre_archivo   = t[0]
-            extracto_bytes   = t[1]  # t[1] = Excel formateado (PORTADA/DETALLE/RESUMEN)
+            extracto_bytes   = t[1]  # t[1] = Excel formateado (PORTADA/DETALLE) — para adjuntar/enviar
+            excel_crudo      = t[2] if len(t) > 2 else None  # t[2] = Excel con TOTALES_MES/DETALLE — para leer el total
             email_dest       = mapa_emails.get(inversor, "")
 
             total_intereses_email = 0.0
             try:
                 from openpyxl import load_workbook as _lw
-                wb_tmp = _lw(BytesIO(extracto_bytes))
+                wb_tmp = _lw(BytesIO(excel_crudo if excel_crudo else extracto_bytes))
                 if "TOTALES_MES" in wb_tmp.sheetnames:
                     for row in wb_tmp["TOTALES_MES"].iter_rows(min_row=2, values_only=True):
                         if row and row[0] and f"{mes_email:02d}/{anio_email}" in str(row[0]):
