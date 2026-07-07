@@ -4780,7 +4780,11 @@ def _informe_ia_a_pdf(titulo: str, texto_markdown: str) -> bytes:
     return output.getvalue()
 
 
-def generar_ficha_empresa_ia(ticker: str, nombre_compania: str, barrera_capital_pct: float | None = None, colchon_pct: float | None = None) -> str:
+def generar_ficha_empresa_ia(
+    ticker: str, nombre_compania: str,
+    barrera_capital_pct: float | None = None, colchon_capital_pct: float | None = None,
+    barrera_cupon_pct: float | None = None, colchon_cupon_pct: float | None = None,
+) -> str:
     """
     Usa la API de Claude con búsqueda web para explicar, en dos secciones breves,
     a qué se dedica una compañía y qué noticias recientes son relevantes para su cotización.
@@ -4790,18 +4794,29 @@ def generar_ficha_empresa_ia(ticker: str, nombre_compania: str, barrera_capital_
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
     contexto_barrera = ""
     tercera_seccion = ""
-    if barrera_capital_pct is not None and colchon_pct is not None:
-        contexto_barrera = (
-            f" Dato clave de la nota: la barrera de capital (contingencia) de esta acción está en el "
+    if barrera_capital_pct is not None and colchon_capital_pct is not None:
+        contexto_barrera += (
+            f" Dato clave de la nota: la barrera de CAPITAL (contingencia) de esta acción está en el "
             f"{barrera_capital_pct*100:.0f}% de su precio de entrada — la acción tiene un colchón de "
-            f"{colchon_pct:.1f}% de caída antes de poner en riesgo el capital."
+            f"{colchon_capital_pct:.1f}% de caída antes de poner en riesgo el capital (evento único, al vencimiento)."
         )
+    if barrera_cupon_pct is not None and colchon_cupon_pct is not None:
+        contexto_barrera += (
+            f" Además, la barrera de CUPÓN (la que decide si se cobra el interés mensual/periódico) está en el "
+            f"{barrera_cupon_pct*100:.0f}% de su precio de entrada — colchón de {colchon_cupon_pct:.1f}% de caída "
+            f"antes de perder el cupón de ESE periodo concreto (evento recurrente, cada mes/trimestre, no afecta al capital)."
+        )
+    if contexto_barrera:
         tercera_seccion = (
-            "\n\n**Opinión sobre el riesgo de capital:** valora, en 2-3 frases y SOLO con lo que encuentres "
-            "(precio objetivo de analistas, rango de estimaciones, noticias), si una caída de esa magnitud te "
-            "parece plausible o improbable en el horizonte de la nota. El criterio correcto NO es si la acción "
-            "tiene volatilidad alta o noticias negativas en abstracto — es si una caída realista se queda por "
-            "encima de la barrera de capital. Si el colchón es amplio frente a las caídas que manejan los "
+            "\n\n**Opinión sobre el riesgo (cupón y capital):** valora, en 3-4 frases y SOLO con lo que encuentres "
+            "(precio objetivo de analistas, rango de estimaciones, noticias), la probabilidad de que la acción caiga "
+            "lo suficiente como para (a) perder el cupón de un periodo concreto (barrera de cupón, más exigente y "
+            "recurrente cada mes) y (b) poner en riesgo el capital al vencimiento (barrera de capital, más laxa pero "
+            "solo se juzga una vez, al final). Son dos riesgos distintos con colchones distintos — coméntalos por "
+            "separado. El criterio correcto NO es si la acción tiene volatilidad alta o noticias negativas en "
+            "abstracto — es si una caída realista se queda por encima de cada barrera. Si el colchón de cupón es "
+            "ajustado pero el de capital es amplio, dilo así explícitamente (riesgo real de perder algún cupón "
+            "puntual, pero capital protegido); si ambos colchones son amplios frente a las caídas que manejan los "
             "analistas, dilo claramente como algo positivo aunque haya ruido de corto plazo en las noticias."
         )
     try:
@@ -4810,7 +4825,7 @@ def generar_ficha_empresa_ia(ticker: str, nombre_compania: str, barrera_capital_
             headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
             json={
                 "model": "claude-sonnet-4-5",
-                "max_tokens": 900,
+                "max_tokens": 1000,
                 "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
                 "system": (
                     "Eres un analista senior que prepara fichas rápidas de compañías subyacentes de notas "
@@ -4966,13 +4981,17 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             f"Margen bruto teórico: {margen_vs_inversor*100:.2f}%."
         )
         colchones_nota = []
+        colchones_cupon_nota = []
         for t_full, fd in zip(r["tickers_full"], r["fundamentales"]):
             ticker = t_full["ticker"]
             barrera_capital_pct = t_full["barrera_capital_pct"]
+            barrera_cupon_pct = t_full["barrera_cupon_pct"]
             colchon_pct = (1 - barrera_capital_pct) * 100
+            colchon_cupon_pct = (1 - barrera_cupon_pct) * 100
             colchones_nota.append(colchon_pct)
+            colchones_cupon_nota.append(colchon_cupon_pct)
             with st.expander(f"📊 {fd.get('nombre') or ticker} ({ticker})", expanded=False):
-                c1, c2, c3 = st.columns(3)
+                c1, c2, c3, c4 = st.columns(4)
                 with c1:
                     tarjeta_kpi("Precio actual", f"${fd['precio_actual']:,.2f}" if fd.get("precio_actual") else "N/D", fd.get("sector") or "", "normal")
                 with c2:
@@ -4983,21 +5002,23 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     else:
                         tarjeta_kpi("Precio objetivo (consenso analistas)", "N/D", "Sin cobertura o dato no disponible", "normal")
                 with c3:
-                    tarjeta_kpi("Colchón hasta la barrera de capital", f"{colchon_pct:.1f}%", f"Barrera al {barrera_capital_pct*100:.0f}% del precio de entrada", "normal")
+                    tarjeta_kpi("Colchón hasta barrera de CUPÓN", f"{colchon_cupon_pct:.1f}%", f"Barrera al {barrera_cupon_pct*100:.0f}% · afecta al interés mensual/periódico", "normal")
+                with c4:
+                    tarjeta_kpi("Colchón hasta barrera de CAPITAL", f"{colchon_pct:.1f}%", f"Barrera al {barrera_capital_pct*100:.0f}% · solo afecta al vencimiento", "normal")
                 if fd.get("target_alto") or fd.get("target_bajo"):
                     st.caption(f"Rango de analistas: ${fd.get('target_bajo', 0):,.2f} — ${fd.get('target_alto', 0):,.2f}  |  {fd.get('n_analistas', '?')} analistas  |  Recomendación consenso: {fd.get('recomendacion', 'N/D')}")
                 if fd.get("aviso_analistas"):
                     st.info(f"ℹ️ {fd['aviso_analistas']}")
                 with st.spinner(f"Buscando información y noticias de {ticker}..."):
-                    ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker, barrera_capital_pct, colchon_pct)
+                    ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker, barrera_capital_pct, colchon_pct, barrera_cupon_pct, colchon_cupon_pct)
                 st.markdown(ficha_texto)
-                st.caption("⚠️ La explicación, las noticias y la opinión de riesgo son una síntesis de IA en base a fuentes públicas — el precio, el precio objetivo y el colchón de arriba sí son datos reales/calculados.")
+                st.caption("⚠️ La explicación, las noticias y la opinión de riesgo son una síntesis de IA en base a fuentes públicas — el precio, el precio objetivo y los colchones de arriba sí son datos reales/calculados.")
                 bloques_informe.append(f"#### {fd.get('nombre') or ticker} ({ticker})")
                 bloques_informe.append(
                     f"Precio actual: ${fd.get('precio_actual', 0):,.2f} · Precio objetivo consenso analistas: "
                     f"${fd.get('target_medio', 0):,.2f}" if fd.get("target_medio") else f"Precio actual: ${fd.get('precio_actual', 0):,.2f} · Sin precio objetivo de consenso disponible"
                 )
-                bloques_informe.append(f"Colchón hasta la barrera de capital: {colchon_pct:.1f}% (barrera al {barrera_capital_pct*100:.0f}%).")
+                bloques_informe.append(f"Colchón hasta barrera de cupón: {colchon_cupon_pct:.1f}% (barrera al {barrera_cupon_pct*100:.0f}%). Colchón hasta barrera de capital: {colchon_pct:.1f}% (barrera al {barrera_capital_pct*100:.0f}%).")
                 bloques_informe.append(ficha_texto)
 
     # Recomendación de reparto: razonada por Claude, usando SOLO los números ya calculados
@@ -5008,7 +5029,8 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%), "
             f"rentabilidad neta esperada anualizada {r['rentabilidad_esperada_neta']*100:.2f}%, "
             f"margen bruto teórico sobre lo que pagamos al inversor: {(r['cupon_anual'] - tasa_inversor_pct)*100:.2f}%, "
-            f"colchón hasta la barrera de capital por ticker: {', '.join(f'{tk}={(1 - t['barrera_capital_pct'])*100:.1f}%' for tk, t in zip(r['tickers'], r['tickers_full']))}"
+            f"colchón hasta la barrera de capital por ticker: {', '.join(f'{tk}={(1 - t['barrera_capital_pct'])*100:.1f}%' for tk, t in zip(r['tickers'], r['tickers_full']))}, "
+            f"colchón hasta la barrera de cupón por ticker: {', '.join(f'{tk}={(1 - t['barrera_cupon_pct'])*100:.1f}%' for tk, t in zip(r['tickers'], r['tickers_full']))}"
             for r in resultados_notas
         )
         api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
@@ -5024,22 +5046,26 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                         "spread entre lo que cobra la nota y lo que paga al inversor. Se te dan métricas YA CALCULADAS "
                         "(probabilidades de Monte Carlo, rentabilidad esperada, margen bruto teórico sobre la tasa del "
                         f"inversor —que es {tasa_inversor_pct*100:.2f}% anual— y el colchón hasta la barrera de capital "
-                        "de cada ticker) de varias notas candidatas — NO recalcules ni inventes ningún número, solo "
-                        "razona sobre los que se te dan. El criterio de decisión es: maximizar rentabilidad, pero "
-                        "minimizando riesgo salvo que el riesgo adicional sea MODERADO y claramente compensado por la "
-                        "rentabilidad. Ten en cuenta explícitamente dos cosas: (1) el margen sobre la tasa del inversor "
-                        "tiene que ser sustancial para que compense el riesgo asumido por el fondo — un cupón que "
-                        "apenas supere la tasa del inversor no es atractivo aunque la probabilidad de cobro sea alta, "
-                        "porque el fondo absorbe toda la pérdida si la nota falla; (2) el criterio correcto de riesgo "
-                        "de capital NO es la volatilidad genérica de la acción ni si tiene noticias negativas — es si "
-                        "una caída realista y plausible se queda por encima de la barrera de capital (contingencia). "
-                        "Si el colchón hasta la barrera es amplio frente a las caídas que manejan los analistas, la "
-                        "nota es atractiva pese al ruido de corto plazo, porque el cupón ya compensa ese riesgo puntual. "
-                        "Puede recomendar repartir entre varias notas o poner todo el capital en una sola si está "
-                        f"claramente justificado. Capital disponible total: ${capital_disponible:,.2f}. "
+                        "y hasta la barrera de cupón de cada ticker) de varias notas candidatas — NO recalcules ni "
+                        "inventes ningún número, solo razona sobre los que se te dan. El criterio de decisión es: "
+                        "maximizar rentabilidad, pero minimizando riesgo salvo que el riesgo adicional sea MODERADO y "
+                        "claramente compensado por la rentabilidad. Ten en cuenta explícitamente tres cosas: (1) el "
+                        "margen sobre la tasa del inversor tiene que ser sustancial para que compense el riesgo "
+                        "asumido por el fondo — un cupón que apenas supere la tasa del inversor no es atractivo aunque "
+                        "la probabilidad de cobro sea alta, porque el fondo absorbe toda la pérdida si la nota falla; "
+                        "(2) hay DOS barreras distintas y hay que juzgarlas por separado — la barrera de CUPÓN decide "
+                        "si se cobra el interés cada mes/trimestre (evento recurrente, normalmente más exigente, un "
+                        "colchón ajustado aquí significa perder cupones puntuales aunque el capital esté a salvo) y la "
+                        "barrera de CAPITAL solo se juzga una vez al vencimiento (normalmente más laxa); (3) el "
+                        "criterio correcto de riesgo en ambos casos NO es la volatilidad genérica de la acción ni si "
+                        "tiene noticias negativas — es si una caída realista y plausible se queda por encima de cada "
+                        "barrera. Si el colchón hasta una barrera es amplio frente a las caídas que manejan los "
+                        "analistas, esa nota es atractiva en ese frente pese al ruido de corto plazo, porque el cupón "
+                        "ya compensa ese riesgo puntual. Puede recomendar repartir entre varias notas o poner todo el "
+                        f"capital en una sola si está claramente justificado. Capital disponible total: ${capital_disponible:,.2f}. "
                         "Da una recomendación de reparto de capital en dólares para cada nota, con el razonamiento "
-                        "concreto (qué compensa qué, incluyendo el margen sobre la tasa del inversor y el colchón hasta "
-                        "la barrera de capital), en español, conciso pero completo."
+                        "concreto (qué compensa qué, incluyendo el margen sobre la tasa del inversor y los colchones "
+                        "hasta ambas barreras por separado), en español, conciso pero completo."
                     ),
                     "messages": [{"role": "user", "content": f"Notas candidatas:\n{resumen_texto}\n\nRecomienda cómo repartir el capital disponible."}],
                 },
