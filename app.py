@@ -71,8 +71,29 @@ MESES_ES_EMAIL = {
 # MÓDULO EMAIL EXTRACTOS
 # =========================
 
+def _parse_lista_emails(cadena: str) -> list:
+    """Convierte 'a@x.com, b@y.com; c@z.com' en ['a@x.com', 'b@y.com', 'c@z.com'].
+    Admite coma, punto y coma o espacio como separador, y quita duplicados conservando el orden."""
+    import re as _re_mail
+    if not cadena:
+        return []
+    partes = [p.strip() for p in _re_mail.split(r"[,;\s]+", cadena) if p.strip()]
+    vistos = set()
+    limpio = []
+    for p in partes:
+        pl = p.lower()
+        if pl not in vistos and "@" in p:
+            vistos.add(pl)
+            limpio.append(p)
+    return limpio
+
+
 def _leer_emails_inversores(df_inv: pd.DataFrame) -> dict:
-    """Devuelve {inversor_upper: email} leyendo la columna 'email' del Excel."""
+    """
+    Devuelve {inversor_upper: email_o_emails} leyendo la columna 'email' del Excel.
+    Admite varios correos para el mismo inversor separados por coma en la misma celda
+    (ej. 'yuri@x.com, contable@x.com') — el extracto se envía a todos ellos a la vez.
+    """
     if "email" not in df_inv.columns:
         return {}
     mapa = {}
@@ -485,18 +506,29 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str = "", mes: int = 0, anio: 
 
 
 
-def enviar_extracto_email(destinatario: str, inversor: str, mes: int, anio: int,
+def enviar_extracto_email(destinatario, inversor: str, mes: int, anio: int,
                            extracto_bytes: bytes, nombre_archivo: str,
                            total_intereses: float, smtp_sender: str,
                            smtp_password: str,
                            display_name: str = "Chaparro Fernández Wealth") -> tuple:
-    """Envía el extracto como PDF adjunto por email usando Gmail SMTP."""
+    """
+    Envía el extracto como PDF adjunto por email usando Gmail SMTP.
+    'destinatario' puede ser un string con un solo email, un string con varios
+    separados por coma ('a@x.com, b@y.com'), o directamente una lista de emails —
+    en todos los casos se manda EL MISMO extracto a todos los destinatarios de una vez.
+    """
     mes_str = MESES_ES_EMAIL.get(mes, str(mes)).capitalize()
+    if isinstance(destinatario, str):
+        destinatarios = _parse_lista_emails(destinatario)
+    else:
+        destinatarios = list(destinatario)
+    if not destinatarios:
+        return False, "No hay ninguna dirección de email válida."
     try:
         msg = MIMEMultipart("mixed")
         msg["Subject"] = f"Extracto de inversiones — {mes_str} {anio} | Chaparro Fernández Wealth"
         msg["From"]    = f"{display_name} <{smtp_sender}>"
-        msg["To"]      = destinatario
+        msg["To"]      = ", ".join(destinatarios)
         cuerpo = _construir_cuerpo_html_email(inversor, mes, anio, total_intereses)
         msg.attach(MIMEText(cuerpo, "html", "utf-8"))
 
@@ -523,12 +555,12 @@ def enviar_extracto_email(destinatario: str, inversor: str, mes: int, anio: int,
             servidor.ehlo()
             servidor.starttls(context=contexto)
             servidor.login(smtp_sender, smtp_password)
-            servidor.sendmail(smtp_sender, destinatario, msg.as_bytes())
+            servidor.sendmail(smtp_sender, destinatarios, msg.as_bytes())
         return True, ""
     except smtplib.SMTPAuthenticationError:
         return False, "Error de autenticación Gmail. Usa una contraseña de aplicación (no tu contraseña normal)."
     except smtplib.SMTPRecipientsRefused:
-        return False, f"La dirección {destinatario} fue rechazada por el servidor."
+        return False, f"Alguna(s) de estas direcciones fue(ron) rechazada(s) por el servidor: {', '.join(destinatarios)}."
     except Exception as e:
         return False, str(e)
 
@@ -546,6 +578,12 @@ def seccion_envio_extractos_email(df_inv: pd.DataFrame, generar_extractos_fn,
             st.markdown("""
 Abre `inversiones.xlsx`, en la hoja **INVERSIONES** añade una columna llamada `email`
 y rellena el correo de cada inversor en al menos una de sus filas.
+
+**¿Quieres que el mismo extracto llegue a más de una persona** (por ejemplo, al inversor
+y a su asesor o pareja)? Pon los dos correos en la misma celda separados por coma:
+`inversor@gmail.com, asesor@gmail.com` — se enviará el mismo extracto a ambos a la vez,
+en un único correo.
+
 Luego recarga el Excel desde el menú Gestión de Excel.
 """)
         return
