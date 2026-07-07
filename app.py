@@ -4736,7 +4736,51 @@ def _generar_horario_eventos(meses_vencimiento: int, periodicidad: int) -> list:
     return eventos
 
 
-def generar_ficha_empresa_ia(ticker: str, nombre_compania: str) -> str:
+def _informe_ia_a_pdf(titulo: str, texto_markdown: str) -> bytes:
+    """Convierte el informe de texto/markdown generado por la IA (fichas de compañía +
+    recomendación) a un PDF sencillo con reportlab, sin dependencias externas."""
+    import re as _re
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.styles import ParagraphStyle
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm)
+    story = []
+    style_titulo = ParagraphStyle("titulo", fontName="Helvetica-Bold", fontSize=16, spaceAfter=10)
+    style_h3 = ParagraphStyle("h3", fontName="Helvetica-Bold", fontSize=12, spaceBefore=10, spaceAfter=4, textColor=rl_colors.Color(13/255, 33/255, 55/255))
+    style_h4 = ParagraphStyle("h4", fontName="Helvetica-Bold", fontSize=10.5, spaceBefore=8, spaceAfter=3, textColor=rl_colors.Color(26/255, 63/255, 92/255))
+    style_normal = ParagraphStyle("normal", fontName="Helvetica", fontSize=9.5, leading=13, spaceAfter=6)
+    style_caption = ParagraphStyle("caption", fontName="Helvetica-Oblique", fontSize=8, textColor=rl_colors.grey, spaceAfter=8)
+
+    story.append(Paragraph(titulo, style_titulo))
+    story.append(Paragraph(f"Generado el {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}", style_caption))
+
+    def _linea_a_html(linea):
+        linea = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", linea)
+        return linea
+
+    for linea in texto_markdown.split("\n"):
+        linea_limpia = linea.strip()
+        if not linea_limpia:
+            story.append(Spacer(1, 3 * mm))
+            continue
+        if linea_limpia.startswith("#### "):
+            story.append(Paragraph(_linea_a_html(linea_limpia[5:]), style_h4))
+        elif linea_limpia.startswith("### "):
+            story.append(Paragraph(_linea_a_html(linea_limpia[4:]), style_h3))
+        elif linea_limpia.startswith("- ") or linea_limpia.startswith("* "):
+            story.append(Paragraph("• " + _linea_a_html(linea_limpia[2:]), style_normal))
+        else:
+            story.append(Paragraph(_linea_a_html(linea_limpia), style_normal))
+
+    doc.build(story)
+    return output.getvalue()
+
+
+def generar_ficha_empresa_ia(ticker: str, nombre_compania: str, barrera_capital_pct: float | None = None, colchon_pct: float | None = None) -> str:
     """
     Usa la API de Claude con búsqueda web para explicar, en dos secciones breves,
     a qué se dedica una compañía y qué noticias recientes son relevantes para su cotización.
@@ -4744,6 +4788,22 @@ def generar_ficha_empresa_ia(ticker: str, nombre_compania: str) -> str:
     y siempre redacta con sus propias palabras, sin copiar frases textuales de las fuentes.
     """
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+    contexto_barrera = ""
+    tercera_seccion = ""
+    if barrera_capital_pct is not None and colchon_pct is not None:
+        contexto_barrera = (
+            f" Dato clave de la nota: la barrera de capital (contingencia) de esta acción está en el "
+            f"{barrera_capital_pct*100:.0f}% de su precio de entrada — la acción tiene un colchón de "
+            f"{colchon_pct:.1f}% de caída antes de poner en riesgo el capital."
+        )
+        tercera_seccion = (
+            "\n\n**Opinión sobre el riesgo de capital:** valora, en 2-3 frases y SOLO con lo que encuentres "
+            "(precio objetivo de analistas, rango de estimaciones, noticias), si una caída de esa magnitud te "
+            "parece plausible o improbable en el horizonte de la nota. El criterio correcto NO es si la acción "
+            "tiene volatilidad alta o noticias negativas en abstracto — es si una caída realista se queda por "
+            "encima de la barrera de capital. Si el colchón es amplio frente a las caídas que manejan los "
+            "analistas, dilo claramente como algo positivo aunque haya ruido de corto plazo en las noticias."
+        )
     try:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -4755,15 +4815,17 @@ def generar_ficha_empresa_ia(ticker: str, nombre_compania: str) -> str:
                 "system": (
                     "Eres un analista senior que prepara fichas rápidas de compañías subyacentes de notas "
                     "estructuradas para un gestor de fondo. Con búsqueda web, redacta en español EXACTAMENTE "
-                    "estas dos secciones, breves y en tus propias palabras (nunca copies frases textuales de "
+                    "estas secciones, breves y en tus propias palabras (nunca copies frases textuales de "
                     "ninguna fuente, parafrasea siempre):\n\n"
                     "**A qué se dedica:** 2-3 frases explicando el negocio principal y de dónde saca ingresos.\n\n"
                     "**Noticias relevantes recientes:** 4-6 líneas con hechos de los últimos 1-2 meses que puedan "
                     "afectar la cotización (resultados financieros, cambios de rating de analistas, noticias "
-                    "regulatorias/legales, eventos corporativos), citando la fuente entre paréntesis.\n\n"
+                    "regulatorias/legales, eventos corporativos), citando la fuente entre paréntesis."
+                    f"{tercera_seccion}\n\n"
                     "Tono profesional, nunca alarmista, sin mayúsculas dramáticas. NUNCA inventes ni menciones un "
                     "precio objetivo o una predicción de precio — eso se muestra aparte con datos reales de mercado. "
                     "Si de verdad no encuentras nada relevante tras buscar, dilo claramente en vez de inventar contenido."
+                    f"{contexto_barrera}"
                 ),
                 "messages": [{"role": "user", "content": f"Prepara la ficha de {nombre_compania} ({ticker})."}],
             },
@@ -4866,6 +4928,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
 
             resultados_notas.append({
                 "nombre": nota["nombre"], "tickers": [t["ticker"] for t in nota["tickers"]],
+                "tickers_full": nota["tickers"],
                 "cupon_anual": nota["cupon_anual"], "meses_venc": nota["meses_venc"],
                 "prob_cupon_media": prob_cupon_media, "prob_call_total": sim["probabilidad_call_total"],
                 "prob_perdida_capital": sim["probabilidad_perdida_capital"], "perdida_pct_promedio": sim["perdida_pct_promedio_si_incumple"],
@@ -4889,15 +4952,25 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     # --- Ficha por compañía subyacente: a qué se dedica, noticias, precio objetivo (dato real) ---
     st.markdown("---")
     st.markdown("### 🏢 Compañías subyacentes de cada nota")
+    bloques_informe = [f"# Informe de comparación de notas — {pd.Timestamp.now().strftime('%d/%m/%Y')}"]
     for r in resultados_notas:
         st.markdown(f"#### {r['nombre']}")
         margen_vs_inversor = r["cupon_anual"] - tasa_inversor_pct
-        color_margen = "positivo" if margen_vs_inversor >= 0.10 else ("normal" if margen_vs_inversor >= 0 else "negativo")
         st.caption(
             f"Cupón nota: {r['cupon_anual']*100:.2f}% anual · Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual · "
             f"Margen bruto teórico (antes de aplicar probabilidades de cobro): {margen_vs_inversor*100:.2f}%"
         )
-        for ticker, fd in zip(r["tickers"], r["fundamentales"]):
+        bloques_informe.append(f"### {r['nombre']}")
+        bloques_informe.append(
+            f"Cupón nota: {r['cupon_anual']*100:.2f}% anual. Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual. "
+            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}%."
+        )
+        colchones_nota = []
+        for t_full, fd in zip(r["tickers_full"], r["fundamentales"]):
+            ticker = t_full["ticker"]
+            barrera_capital_pct = t_full["barrera_capital_pct"]
+            colchon_pct = (1 - barrera_capital_pct) * 100
+            colchones_nota.append(colchon_pct)
             with st.expander(f"📊 {fd.get('nombre') or ticker} ({ticker})", expanded=False):
                 c1, c2, c3 = st.columns(3)
                 with c1:
@@ -4910,15 +4983,22 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     else:
                         tarjeta_kpi("Precio objetivo (consenso analistas)", "N/D", "Sin cobertura o dato no disponible", "normal")
                 with c3:
-                    tarjeta_kpi("Volatilidad anual histórica", f"{fd['volatilidad_anual_pct']:.1f}%" if fd.get("volatilidad_anual_pct") else "N/D", "Últimos 12 meses", "riesgo" if (fd.get("volatilidad_anual_pct") or 0) > 40 else "normal")
+                    tarjeta_kpi("Colchón hasta la barrera de capital", f"{colchon_pct:.1f}%", f"Barrera al {barrera_capital_pct*100:.0f}% del precio de entrada", "normal")
                 if fd.get("target_alto") or fd.get("target_bajo"):
                     st.caption(f"Rango de analistas: ${fd.get('target_bajo', 0):,.2f} — ${fd.get('target_alto', 0):,.2f}  |  {fd.get('n_analistas', '?')} analistas  |  Recomendación consenso: {fd.get('recomendacion', 'N/D')}")
                 if fd.get("aviso_analistas"):
                     st.info(f"ℹ️ {fd['aviso_analistas']}")
                 with st.spinner(f"Buscando información y noticias de {ticker}..."):
-                    ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker)
+                    ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker, barrera_capital_pct, colchon_pct)
                 st.markdown(ficha_texto)
-                st.caption("⚠️ La explicación y las noticias son una síntesis de IA en base a fuentes públicas — el precio y el precio objetivo de arriba sí son datos reales de mercado (Yahoo Finance).")
+                st.caption("⚠️ La explicación, las noticias y la opinión de riesgo son una síntesis de IA en base a fuentes públicas — el precio, el precio objetivo y el colchón de arriba sí son datos reales/calculados.")
+                bloques_informe.append(f"#### {fd.get('nombre') or ticker} ({ticker})")
+                bloques_informe.append(
+                    f"Precio actual: ${fd.get('precio_actual', 0):,.2f} · Precio objetivo consenso analistas: "
+                    f"${fd.get('target_medio', 0):,.2f}" if fd.get("target_medio") else f"Precio actual: ${fd.get('precio_actual', 0):,.2f} · Sin precio objetivo de consenso disponible"
+                )
+                bloques_informe.append(f"Colchón hasta la barrera de capital: {colchon_pct:.1f}% (barrera al {barrera_capital_pct*100:.0f}%).")
+                bloques_informe.append(ficha_texto)
 
     # Recomendación de reparto: razonada por Claude, usando SOLO los números ya calculados
     with st.spinner("Generando recomendación..."):
@@ -4927,7 +5007,8 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             f"prob. media de cobro por periodo {r['prob_cupon_media']*100:.1f}%, prob. call total {r['prob_call_total']*100:.1f}%, "
             f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%), "
             f"rentabilidad neta esperada anualizada {r['rentabilidad_esperada_neta']*100:.2f}%, "
-            f"margen bruto teórico sobre lo que pagamos al inversor: {(r['cupon_anual'] - tasa_inversor_pct)*100:.2f}%"
+            f"margen bruto teórico sobre lo que pagamos al inversor: {(r['cupon_anual'] - tasa_inversor_pct)*100:.2f}%, "
+            f"colchón hasta la barrera de capital por ticker: {', '.join(f'{tk}={(1 - t['barrera_capital_pct'])*100:.1f}%' for tk, t in zip(r['tickers'], r['tickers_full']))}"
             for r in resultados_notas
         )
         api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
@@ -4941,19 +5022,24 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                         "Eres un analista de notas estructuradas para un fondo que se financia captando capital de "
                         "inversores a una tasa fija y desplegándolo en estas notas — el beneficio del fondo es el "
                         "spread entre lo que cobra la nota y lo que paga al inversor. Se te dan métricas YA CALCULADAS "
-                        "(probabilidades de Monte Carlo, rentabilidad esperada y margen bruto teórico sobre la tasa del "
-                        f"inversor, que es {tasa_inversor_pct*100:.2f}% anual) de varias notas candidatas — NO recalcules "
-                        "ni inventes ningún número, solo razona sobre los que se te dan. El criterio de decisión es: "
-                        "maximizar rentabilidad, pero minimizando riesgo salvo que el riesgo adicional sea MODERADO y "
-                        "claramente compensado por la rentabilidad. Ten en cuenta explícitamente que el margen sobre la "
-                        "tasa del inversor tiene que ser sustancial para que compense el riesgo asumido por el fondo — "
-                        "un cupón que apenas supere la tasa del inversor no es atractivo aunque la probabilidad de cobro "
-                        "sea alta, porque el fondo absorbe toda la pérdida si la nota falla. Puede recomendar repartir "
-                        "entre varias notas o poner todo el capital en una sola si está claramente justificado. "
-                        f"Capital disponible total: ${capital_disponible:,.2f}. "
+                        "(probabilidades de Monte Carlo, rentabilidad esperada, margen bruto teórico sobre la tasa del "
+                        f"inversor —que es {tasa_inversor_pct*100:.2f}% anual— y el colchón hasta la barrera de capital "
+                        "de cada ticker) de varias notas candidatas — NO recalcules ni inventes ningún número, solo "
+                        "razona sobre los que se te dan. El criterio de decisión es: maximizar rentabilidad, pero "
+                        "minimizando riesgo salvo que el riesgo adicional sea MODERADO y claramente compensado por la "
+                        "rentabilidad. Ten en cuenta explícitamente dos cosas: (1) el margen sobre la tasa del inversor "
+                        "tiene que ser sustancial para que compense el riesgo asumido por el fondo — un cupón que "
+                        "apenas supere la tasa del inversor no es atractivo aunque la probabilidad de cobro sea alta, "
+                        "porque el fondo absorbe toda la pérdida si la nota falla; (2) el criterio correcto de riesgo "
+                        "de capital NO es la volatilidad genérica de la acción ni si tiene noticias negativas — es si "
+                        "una caída realista y plausible se queda por encima de la barrera de capital (contingencia). "
+                        "Si el colchón hasta la barrera es amplio frente a las caídas que manejan los analistas, la "
+                        "nota es atractiva pese al ruido de corto plazo, porque el cupón ya compensa ese riesgo puntual. "
+                        "Puede recomendar repartir entre varias notas o poner todo el capital en una sola si está "
+                        f"claramente justificado. Capital disponible total: ${capital_disponible:,.2f}. "
                         "Da una recomendación de reparto de capital en dólares para cada nota, con el razonamiento "
-                        "concreto (qué compensa qué, incluyendo el margen sobre la tasa del inversor), en español, "
-                        "conciso pero completo."
+                        "concreto (qué compensa qué, incluyendo el margen sobre la tasa del inversor y el colchón hasta "
+                        "la barrera de capital), en español, conciso pero completo."
                     ),
                     "messages": [{"role": "user", "content": f"Notas candidatas:\n{resumen_texto}\n\nRecomienda cómo repartir el capital disponible."}],
                 },
@@ -4967,6 +5053,20 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     st.markdown("### 🎯 Recomendación de reparto")
     st.markdown(texto_recomendacion or "No se pudo generar una recomendación.")
     st.caption("Simulación Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.")
+
+    bloques_informe.append("### 🎯 Recomendación de reparto")
+    bloques_informe.append(texto_recomendacion or "No se pudo generar una recomendación.")
+
+    # --- Descarga del informe completo en PDF ---
+    st.markdown("---")
+    with st.spinner("Preparando PDF..."):
+        pdf_bytes = _informe_ia_a_pdf("Comparador de notas — Informe", "\n\n".join(bloques_informe))
+    st.download_button(
+        "⬇️ Descargar este informe en PDF",
+        data=pdf_bytes,
+        file_name=f"comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf",
+        mime="application/pdf",
+    )
 
 
 
