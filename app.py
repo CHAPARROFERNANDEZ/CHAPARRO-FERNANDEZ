@@ -4825,8 +4825,8 @@ def generar_ficha_empresa_ia(
             headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
             json={
                 "model": "claude-sonnet-4-5",
-                "max_tokens": 1000,
-                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                "max_tokens": 1400,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}],
                 "system": (
                     "Eres un analista senior que prepara fichas rápidas de compañías subyacentes de notas "
                     "estructuradas para un gestor de fondo. Con búsqueda web, redacta en español EXACTAMENTE "
@@ -4851,14 +4851,25 @@ def generar_ficha_empresa_ia(
             msg = data.get("error", {}).get("message", str(data))
             return f"⚠️ No se pudo generar la ficha de {ticker}: error de la API ({msg})."
         contenido = data.get("content", [])
+        hubo_error_busqueda_critico = False
         for bloque in contenido:
             if bloque.get("type") == "web_search_tool_result":
                 resultado_bloque = bloque.get("content", {})
                 if isinstance(resultado_bloque, dict) and resultado_bloque.get("type") == "web_search_tool_result_error":
                     codigo_error = resultado_bloque.get("error_code", "desconocido")
-                    return f"⚠️ La búsqueda web falló para {ticker} (código: {codigo_error})."
-        texto = "".join(b.get("text", "") for b in contenido if b.get("type") == "text")
-        return texto.strip() or f"No se encontró información relevante para {ticker} tras buscar."
+                    # "max_uses_exceeded" es benigno: la IA ya hizo varias búsquedas útiles antes de
+                    # tocar el límite y normalmente sigue redactando con lo que ya encontró — no hay
+                    # que descartar ese texto. Otros códigos (permisos, servicio no disponible, etc.)
+                    # sí son un fallo real de la búsqueda.
+                    if codigo_error != "max_uses_exceeded":
+                        hubo_error_busqueda_critico = True
+                        codigo_error_critico = codigo_error
+        texto = "".join(b.get("text", "") for b in contenido if b.get("type") == "text").strip()
+        if texto:
+            return texto
+        if hubo_error_busqueda_critico:
+            return f"⚠️ La búsqueda web falló para {ticker} (código: {codigo_error_critico})."
+        return f"No se encontró información relevante para {ticker} tras buscar."
     except Exception as e:
         return f"⚠️ No se pudo generar la ficha de {ticker} (error de conexión): {e}"
 
