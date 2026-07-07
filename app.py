@@ -1039,7 +1039,10 @@ def cargar_excel_completo():
 
 
 def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
+    import os
     try:
+        if not os.path.exists(ARCHIVO):
+            descargar_excel_desde_drive()
         df = pd.read_excel(ARCHIVO, sheet_name=nombre_hoja)
         df.columns = [str(c).strip().lower() for c in df.columns]
         return df
@@ -4122,6 +4125,46 @@ REGLAS:
         return {"error": f"No se pudo interpretar la respuesta de la IA como JSON: {e}", "respuesta_cruda": texto}
 
 
+def _reconstruir_extraido_desde_tablas(extraido: dict, df_control_editado: pd.DataFrame, df_cal_editado: pd.DataFrame, df_calls_editado: pd.DataFrame) -> dict:
+    """
+    Reconstruye la estructura 'extraido' (la misma que devuelve la IA) tomando como
+    fuente de verdad las correcciones manuales que el usuario ya hizo en las tablas
+    editables (st.data_editor), para poder volver a guardarlas como borrador y que
+    sobrevivan a un redeploy sin perder el trabajo de revisión.
+    """
+    import itertools
+    nuevo = dict(extraido)  # conserva emisor/cupon/fecha_vencimiento/fecha_inicio_nota si no están en tablas
+
+    tickers = []
+    for _, fila in df_control_editado.iterrows():
+        tickers.append({
+            "ticker": fila.get("TICKER"),
+            "barrera_cupon_pct": fila.get("BARRERA_CUPON"),
+            "call_level_pct": fila.get("CALL_LEVEL"),
+            "barrera_capital_pct": fila.get("BARRERA_CAPITAL"),
+        })
+    nuevo["tickers"] = tickers
+
+    if not df_control_editado.empty:
+        emisor_col = df_control_editado.get("EMISOR")
+        if emisor_col is not None and not emisor_col.dropna().empty:
+            nuevo["emisor"] = emisor_col.dropna().iloc[0]
+        for campo_bool, col in [("tiene_memoria", "TIENE_MEMORIA"), ("tiene_one_star", "TIENE_ONE_STAR")]:
+            col_serie = df_control_editado.get(col)
+            if col_serie is not None and not col_serie.dropna().empty:
+                nuevo[campo_bool] = str(col_serie.dropna().iloc[0]).strip().upper() == "SI"
+
+    obs_rows = df_cal_editado[df_cal_editado.get("TIPO_EVENTO") == "OBSERVACION"]["FECHA"].tolist() if not df_cal_editado.empty else []
+    pago_rows = df_cal_editado[df_cal_editado.get("TIPO_EVENTO") == "PAGO"]["FECHA"].tolist() if not df_cal_editado.empty else []
+    nuevo["calendario"] = [
+        {"observacion": o, "pago": p} for o, p in itertools.zip_longest(obs_rows, pago_rows, fillvalue=None)
+    ]
+
+    nuevo["fechas_call"] = df_calls_editado["FECHA_CALL"].tolist() if not df_calls_editado.empty and "FECHA_CALL" in df_calls_editado.columns else []
+
+    return nuevo
+
+
 def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
     st.caption(
         "Sube el documento oficial (pricing supplement) de una nota nueva. La IA extrae automáticamente "
@@ -4247,7 +4290,13 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
     if hay_revisar:
         st.warning("Hay campos marcados con ⚠️ REVISAR — corrígelos en las tablas de arriba antes de guardar.")
 
-    col_guardar, col_descartar = st.columns([1, 1])
+    col_guardar, col_avance, col_descartar = st.columns([1, 1, 1])
+    with col_avance:
+        if st.button(f"📌 Guardar avance de mis correcciones", help="Guarda en Google Drive lo que ya has corregido en las tablas de arriba, aunque todavía queden ⚠️ REVISAR. Útil antes de tocar el código, para no perder tus correcciones al redesplegar."):
+            extraido_actualizado = _reconstruir_extraido_desde_tablas(extraido, df_control_editado, df_cal_editado, df_calls_editado)
+            almacen[numero_nota] = extraido_actualizado
+            with st.spinner("Guardando avance..."):
+                guardar_borrador_nota("nueva", numero_nota, extraido_actualizado)
     with col_guardar:
         if st.button(f"💾 Guardar Nota {numero_nota} en el Excel", type="primary", disabled=hay_revisar):
             hojas = leer_todas_las_hojas_excel()
@@ -4687,6 +4736,56 @@ def _generar_horario_eventos(meses_vencimiento: int, periodicidad: int) -> list:
     return eventos
 
 
+def generar_ficha_empresa_ia(ticker: str, nombre_compania: str) -> str:
+    """
+    Usa la API de Claude con búsqueda web para explicar, en dos secciones breves,
+    a qué se dedica una compañía y qué noticias recientes son relevantes para su cotización.
+    Nunca inventa precios objetivo (esos se muestran aparte con datos reales de Yahoo Finance)
+    y siempre redacta con sus propias palabras, sin copiar frases textuales de las fuentes.
+    """
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 900,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                "system": (
+                    "Eres un analista senior que prepara fichas rápidas de compañías subyacentes de notas "
+                    "estructuradas para un gestor de fondo. Con búsqueda web, redacta en español EXACTAMENTE "
+                    "estas dos secciones, breves y en tus propias palabras (nunca copies frases textuales de "
+                    "ninguna fuente, parafrasea siempre):\n\n"
+                    "**A qué se dedica:** 2-3 frases explicando el negocio principal y de dónde saca ingresos.\n\n"
+                    "**Noticias relevantes recientes:** 4-6 líneas con hechos de los últimos 1-2 meses que puedan "
+                    "afectar la cotización (resultados financieros, cambios de rating de analistas, noticias "
+                    "regulatorias/legales, eventos corporativos), citando la fuente entre paréntesis.\n\n"
+                    "Tono profesional, nunca alarmista, sin mayúsculas dramáticas. NUNCA inventes ni menciones un "
+                    "precio objetivo o una predicción de precio — eso se muestra aparte con datos reales de mercado. "
+                    "Si de verdad no encuentras nada relevante tras buscar, dilo claramente en vez de inventar contenido."
+                ),
+                "messages": [{"role": "user", "content": f"Prepara la ficha de {nombre_compania} ({ticker})."}],
+            },
+            timeout=60,
+        )
+        data = resp.json()
+        if data.get("type") == "error" or data.get("error"):
+            msg = data.get("error", {}).get("message", str(data))
+            return f"⚠️ No se pudo generar la ficha de {ticker}: error de la API ({msg})."
+        contenido = data.get("content", [])
+        for bloque in contenido:
+            if bloque.get("type") == "web_search_tool_result":
+                resultado_bloque = bloque.get("content", {})
+                if isinstance(resultado_bloque, dict) and resultado_bloque.get("type") == "web_search_tool_result_error":
+                    codigo_error = resultado_bloque.get("error_code", "desconocido")
+                    return f"⚠️ La búsqueda web falló para {ticker} (código: {codigo_error})."
+        texto = "".join(b.get("text", "") for b in contenido if b.get("type") == "text")
+        return texto.strip() or f"No se encontró información relevante para {ticker} tras buscar."
+    except Exception as e:
+        return f"⚠️ No se pudo generar la ficha de {ticker} (error de conexión): {e}"
+
+
 def _tab_comparador_notas(df_control: pd.DataFrame):
     st.caption(
         "Introduce entre 1 y 3 notas candidatas con sus términos, y tu capital disponible. "
@@ -4720,7 +4819,14 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             periodicidad = st.selectbox(f"Periodicidad", [1, 3], format_func=lambda x: "Mensual" if x == 1 else "Trimestral", key=f"comp_period_{i}")
             notas_input.append({"nombre": nombre, "tickers": tickers_nota, "cupon_anual": cupon_anual, "meses_venc": meses_venc, "periodicidad": periodicidad})
 
-    capital_disponible = st.number_input("💰 Capital disponible a repartir ($)", min_value=0.0, value=100000.0, step=1000.0)
+    col_cap, col_tasa = st.columns(2)
+    with col_cap:
+        capital_disponible = st.number_input("💰 Capital disponible a repartir ($)", min_value=0.0, value=100000.0, step=1000.0)
+    with col_tasa:
+        tasa_inversor_pct = st.number_input(
+            "📤 Tasa que pagamos al inversor (% anual)", min_value=0.0, max_value=100.0, value=15.0, step=0.5,
+            help="El margen real de la nota es cupón de la nota MENOS esta tasa. Se usa para juzgar si el interés de la nota compensa lo que le pagamos al inversor.",
+        ) / 100
 
     if not st.button("⚖️ Comparar y recomendar", type="primary"):
         return
@@ -4780,13 +4886,48 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     } for r in resultados_notas])
     st.dataframe(df_resumen, use_container_width=True, hide_index=True)
 
+    # --- Ficha por compañía subyacente: a qué se dedica, noticias, precio objetivo (dato real) ---
+    st.markdown("---")
+    st.markdown("### 🏢 Compañías subyacentes de cada nota")
+    for r in resultados_notas:
+        st.markdown(f"#### {r['nombre']}")
+        margen_vs_inversor = r["cupon_anual"] - tasa_inversor_pct
+        color_margen = "positivo" if margen_vs_inversor >= 0.10 else ("normal" if margen_vs_inversor >= 0 else "negativo")
+        st.caption(
+            f"Cupón nota: {r['cupon_anual']*100:.2f}% anual · Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual · "
+            f"Margen bruto teórico (antes de aplicar probabilidades de cobro): {margen_vs_inversor*100:.2f}%"
+        )
+        for ticker, fd in zip(r["tickers"], r["fundamentales"]):
+            with st.expander(f"📊 {fd.get('nombre') or ticker} ({ticker})", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    tarjeta_kpi("Precio actual", f"${fd['precio_actual']:,.2f}" if fd.get("precio_actual") else "N/D", fd.get("sector") or "", "normal")
+                with c2:
+                    if fd.get("target_medio"):
+                        var_target = (fd["target_medio"] / fd["precio_actual"] - 1) * 100 if fd.get("precio_actual") else None
+                        sub = f"{var_target:+.1f}% vs precio actual" if var_target is not None else ""
+                        tarjeta_kpi("Precio objetivo (consenso analistas)", f"${fd['target_medio']:,.2f}", sub, "positivo" if (var_target or 0) >= 0 else "negativo")
+                    else:
+                        tarjeta_kpi("Precio objetivo (consenso analistas)", "N/D", "Sin cobertura o dato no disponible", "normal")
+                with c3:
+                    tarjeta_kpi("Volatilidad anual histórica", f"{fd['volatilidad_anual_pct']:.1f}%" if fd.get("volatilidad_anual_pct") else "N/D", "Últimos 12 meses", "riesgo" if (fd.get("volatilidad_anual_pct") or 0) > 40 else "normal")
+                if fd.get("target_alto") or fd.get("target_bajo"):
+                    st.caption(f"Rango de analistas: ${fd.get('target_bajo', 0):,.2f} — ${fd.get('target_alto', 0):,.2f}  |  {fd.get('n_analistas', '?')} analistas  |  Recomendación consenso: {fd.get('recomendacion', 'N/D')}")
+                if fd.get("aviso_analistas"):
+                    st.info(f"ℹ️ {fd['aviso_analistas']}")
+                with st.spinner(f"Buscando información y noticias de {ticker}..."):
+                    ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker)
+                st.markdown(ficha_texto)
+                st.caption("⚠️ La explicación y las noticias son una síntesis de IA en base a fuentes públicas — el precio y el precio objetivo de arriba sí son datos reales de mercado (Yahoo Finance).")
+
     # Recomendación de reparto: razonada por Claude, usando SOLO los números ya calculados
     with st.spinner("Generando recomendación..."):
         resumen_texto = "\n".join(
             f"- {r['nombre']} ({', '.join(r['tickers'])}): cupón {r['cupon_anual']*100:.1f}% anual, "
             f"prob. media de cobro por periodo {r['prob_cupon_media']*100:.1f}%, prob. call total {r['prob_call_total']*100:.1f}%, "
             f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%), "
-            f"rentabilidad neta esperada anualizada {r['rentabilidad_esperada_neta']*100:.2f}%"
+            f"rentabilidad neta esperada anualizada {r['rentabilidad_esperada_neta']*100:.2f}%, "
+            f"margen bruto teórico sobre lo que pagamos al inversor: {(r['cupon_anual'] - tasa_inversor_pct)*100:.2f}%"
             for r in resultados_notas
         )
         api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
@@ -4797,15 +4938,22 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 json={
                     "model": "claude-sonnet-4-5", "max_tokens": 1200,
                     "system": (
-                        "Eres un analista de notas estructuradas. Se te dan métricas YA CALCULADAS (probabilidades de "
-                        "Monte Carlo y rentabilidad esperada) de varias notas candidatas — NO recalcules ni inventes "
-                        "ningún número, solo razona sobre los que se te dan. El criterio de decisión del usuario es: "
+                        "Eres un analista de notas estructuradas para un fondo que se financia captando capital de "
+                        "inversores a una tasa fija y desplegándolo en estas notas — el beneficio del fondo es el "
+                        "spread entre lo que cobra la nota y lo que paga al inversor. Se te dan métricas YA CALCULADAS "
+                        "(probabilidades de Monte Carlo, rentabilidad esperada y margen bruto teórico sobre la tasa del "
+                        f"inversor, que es {tasa_inversor_pct*100:.2f}% anual) de varias notas candidatas — NO recalcules "
+                        "ni inventes ningún número, solo razona sobre los que se te dan. El criterio de decisión es: "
                         "maximizar rentabilidad, pero minimizando riesgo salvo que el riesgo adicional sea MODERADO y "
-                        "claramente compensado por la rentabilidad. Puede recomendar repartir entre varias notas o "
-                        "poner todo el capital en una sola si está claramente justificado. "
+                        "claramente compensado por la rentabilidad. Ten en cuenta explícitamente que el margen sobre la "
+                        "tasa del inversor tiene que ser sustancial para que compense el riesgo asumido por el fondo — "
+                        "un cupón que apenas supere la tasa del inversor no es atractivo aunque la probabilidad de cobro "
+                        "sea alta, porque el fondo absorbe toda la pérdida si la nota falla. Puede recomendar repartir "
+                        "entre varias notas o poner todo el capital en una sola si está claramente justificado. "
                         f"Capital disponible total: ${capital_disponible:,.2f}. "
                         "Da una recomendación de reparto de capital en dólares para cada nota, con el razonamiento "
-                        "concreto (qué compensa qué), en español, conciso pero completo."
+                        "concreto (qué compensa qué, incluyendo el margen sobre la tasa del inversor), en español, "
+                        "conciso pero completo."
                     ),
                     "messages": [{"role": "user", "content": f"Notas candidatas:\n{resumen_texto}\n\nRecomienda cómo repartir el capital disponible."}],
                 },
@@ -4819,6 +4967,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     st.markdown("### 🎯 Recomendación de reparto")
     st.markdown(texto_recomendacion or "No se pudo generar una recomendación.")
     st.caption("Simulación Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.")
+
 
 
 def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, df_calls: pd.DataFrame):
@@ -6608,7 +6757,10 @@ def seccion_extractos():
 # =========================
 def leer_todas_las_hojas_excel() -> dict:
     """Lee todas las hojas del archivo Excel para poder conservarlas al guardar."""
+    import os
     try:
+        if not os.path.exists(ARCHIVO):
+            descargar_excel_desde_drive()
         hojas = pd.read_excel(ARCHIVO, sheet_name=None)
         return {str(nombre): df for nombre, df in hojas.items()}
     except Exception:
