@@ -4399,31 +4399,50 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
     # --- Solo consultar lo que ya está guardado, sin necesidad de subir el PDF de nuevo ---
     with st.expander("📂 Solo consultar los datos ya guardados (sin subir PDF)", expanded=False):
         nota_consulta = st.selectbox("Nota a consultar", notas_existentes, key="consultar_nota_guardada_numero")
-        if st.button("🔎 Mostrar datos guardados", key="btn_consultar_nota_guardada"):
-            control_n = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == nota_consulta].copy()
-            st.markdown(f"**Tickers y barreras (CONTROL_NOTAS) — Nota {nota_consulta}:**")
-            cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
-            st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
 
-            if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
-                cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
-                st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
-                if cal_n.empty:
-                    st.caption("Sin eventos guardados para esta nota.")
-                else:
-                    cols_cal = [c for c in ["tipo_evento", "fecha"] if c in cal_n.columns]
-                    st.dataframe(cal_n[cols_cal].sort_values("fecha") if "fecha" in cal_n.columns else cal_n[cols_cal], use_container_width=True, hide_index=True)
+        control_n = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == nota_consulta].copy()
+        st.markdown(f"**Tickers y barreras (CONTROL_NOTAS) — Nota {nota_consulta}:**")
+        cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
+        st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
 
-            if df_calls is not None and not df_calls.empty and "nota" in df_calls.columns:
-                calls_n = df_calls[pd.to_numeric(df_calls["nota"], errors="coerce") == nota_consulta].copy()
-                st.markdown("**Fechas de posible call (CALENDARIO_CALLS):**")
-                if calls_n.empty:
-                    st.caption("Sin fechas de call guardadas para esta nota.")
-                else:
-                    cols_calls = [c for c in ["fecha_call", "estado", "observaciones"] if c in calls_n.columns]
-                    st.dataframe(calls_n[cols_calls], use_container_width=True, hide_index=True)
+        if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
+            cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
+            st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
+            if cal_n.empty:
+                st.caption("Sin eventos guardados para esta nota.")
+            else:
+                cols_cal = [c for c in ["tipo_evento", "fecha"] if c in cal_n.columns]
+                st.dataframe(cal_n[cols_cal].sort_values("fecha") if "fecha" in cal_n.columns else cal_n[cols_cal], use_container_width=True, hide_index=True)
 
-            st.caption("👁️ Solo lectura. Para comparar contra el PDF oficial y detectar discrepancias, usa el auditor de abajo.")
+        if df_calls is not None and not df_calls.empty and "nota" in df_calls.columns:
+            calls_n = df_calls[pd.to_numeric(df_calls["nota"], errors="coerce") == nota_consulta].copy()
+            st.markdown("**Fechas de posible call (CALENDARIO_CALLS):**")
+            if calls_n.empty:
+                st.caption("Sin fechas de call guardadas para esta nota.")
+            else:
+                cols_calls = [c for c in ["fecha_call", "estado", "observaciones"] if c in calls_n.columns]
+                st.dataframe(calls_n[cols_calls], use_container_width=True, hide_index=True)
+
+        # Última auditoría YA GUARDADA con el botón "Guardar esta auditoría" — al guardarla se
+        # borra el borrador (para no dejar dos copias del mismo dato), así que la única forma de
+        # volver a verla es leerla de vuelta de AUDITORIA_NOTAS, sin necesidad del PDF de nuevo.
+        df_audit = leer_hoja_excel("AUDITORIA_NOTAS")
+        st.markdown("**Última auditoría guardada (AUDITORIA_NOTAS):**")
+        if df_audit.empty or "nota" not in df_audit.columns:
+            st.caption("Todavía no se ha guardado ninguna auditoría para ninguna nota.")
+        else:
+            audit_n = df_audit[pd.to_numeric(df_audit["nota"], errors="coerce") == nota_consulta].copy()
+            if audit_n.empty:
+                st.caption(f"Todavía no se ha guardado ninguna auditoría para la Nota {nota_consulta}.")
+            else:
+                audit_n["fecha_auditoria"] = pd.to_datetime(audit_n.get("fecha_auditoria"), errors="coerce")
+                ultima_fecha = audit_n["fecha_auditoria"].max()
+                audit_ultima = audit_n[audit_n["fecha_auditoria"] == ultima_fecha]
+                st.caption(f"Auditada el {ultima_fecha.strftime('%d/%m/%Y %H:%M') if pd.notna(ultima_fecha) else '(fecha desconocida)'}")
+                cols_audit = [c for c in ["campo", "en_excel", "en_pdf", "estado"] if c in audit_ultima.columns]
+                st.dataframe(audit_ultima[cols_audit], use_container_width=True, hide_index=True)
+
+        st.caption("👁️ Solo lectura. Para volver a comparar contra el PDF oficial y detectar nuevas discrepancias, usa el auditor de abajo (necesita subir el PDF otra vez).")
 
     st.markdown("---")
     numero_nota = st.selectbox("Nota a auditar", notas_existentes, key="auditar_nota_numero")
