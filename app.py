@@ -1600,7 +1600,7 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
     analistas cubriendo esta acción) y "no se pudo consultar" (fallo temporal de conexión).
     """
     resultado = {
-        "ticker": ticker, "precio_actual": None, "sector": None, "nombre": None,
+        "ticker": ticker, "precio_actual": None, "sector": None, "industria": None, "nombre": None,
         "market_cap": None, "target_medio": None, "target_alto": None, "target_bajo": None,
         "n_analistas": None, "recomendacion": None, "volatilidad_anual_pct": None,
         "proxima_fecha_resultados": None, "variacion_1m_pct": None, "variacion_ytd_pct": None,
@@ -1632,6 +1632,7 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
         else:
             resultado["nombre"] = info.get("longName") or info.get("shortName")
             resultado["sector"] = info.get("sector")
+            resultado["industria"] = info.get("industry")
             resultado["market_cap"] = info.get("marketCap")
             resultado["target_medio"] = info.get("targetMeanPrice")
             resultado["target_alto"] = info.get("targetHighPrice")
@@ -3376,7 +3377,7 @@ def calcular_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFram
     control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
     control = control.dropna(subset=["nota"])
 
-    filas_emisor, filas_sector, notas_sin_emisor = [], [], []
+    filas_emisor, filas_sector, filas_industria, notas_sin_emisor = [], [], [], []
     for nota_num in sorted(control["nota"].unique()):
         filas_nota = control[control["nota"] == nota_num]
         nombre_activo = f"NOTA_{int(nota_num):02d}"
@@ -3399,7 +3400,9 @@ def calcular_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFram
         if primer_ticker:
             fd = obtener_datos_fundamentales(primer_ticker)
             sector = fd.get("sector") or "Sin sector (Yahoo Finance no lo devolvió)"
+            industria = fd.get("industria") or "Sin industria (Yahoo Finance no lo devolvió)"
             filas_sector.append({"Sector": sector, "Capital": capital_nota, "Nota": int(nota_num), "Ticker representativo": primer_ticker})
+            filas_industria.append({"Industria": industria, "Capital": capital_nota, "Nota": int(nota_num), "Ticker representativo": primer_ticker})
 
     if filas_emisor:
         df_e = pd.DataFrame(filas_emisor).groupby("Emisor", as_index=False)["Capital"].sum().sort_values("Capital", ascending=False)
@@ -3413,6 +3416,12 @@ def calcular_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFram
         df_s["% del total"] = (df_s["Capital"] / total_s * 100).round(1)
         resultado["por_sector"] = df_s
 
+    if filas_industria:
+        df_i = pd.DataFrame(filas_industria).groupby("Industria", as_index=False)["Capital"].sum().sort_values("Capital", ascending=False)
+        total_i = df_i["Capital"].sum()
+        df_i["% del total"] = (df_i["Capital"] / total_i * 100).round(1)
+        resultado["por_industria"] = df_i
+
     resultado["notas_sin_emisor"] = notas_sin_emisor
     return resultado
 
@@ -3420,14 +3429,14 @@ def calcular_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFram
 def _tab_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFrame):
     st.markdown("### 🧭 Concentración de la cartera de notas")
     st.caption(
-        "Capital activo hoy repartido por emisor (banco) y por sector de la compañía subyacente "
-        "(clasificación real de Yahoo Finance — no hay una categoría específica de 'IA', se usa el "
-        "sector/industria tal como lo clasifica el mercado)."
+        "Capital activo hoy repartido por emisor (banco), por sector y por industria de la compañía "
+        "subyacente (clasificación real de Yahoo Finance — la industria es más fina que el sector, ej. "
+        "sector 'Technology' → industria 'Semiconductors' o 'Software - Infrastructure')."
     )
     with st.spinner("Calculando concentración..."):
         conc = calcular_concentracion_cartera(df_inv, df_control)
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("#### Por emisor (banco)")
         if conc["por_emisor"].empty:
@@ -3449,6 +3458,17 @@ def _tab_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFrame):
             df_mostrar["% del total"] = df_mostrar["% del total"].apply(lambda x: f"{x:.1f}%")
             st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
             st.bar_chart(conc["por_sector"].set_index("Sector")["Capital"])
+
+    with col3:
+        st.markdown("#### Por industria (más granular)")
+        if conc["por_industria"].empty:
+            st.info("No hay datos suficientes.")
+        else:
+            df_mostrar = conc["por_industria"][["Industria", "Capital", "% del total"]].copy()
+            df_mostrar["Capital"] = df_mostrar["Capital"].apply(lambda x: fmt(x))
+            df_mostrar["% del total"] = df_mostrar["% del total"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+            st.bar_chart(conc["por_industria"].set_index("Industria")["Capital"])
 
     if conc.get("notas_sin_emisor"):
         st.warning(
@@ -4204,7 +4224,7 @@ def _reconstruir_extraido_desde_tablas(extraido: dict, df_control_editado: pd.Da
     return nuevo
 
 
-def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
+def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_calls: pd.DataFrame = None):
     st.caption(
         "Sube el documento oficial (pricing supplement) de una nota nueva. La IA extrae automáticamente "
         "tickers, precios iniciales, barreras, cupón y el calendario de observación/pago. "
@@ -4214,6 +4234,47 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame):
         "verás el formulario en blanco para una nota sin empezar, o los datos ya extraídos si vuelves "
         "a un número en el que ya trabajaste."
     )
+
+    # --- Consultar una nota YA GUARDADA en el Excel (definitiva, sin PDF) ---
+    # Una vez pulsas "Guardar Nota X en el Excel", el borrador se borra (para no duplicar datos) y
+    # esa nota deja de aparecer arriba. Esto es solo para VOLVER A VER lo que ya quedó guardado de
+    # forma definitiva en CONTROL_NOTAS/CALENDARIO_NOTAS/CALENDARIO_CALLS — por ejemplo, después de
+    # tocar el código y redesplegar. Es de solo lectura: no permite volver a guardarla (para no duplicar filas).
+    notas_ya_guardadas = sorted(
+        int(n) for n in pd.to_numeric(df_control.get("nota", pd.Series(dtype=float)), errors="coerce").dropna().unique()
+    ) if df_control is not None and not df_control.empty else []
+    with st.expander("📂 Consultar una nota YA GUARDADA en el Excel (no necesita el PDF)", expanded=False):
+        if not notas_ya_guardadas:
+            st.info("Todavía no hay ninguna nota guardada en CONTROL_NOTAS.")
+        else:
+            nota_consulta = st.selectbox("Nota guardada a consultar", notas_ya_guardadas, key="consultar_nota_guardada_numero")
+            if st.button("🔎 Mostrar datos guardados", key="btn_consultar_nota_guardada"):
+                control_n = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == nota_consulta].copy()
+                st.markdown(f"**Tickers y barreras (CONTROL_NOTAS) — Nota {nota_consulta}:**")
+                cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
+                st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
+
+                if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
+                    cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
+                    st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
+                    if cal_n.empty:
+                        st.caption("Sin eventos guardados para esta nota.")
+                    else:
+                        cols_cal = [c for c in ["tipo_evento", "fecha"] if c in cal_n.columns]
+                        st.dataframe(cal_n[cols_cal].sort_values("fecha") if "fecha" in cal_n.columns else cal_n[cols_cal], use_container_width=True, hide_index=True)
+
+                if df_calls is not None and not df_calls.empty and "nota" in df_calls.columns:
+                    calls_n = df_calls[pd.to_numeric(df_calls["nota"], errors="coerce") == nota_consulta].copy()
+                    st.markdown("**Fechas de posible call (CALENDARIO_CALLS):**")
+                    if calls_n.empty:
+                        st.caption("Sin fechas de call guardadas para esta nota.")
+                    else:
+                        cols_calls = [c for c in ["fecha_call", "estado", "observaciones"] if c in calls_n.columns]
+                        st.dataframe(calls_n[cols_calls], use_container_width=True, hide_index=True)
+
+                st.caption("👁️ Solo lectura — para corregir algo de una nota ya guardada, usa '🔍 Auditar nota existente' o edita directamente el Excel.")
+
+    st.markdown("---")
 
     if "notas_wizard_datos" not in st.session_state:
         st.session_state["notas_wizard_datos"] = {}
@@ -5308,7 +5369,7 @@ def seccion_notas_archivo():
     ])
 
     with tab_nueva:
-        _tab_añadir_nota_nueva(df_control, df_cal)
+        _tab_añadir_nota_nueva(df_control, df_cal, df_calls)
 
     with tab_auditar:
         _tab_auditar_nota(df_inv, df_cal, df_control, df_calls)
@@ -8401,6 +8462,49 @@ def seccion_asistente_ia_fondo():
         except Exception as e:
             lineas.append(f"[Error extracto acumulado: {e}]")
 
+        # ══════════════════════════════════════════════════════════════════════
+        # 7. NOTAS EN BORRADOR (extraídas por IA en el wizard, AÚN NO GUARDADAS)
+        # ══════════════════════════════════════════════════════════════════════
+        try:
+            import json as _json_ia
+            df_borr = leer_hoja_excel("BORRADORES_NOTAS")
+            if not df_borr.empty:
+                df_borr.columns = [str(c).strip().upper() for c in df_borr.columns]
+                lineas.append("\n=== NOTAS EN BORRADOR — EXTRAÍDAS POR IA EN EL WIZARD, TODAVÍA NO GUARDADAS EN CONTROL_NOTAS ===")
+                lineas.append(
+                    "(IMPORTANTE: esto NO son posiciones activas ni confirmadas — es una extracción de un PDF que "
+                    "Yuri está revisando en 'Notas estructuradas → Añadir nota nueva / Auditar nota existente'. "
+                    "Si te pregunta por una de estas notas, acláraselo explícitamente ('esto es un borrador, aún no "
+                    "guardado') y avisa de que puede haber campos marcados como REVISAR pendientes de corregir. "
+                    "NUNCA mezcles estos datos con las notas oficiales de CONTROL_NOTAS al calcular capital, cobros "
+                    "o beneficios — son fuentes completamente distintas.)"
+                )
+                for _, fila_b in df_borr.iterrows():
+                    tipo_b = str(fila_b.get("TIPO", "")).strip()
+                    nota_b = fila_b.get("NOTA", "")
+                    try:
+                        datos_b = _json_ia.loads(fila_b.get("JSON_DATOS", "{}"))
+                    except Exception:
+                        continue
+                    etiqueta_tipo = "nueva nota, aún no creada en CONTROL_NOTAS" if tipo_b == "nueva" else "auditoría en curso de una nota ya existente"
+                    lineas.append(f"\n-- Borrador Nota {nota_b} ({etiqueta_tipo}) --")
+                    lineas.append(f"  Emisor: {datos_b.get('emisor', 'REVISAR')} | Cupón anual: {datos_b.get('cupon_anual_pct', 'REVISAR')} | Vencimiento: {datos_b.get('fecha_vencimiento', 'REVISAR')}")
+                    tickers_b = datos_b.get("tickers", [])
+                    if tickers_b:
+                        resumen_tk = ", ".join(
+                            f"{t.get('ticker','?')} (barrera cupón {t.get('barrera_cupon_pct','REVISAR')}, barrera capital {t.get('barrera_capital_pct','REVISAR')}, call {t.get('call_level_pct','REVISAR')})"
+                            for t in tickers_b
+                        )
+                        lineas.append(f"  Tickers: {resumen_tk}")
+                    calendario_b = datos_b.get("calendario", [])
+                    if calendario_b:
+                        lineas.append(f"  Calendario: {len(calendario_b)} eventos de observación/pago extraídos")
+                    fechas_call_b = datos_b.get("fechas_call", [])
+                    if fechas_call_b:
+                        lineas.append(f"  Fechas de posible call: {', '.join(str(f) for f in fechas_call_b)}")
+        except Exception as e:
+            lineas.append(f"[Error notas en borrador: {e}]")
+
         return "\n".join(lineas)
 
     # ── Chat ──────────────────────────────────────────────────────────────────
@@ -8557,11 +8661,14 @@ def seccion_asistente_ia_fondo():
 
 26. TONO Y FORMATO AL HABLAR DE RIESGO: mantén un tono profesional y calmado, como un analista senior informando a un socio — NUNCA alarmista. Prohibido usar mayúsculas tipo "SITUACIÓN CRÍTICA", "RIESGO EXTREMO", "ESTO ES CRÍTICO", símbolos de alerta grandes o encabezados dramáticos. Presenta los datos con claridad y deja que la gravedad se entienda por las cifras, no por el tono. Si de verdad no puedes completar un análisis (por ejemplo, por límite de búsquedas), dilo en una frase breve y sigue con lo que sí puedas dar — no lo conviertas en el titular de la respuesta.
 
+27. NOTAS EN BORRADOR (sección "NOTAS EN BORRADOR" del contexto): son extracciones de PDF hechas por IA en el wizard "Notas estructuradas", que Yuri puede estar revisando y todavía NO están guardadas en CONTROL_NOTAS/CALENDARIO_NOTAS. Si te pregunta por una nota y solo la encuentras ahí (no en las fuentes oficiales), dile explícitamente que es un borrador sin guardar, con los datos que tengas, y avisa de que puede haber campos "REVISAR" sin corregir todavía. Puedes usarla para responder preguntas sobre esa nota en concreto, pero NUNCA la incluyas en cálculos de capital activo, cobros o beneficios del fondo — para eso solo cuentan las notas ya confirmadas en CONTROL_NOTAS.
+
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
 - ESTADO DE RIESGO DE NOTAS: precio actual vs barrera, por nota y ticker.
 - INTERESES A PAGAR A INVERSORES / EXTRACTO: pagos ya calculados con la lógica de extractos (solo NUEVA/CANCELADA, reinversiones excluidas del pago pero no del capital activo).
 - CAPITAL ACTIVO: capital desplegado por activo e inversor.
+- NOTAS EN BORRADOR: extracciones de IA aún no guardadas — ver regla 27, úsalas solo para responder sobre esa nota puntual, nunca en cálculos agregados.
 - PDFs de notas (si están cargados y son relevantes): documento oficial con condiciones exactas de call, barreras, cupón y fechas — tu fuente más fiable para razonar sobre probabilidad de call o condiciones legales exactas.
 
 == CÓMO RESPONDER ==
