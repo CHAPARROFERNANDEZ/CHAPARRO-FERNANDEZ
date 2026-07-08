@@ -1077,6 +1077,18 @@ def cargar_excel_completo():
     return inv, cal, control
 
 
+def _md_seguro(texto: str) -> str:
+    """
+    Escapa los signos '$' antes de mostrar texto con st.markdown().
+    Streamlit interpreta '$...$' como fórmulas LaTeX — sin este escape, un texto generado
+    por IA que menciona precios como '$450 a $640' se renderiza roto (ej. '450a640' en
+    cursiva de fórmula matemática) en vez de mostrarse como texto normal.
+    """
+    if not texto:
+        return texto
+    return str(texto).replace("$", "\\$")
+
+
 def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
     import os
     try:
@@ -1633,17 +1645,17 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
     try:
         t = yf.Ticker(ticker)
 
-        # El endpoint "info" es el más inestable de yfinance/Yahoo — reintenta un par de veces.
+        # El endpoint "info" es el más inestable de yfinance/Yahoo — reintenta con espera creciente.
         info = {}
-        for intento in range(3):
+        for intento in range(4):
             try:
                 info = t.info or {}
                 if info and len(info) > 5:
                     break
             except Exception:
                 pass
-            if intento < 2:
-                time.sleep(1.2)
+            if intento < 3:
+                time.sleep(1.5 * (intento + 1))  # 1.5s, 3s, 4.5s — da tiempo real a que se libere el límite
 
         if not info or len(info) <= 5:
             resultado["aviso_analistas"] = (
@@ -1662,6 +1674,21 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
             resultado["recomendacion"] = info.get("recommendationKey")
             if info.get("targetMeanPrice") is None:
                 resultado["aviso_analistas"] = "Esta compañía no tiene cobertura de analistas en Yahoo Finance (dato real, no es un fallo)."
+
+        # Si el precio objetivo sigue sin salir (endpoint "info" caído/limitado), prueba una fuente
+        # alternativa de yfinance que consulta un endpoint distinto de Yahoo — a veces uno está
+        # limitado y el otro no, así que merece la pena intentarlo antes de rendirse.
+        if resultado["target_medio"] is None:
+            try:
+                targets = t.analyst_price_targets
+                if targets:
+                    resultado["target_medio"] = targets.get("mean")
+                    resultado["target_alto"] = targets.get("high")
+                    resultado["target_bajo"] = targets.get("low")
+                    if resultado["target_medio"] is not None:
+                        resultado["aviso_analistas"] = None
+            except Exception:
+                pass
 
         hist = None
         for intento in range(2):
@@ -4090,7 +4117,7 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                         respuesta = f"Error API: {data.get('error',{}).get('message', str(data))}"
                 except Exception as e:
                     respuesta = f"Error: {e}"
-                st.markdown(respuesta)
+                st.markdown(_md_seguro(respuesta))
         st.session_state["chat_notas_ia"].append({"role": "assistant", "content": respuesta})
 
     if st.session_state["chat_notas_ia"]:
@@ -4800,7 +4827,7 @@ def _tab_ficha_compania(df_control: pd.DataFrame):
     st.markdown("#### 📰 Noticias y contexto reciente")
     with st.spinner("Buscando noticias recientes..."):
         noticias = obtener_resumen_noticias_ia(ticker, datos.get("nombre") or ticker)
-    st.markdown(noticias)
+    st.markdown(_md_seguro(noticias))
     st.caption("⚠️ Este resumen es una síntesis de noticias públicas hecha por IA, no una recomendación de inversión ni una predicción de precio.")
 
 
@@ -5167,7 +5194,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     st.info(f"ℹ️ {fd['aviso_analistas']}")
                 with st.spinner(f"Buscando información y noticias de {ticker}..."):
                     ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker, barrera_capital_pct, colchon_pct, barrera_cupon_pct, colchon_cupon_pct)
-                st.markdown(ficha_texto)
+                st.markdown(_md_seguro(ficha_texto))
                 st.caption("⚠️ La explicación, las noticias y la opinión de riesgo son una síntesis de IA en base a fuentes públicas — el precio, el precio objetivo y los colchones de arriba sí son datos reales/calculados.")
                 bloques_informe.append(f"#### {fd.get('nombre') or ticker} ({ticker})")
                 bloques_informe.append(
@@ -5233,7 +5260,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             texto_recomendacion = f"[No se pudo generar la recomendación: {e}]"
 
     st.markdown("### 🎯 Recomendación de reparto")
-    st.markdown(texto_recomendacion or "No se pudo generar una recomendación.")
+    st.markdown(_md_seguro(texto_recomendacion) or "No se pudo generar una recomendación.")
     st.caption("Simulación Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.")
 
     bloques_informe.append("### 🎯 Recomendación de reparto")
@@ -5367,7 +5394,7 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
 
         with st.spinner(f"Buscando noticias de {ticker}..."):
             noticias = obtener_resumen_noticias_ia(ticker, fd.get("nombre") or ticker)
-        st.markdown(noticias)
+        st.markdown(_md_seguro(noticias))
         st.markdown("---")
 
     # --- Probabilidades Monte Carlo para la nota completa (worst-of) ---
@@ -8740,7 +8767,7 @@ Responde SIEMPRE en español. Sé conciso cuando el dato es directo; desarrolla 
                         respuesta = f"Error API: {data.get('error',{}).get('message',str(data))}"
                 except Exception as e:
                     respuesta = f"Error: {e}"
-                st.markdown(respuesta)
+                st.markdown(_md_seguro(respuesta))
         st.session_state["chat_ia_cf"].append({"role":"assistant","content":respuesta})
 
     if st.session_state["chat_ia_cf"]:
