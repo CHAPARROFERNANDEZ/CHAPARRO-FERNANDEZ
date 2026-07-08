@@ -1089,6 +1089,27 @@ def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _leer_calendario_calls_cached() -> pd.DataFrame:
+    """Versión cacheada de leer_hoja_excel('CALENDARIO_CALLS') — se usa en varias secciones y,
+    sin caché, se releía en cada rerun de TODA la app (Streamlit reejecuta todas las pestañas en
+    cada clic, no solo la activa), contribuyendo a la lentitud al cambiar de pestaña o de nota."""
+    return leer_hoja_excel("CALENDARIO_CALLS")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _leer_auditoria_notas_cached() -> pd.DataFrame:
+    """
+    Versión cacheada de leer_hoja_excel('AUDITORIA_NOTAS') para el visor de solo lectura de
+    'Auditar nota existente'. Sin caché, esta lectura (openpyxl + posible descarga de Drive) se
+    repetía en CADA interacción de CUALQUIER parte de la app (Streamlit reejecuta todas las pestañas
+    en cada rerun, no solo la que estás mirando), lo que provocaba lentitud/bloqueos notables al
+    cambiar de pestaña o de número de nota. 60 segundos de caché es un buen equilibrio: la auditoría
+    no cambia cada segundo, así que no hace falta leerla en tiempo real en cada clic.
+    """
+    return leer_hoja_excel("AUDITORIA_NOTAS")
+
+
 def preparar_tabla_monetaria(df: pd.DataFrame, columnas_monetarias) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -4235,6 +4256,47 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
         "a un número en el que ya trabajaste."
     )
 
+    # --- Leer datos sin PDF: notas que ya están guardadas de verdad en CONTROL_NOTAS ---
+    # Al pulsar "Guardar Nota X en el Excel" se borra el borrador y la previsualización de esta
+    # sesión (para no duplicar datos), así que la única forma de volver a verla es leerla de vuelta
+    # del Excel — sin subir el PDF de nuevo, porque esos datos ya están en Drive.
+    notas_ya_guardadas = sorted(
+        int(n) for n in pd.to_numeric(df_control.get("nota", pd.Series(dtype=float)), errors="coerce").dropna().unique()
+    ) if df_control is not None and not df_control.empty else []
+    with st.expander("📂 Leer datos sin PDF (ya guardados en el Excel)", expanded=False):
+        if not notas_ya_guardadas:
+            st.caption("Todavía no hay ninguna nota guardada en CONTROL_NOTAS.")
+        else:
+            nota_consulta = st.selectbox("Nota guardada a consultar", notas_ya_guardadas, key="consultar_nota_guardada_numero")
+
+            control_n = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == nota_consulta].copy()
+            st.markdown(f"**Tickers y barreras (CONTROL_NOTAS) — Nota {nota_consulta}:**")
+            cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
+            st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
+
+            if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
+                cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
+                st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
+                if cal_n.empty:
+                    st.caption("Sin eventos guardados para esta nota.")
+                else:
+                    cols_cal = [c for c in ["tipo_evento", "fecha"] if c in cal_n.columns]
+                    st.dataframe(cal_n[cols_cal].sort_values("fecha") if "fecha" in cal_n.columns else cal_n[cols_cal], use_container_width=True, hide_index=True)
+
+            df_calls_leido = df_calls if df_calls is not None and not df_calls.empty else _leer_calendario_calls_cached()
+            if df_calls_leido is not None and not df_calls_leido.empty and "nota" in df_calls_leido.columns:
+                calls_n = df_calls_leido[pd.to_numeric(df_calls_leido["nota"], errors="coerce") == nota_consulta].copy()
+                st.markdown("**Fechas de posible call (CALENDARIO_CALLS):**")
+                if calls_n.empty:
+                    st.caption("Sin fechas de call guardadas para esta nota.")
+                else:
+                    cols_calls = [c for c in ["fecha_call", "estado", "observaciones"] if c in calls_n.columns]
+                    st.dataframe(calls_n[cols_calls], use_container_width=True, hide_index=True)
+
+            st.caption("👁️ Solo lectura. Para corregir algo de una nota ya guardada, usa '🔍 Auditar nota existente' o edita directamente el Excel.")
+
+    st.markdown("---")
+
     if "notas_wizard_datos" not in st.session_state:
         st.session_state["notas_wizard_datos"] = {}
     almacen = st.session_state["notas_wizard_datos"]
@@ -4396,38 +4458,12 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
         st.info("No hay notas en CONTROL_NOTAS todavía para auditar.")
         return
 
-    # --- Solo consultar lo que ya está guardado, sin necesidad de subir el PDF de nuevo ---
-    with st.expander("📂 Solo consultar los datos ya guardados (sin subir PDF)", expanded=False):
-        nota_consulta = st.selectbox("Nota a consultar", notas_existentes, key="consultar_nota_guardada_numero")
-
-        control_n = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == nota_consulta].copy()
-        st.markdown(f"**Tickers y barreras (CONTROL_NOTAS) — Nota {nota_consulta}:**")
-        cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
-        st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
-
-        if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
-            cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
-            st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
-            if cal_n.empty:
-                st.caption("Sin eventos guardados para esta nota.")
-            else:
-                cols_cal = [c for c in ["tipo_evento", "fecha"] if c in cal_n.columns]
-                st.dataframe(cal_n[cols_cal].sort_values("fecha") if "fecha" in cal_n.columns else cal_n[cols_cal], use_container_width=True, hide_index=True)
-
-        if df_calls is not None and not df_calls.empty and "nota" in df_calls.columns:
-            calls_n = df_calls[pd.to_numeric(df_calls["nota"], errors="coerce") == nota_consulta].copy()
-            st.markdown("**Fechas de posible call (CALENDARIO_CALLS):**")
-            if calls_n.empty:
-                st.caption("Sin fechas de call guardadas para esta nota.")
-            else:
-                cols_calls = [c for c in ["fecha_call", "estado", "observaciones"] if c in calls_n.columns]
-                st.dataframe(calls_n[cols_calls], use_container_width=True, hide_index=True)
-
-        # Última auditoría YA GUARDADA con el botón "Guardar esta auditoría" — al guardarla se
-        # borra el borrador (para no dejar dos copias del mismo dato), así que la única forma de
-        # volver a verla es leerla de vuelta de AUDITORIA_NOTAS, sin necesidad del PDF de nuevo.
-        df_audit = leer_hoja_excel("AUDITORIA_NOTAS")
-        st.markdown("**Última auditoría guardada (AUDITORIA_NOTAS):**")
+    # --- Leer auditoría sin PDF: lo que ya quedó guardado con "Guardar esta auditoría" ---
+    # Al guardar la auditoría se borra el borrador (para no dejar dos copias del mismo dato), así
+    # que la única forma de volver a verla es leerla de vuelta de AUDITORIA_NOTAS, sin PDF de nuevo.
+    with st.expander("📂 Leer auditoría sin PDF (ya guardada en el Excel)", expanded=False):
+        nota_consulta = st.selectbox("Nota a consultar", notas_existentes, key="consultar_auditoria_numero")
+        df_audit = _leer_auditoria_notas_cached()
         if df_audit.empty or "nota" not in df_audit.columns:
             st.caption("Todavía no se ha guardado ninguna auditoría para ninguna nota.")
         else:
@@ -4441,6 +4477,7 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
                 st.caption(f"Auditada el {ultima_fecha.strftime('%d/%m/%Y %H:%M') if pd.notna(ultima_fecha) else '(fecha desconocida)'}")
                 cols_audit = [c for c in ["campo", "en_excel", "en_pdf", "estado"] if c in audit_ultima.columns]
                 st.dataframe(audit_ultima[cols_audit], use_container_width=True, hide_index=True)
+        st.caption("👁️ Solo lectura. Para volver a comparar contra el PDF oficial y detectar nuevas discrepancias, usa el auditor de abajo (necesita subir el PDF otra vez).")
 
         st.caption("👁️ Solo lectura. Para volver a comparar contra el PDF oficial y detectar nuevas discrepancias, usa el auditor de abajo (necesita subir el PDF otra vez).")
 
@@ -5366,7 +5403,7 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
 
 def seccion_notas_archivo():
     df_inv, df_cal, df_control = cargar_excel_completo()
-    df_calls = leer_hoja_excel("CALENDARIO_CALLS")
+    df_calls = _leer_calendario_calls_cached()
     if not df_calls.empty and "nota" in df_calls.columns:
         df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
@@ -5696,7 +5733,7 @@ def preparar_tabla_calendario_integrado(calendario: pd.DataFrame) -> pd.DataFram
 
 def panel_alertas_y_calendario():
     df_inv, df_cal, df_control = cargar_excel_completo()
-    df_calls = leer_hoja_excel("CALENDARIO_CALLS")
+    df_calls = _leer_calendario_calls_cached()
 
     st.markdown("## Alertas y calendario")
     st.caption("Calendario único con observaciones, pagos cobrables y calls. Los pagos con observación negativa real no aparecen como cobro.")
@@ -5808,7 +5845,7 @@ def panel_calidad_datos():
 
 def seccion_sistema_fondo():
     df_inv, df_cal, df_control = cargar_excel_completo()
-    df_calls = leer_hoja_excel("CALENDARIO_CALLS")
+    df_calls = _leer_calendario_calls_cached()
     if not df_calls.empty:
         if "fecha_call" in df_calls.columns:
             df_calls["fecha_call"] = pd.to_datetime(df_calls["fecha_call"], errors="coerce", dayfirst=True).dt.normalize()
