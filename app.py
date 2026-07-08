@@ -4235,47 +4235,6 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
         "a un número en el que ya trabajaste."
     )
 
-    # --- Consultar una nota YA GUARDADA en el Excel (definitiva, sin PDF) ---
-    # Una vez pulsas "Guardar Nota X en el Excel", el borrador se borra (para no duplicar datos) y
-    # esa nota deja de aparecer arriba. Esto es solo para VOLVER A VER lo que ya quedó guardado de
-    # forma definitiva en CONTROL_NOTAS/CALENDARIO_NOTAS/CALENDARIO_CALLS — por ejemplo, después de
-    # tocar el código y redesplegar. Es de solo lectura: no permite volver a guardarla (para no duplicar filas).
-    notas_ya_guardadas = sorted(
-        int(n) for n in pd.to_numeric(df_control.get("nota", pd.Series(dtype=float)), errors="coerce").dropna().unique()
-    ) if df_control is not None and not df_control.empty else []
-    with st.expander("📂 Consultar una nota YA GUARDADA en el Excel (no necesita el PDF)", expanded=False):
-        if not notas_ya_guardadas:
-            st.info("Todavía no hay ninguna nota guardada en CONTROL_NOTAS.")
-        else:
-            nota_consulta = st.selectbox("Nota guardada a consultar", notas_ya_guardadas, key="consultar_nota_guardada_numero")
-            if st.button("🔎 Mostrar datos guardados", key="btn_consultar_nota_guardada"):
-                control_n = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == nota_consulta].copy()
-                st.markdown(f"**Tickers y barreras (CONTROL_NOTAS) — Nota {nota_consulta}:**")
-                cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
-                st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
-
-                if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
-                    cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
-                    st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
-                    if cal_n.empty:
-                        st.caption("Sin eventos guardados para esta nota.")
-                    else:
-                        cols_cal = [c for c in ["tipo_evento", "fecha"] if c in cal_n.columns]
-                        st.dataframe(cal_n[cols_cal].sort_values("fecha") if "fecha" in cal_n.columns else cal_n[cols_cal], use_container_width=True, hide_index=True)
-
-                if df_calls is not None and not df_calls.empty and "nota" in df_calls.columns:
-                    calls_n = df_calls[pd.to_numeric(df_calls["nota"], errors="coerce") == nota_consulta].copy()
-                    st.markdown("**Fechas de posible call (CALENDARIO_CALLS):**")
-                    if calls_n.empty:
-                        st.caption("Sin fechas de call guardadas para esta nota.")
-                    else:
-                        cols_calls = [c for c in ["fecha_call", "estado", "observaciones"] if c in calls_n.columns]
-                        st.dataframe(calls_n[cols_calls], use_container_width=True, hide_index=True)
-
-                st.caption("👁️ Solo lectura — para corregir algo de una nota ya guardada, usa '🔍 Auditar nota existente' o edita directamente el Excel.")
-
-    st.markdown("---")
-
     if "notas_wizard_datos" not in st.session_state:
         st.session_state["notas_wizard_datos"] = {}
     almacen = st.session_state["notas_wizard_datos"]
@@ -4437,6 +4396,36 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
         st.info("No hay notas en CONTROL_NOTAS todavía para auditar.")
         return
 
+    # --- Solo consultar lo que ya está guardado, sin necesidad de subir el PDF de nuevo ---
+    with st.expander("📂 Solo consultar los datos ya guardados (sin subir PDF)", expanded=False):
+        nota_consulta = st.selectbox("Nota a consultar", notas_existentes, key="consultar_nota_guardada_numero")
+        if st.button("🔎 Mostrar datos guardados", key="btn_consultar_nota_guardada"):
+            control_n = df_control[pd.to_numeric(df_control["nota"], errors="coerce") == nota_consulta].copy()
+            st.markdown(f"**Tickers y barreras (CONTROL_NOTAS) — Nota {nota_consulta}:**")
+            cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
+            st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
+
+            if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
+                cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
+                st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
+                if cal_n.empty:
+                    st.caption("Sin eventos guardados para esta nota.")
+                else:
+                    cols_cal = [c for c in ["tipo_evento", "fecha"] if c in cal_n.columns]
+                    st.dataframe(cal_n[cols_cal].sort_values("fecha") if "fecha" in cal_n.columns else cal_n[cols_cal], use_container_width=True, hide_index=True)
+
+            if df_calls is not None and not df_calls.empty and "nota" in df_calls.columns:
+                calls_n = df_calls[pd.to_numeric(df_calls["nota"], errors="coerce") == nota_consulta].copy()
+                st.markdown("**Fechas de posible call (CALENDARIO_CALLS):**")
+                if calls_n.empty:
+                    st.caption("Sin fechas de call guardadas para esta nota.")
+                else:
+                    cols_calls = [c for c in ["fecha_call", "estado", "observaciones"] if c in calls_n.columns]
+                    st.dataframe(calls_n[cols_calls], use_container_width=True, hide_index=True)
+
+            st.caption("👁️ Solo lectura. Para comparar contra el PDF oficial y detectar discrepancias, usa el auditor de abajo.")
+
+    st.markdown("---")
     numero_nota = st.selectbox("Nota a auditar", notas_existentes, key="auditar_nota_numero")
     pdf_subido = st.file_uploader(f"Documento oficial de la Nota {numero_nota} (PDF)", type=["pdf"], key=f"auditar_pdf_{numero_nota}")
 
