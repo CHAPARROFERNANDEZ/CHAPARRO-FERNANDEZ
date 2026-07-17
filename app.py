@@ -8393,6 +8393,7 @@ def seccion_asistente_ia_fondo():
                 notas_en_control = set(int(n) for n in pd.to_numeric(df_control["nota"], errors="coerce").dropna().unique())
             todas_notas = sorted(notas_en_control | set(prox_obs_dict.keys()))
             negativas, pendientes, positivas = [], [], []
+            filas_riesgo_definitivo = []  # (nota_id, ticker, precio_compra, precio_actual, precio_contingencia, margen, nivel)
 
             for nota_id in todas_notas:
                 # Estado por variación de precio (igual que pantalla Notas estructuradas)
@@ -8416,6 +8417,32 @@ def seccion_asistente_ia_fondo():
                 else:
                     pendientes.append(linea)  # PENDIENTE = sin precio disponible
 
+                # Detalle por ticker para la lista definitiva (reutiliza precios_live, sin llamadas nuevas)
+                try:
+                    filas_nota = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
+                    for _, r_t in filas_nota.iterrows():
+                        ticker_t = str(r_t.get("ticker", "")).strip().upper()
+                        if not ticker_t:
+                            continue
+                        precio_actual_t = precios_live.get(ticker_t, pd.to_numeric(r_t.get("precio_actual"), errors="coerce"))
+                        precio_compra_t = pd.to_numeric(r_t.get("precio_compra"), errors="coerce")
+                        barrera_cap_t = pd.to_numeric(r_t.get("barrera_capital"), errors="coerce")
+                        barrera_cup_t = pd.to_numeric(r_t.get("barrera_cupon"), errors="coerce")
+                        barrera_pct_t = barrera_cap_t if not pd.isna(barrera_cap_t) else barrera_cup_t
+                        if pd.notna(barrera_pct_t) and barrera_pct_t > 1:
+                            barrera_pct_t = barrera_pct_t / 100
+                        if pd.isna(precio_actual_t) or pd.isna(precio_compra_t) or pd.isna(barrera_pct_t) or precio_compra_t <= 0:
+                            continue
+                        barrera_dolares_t = precio_compra_t * barrera_pct_t
+                        if barrera_dolares_t <= 0:
+                            continue
+                        margen_t = (precio_actual_t - barrera_dolares_t) / barrera_dolares_t * 100
+                        nivel_t = clasificar_alerta_riesgo(margen_t)
+                        if nivel_t in ("ROJO", "AMARILLO"):
+                            filas_riesgo_definitivo.append((nota_id, ticker_t, precio_compra_t, precio_actual_t, barrera_dolares_t, margen_t, nivel_t))
+                except Exception:
+                    pass
+
             if negativas:
                 lineas.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
                 lineas.extend(negativas)
@@ -8431,41 +8458,33 @@ def seccion_asistente_ia_fondo():
 
             # ── LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──────────
             # Esta es la ÚNICA fuente válida para responder "¿qué notas están en riesgo?".
-            # Se calcula con la misma función que usa la pantalla "Notas y riesgo" del dashboard,
-            # así el asistente y el dashboard SIEMPRE coinciden. La IA no debe reclasificar,
-            # añadir, quitar, ni inventar iconos distintos a los de aquí.
-            try:
-                resumen_ia = construir_resumen_actual_notas_alertas(df_control)
-                lineas.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
-                lineas.append(
-                    "Único criterio válido: margen % al precio de contingencia de CADA ticker. "
-                    "🔴 ROJO = margen ≤5%. 🟡 AMARILLO = margen ≤10%. Cualquier ticker/nota que NO aparezca "
-                    "abajo está en ✅ OK (margen >10%) y NO debe presentarse como en riesgo, aunque su variación "
-                    "% desde compra parezca grande. NO reclasifiques estos niveles ni uses iconos distintos a "
-                    "🔴/🟡/✅ tal como aparecen aquí — están ya calculados y son la fuente de verdad."
-                )
-                if resumen_ia is not None and not resumen_ia.empty:
-                    en_riesgo_ia = resumen_ia[resumen_ia["alerta_riesgo"].isin(["ROJO", "AMARILLO"])].copy()
-                    if en_riesgo_ia.empty:
-                        lineas.append("Ninguna nota está en riesgo (ROJO/AMARILLO) ahora mismo según el margen a la barrera.")
-                    else:
-                        orden_ia = {"ROJO": 0, "AMARILLO": 1}
-                        en_riesgo_ia["orden_ia"] = en_riesgo_ia["alerta_riesgo"].map(orden_ia)
-                        en_riesgo_ia = en_riesgo_ia.sort_values(["orden_ia", "margen_a_barrera_%"])
-                        for nota_id_ia, grupo_ia in en_riesgo_ia.groupby("nota", sort=False):
-                            for _, r_ia in grupo_ia.iterrows():
-                                icono_ia = "🔴 ROJO" if r_ia["alerta_riesgo"] == "ROJO" else "🟡 AMARILLO"
-                                lineas.append(
-                                    f"  NOTA_{int(nota_id_ia):02d} | {r_ia['ticker']} | precio_compra=${r_ia['precio_compra']:,.2f} | "
-                                    f"precio_actual=${r_ia['precio_actual']:,.2f} | precio_contingencia=${r_ia['precio_contingencia']:,.2f} | "
-                                    f"margen={r_ia['margen_a_barrera_%']:+.1f}% | {icono_ia}"
-                                )
-                else:
-                    lineas.append("No se pudo calcular (faltan precios/barreras en CONTROL_NOTAS).")
-            except Exception as _e_dfin:
-                lineas.append(f"[Error lista definitiva de riesgo: {_e_dfin}]")
+            # Reutiliza los precios ya descargados en lote arriba (precios_live) — NO vuelve a
+            # llamar a Yahoo Finance ticker por ticker, para no duplicar tráfico ni arriesgar
+            # timeouts. La IA no debe reclasificar, añadir, quitar, ni inventar iconos distintos.
+            lineas.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
+            lineas.append(
+                "Único criterio válido: margen % al precio de contingencia de CADA ticker. "
+                "🔴 ROJO = margen ≤5%. 🟡 AMARILLO = margen ≤10%. Cualquier ticker/nota que NO aparezca "
+                "abajo está en ✅ OK (margen >10%) y NO debe presentarse como en riesgo, aunque su variación "
+                "% desde compra parezca grande. NO reclasifiques estos niveles ni uses iconos distintos a "
+                "🔴/🟡 tal como aparecen aquí — están ya calculados y son la fuente de verdad."
+            )
+            if not filas_riesgo_definitivo:
+                lineas.append("Ninguna nota está en riesgo (ROJO/AMARILLO) ahora mismo según el margen a la barrera.")
+            else:
+                orden_ia = {"ROJO": 0, "AMARILLO": 1}
+                filas_riesgo_definitivo.sort(key=lambda f: (orden_ia.get(f[6], 9), f[5]))
+                for nota_id_ia, ticker_ia, compra_ia, actual_ia, contingencia_ia, margen_ia, nivel_ia in filas_riesgo_definitivo:
+                    icono_ia = "🔴 ROJO" if nivel_ia == "ROJO" else "🟡 AMARILLO"
+                    lineas.append(
+                        f"  NOTA_{int(nota_id_ia):02d} | {ticker_ia} | precio_compra=${compra_ia:,.2f} | "
+                        f"precio_actual=${actual_ia:,.2f} | precio_contingencia=${contingencia_ia:,.2f} | "
+                        f"margen={margen_ia:+.1f}% | {icono_ia}"
+                    )
         except Exception as _e_r:
+            import traceback as _tb_r
             lineas.append(f"[Error riesgo notas: {_e_r}]")
+            lineas.append(f"[Detalle técnico (no mostrar al usuario, solo para diagnóstico): {_tb_r.format_exc()[-500:]}]")
 
         # ══════════════════════════════════════════════════════════════════════
         # 5. TOTALES HISTÓRICOS POR ACTIVO (desde inicio)
