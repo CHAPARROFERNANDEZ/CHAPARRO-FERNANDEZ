@@ -8281,24 +8281,25 @@ def seccion_asistente_ia_fondo():
             # El estado real de cada nota se calcula en vivo comparando CONTROL_NOTAS
             # (precio_compra/barrera) contra precios actuales de yfinance, más abajo.
 
-            # 2. Precios actuales via yfinance + barreras (CONTROL_NOTAS)
-            try:
-                import yfinance as _yf
-                tickers_unicos = df_control["ticker"].dropna().unique().tolist() if "ticker" in df_control.columns else []
-                precios_live = {}
-                if tickers_unicos:
-                    datos_yf = _yf.download(tickers_unicos, period="1d", auto_adjust=True, progress=False)
-                    if "Close" in datos_yf.columns:
-                        ultimo = datos_yf["Close"].iloc[-1]
-                        for t in tickers_unicos:
-                            try:
-                                v = float(ultimo[t]) if t in ultimo else float(ultimo)
-                                if not pd.isna(v):
-                                    precios_live[str(t).upper()] = v
-                            except:
-                                pass
-            except:
-                precios_live = {}
+            # 2. Precios actuales — reutiliza obtener_datos_fundamentales(), la misma función
+            # robusta (con reintentos y espera creciente) que usa el wizard "Añadir nota" para
+            # las tarjetas de compañía. Está cacheada (ttl=900) así que no es lenta, y no se cae
+            # entera si Yahoo falla en un solo ticker (a diferencia del yf.download() en lote de antes).
+            tickers_unicos = df_control["ticker"].dropna().unique().tolist() if "ticker" in df_control.columns else []
+            precios_live = {}
+            tickers_sin_precio = []
+            for _tk in tickers_unicos:
+                _tk_s = str(_tk).strip().upper()
+                if not _tk_s:
+                    continue
+                try:
+                    _datos_tk = obtener_datos_fundamentales(_tk_s)
+                    if _datos_tk and _datos_tk.get("precio_actual") is not None:
+                        precios_live[_tk_s] = float(_datos_tk["precio_actual"])
+                    else:
+                        tickers_sin_precio.append(_tk_s)
+                except Exception:
+                    tickers_sin_precio.append(_tk_s)
 
             def _precios_nota(nota_id):
                 try:
