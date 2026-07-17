@@ -4463,10 +4463,23 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
             if not hojas or "CONTROL_NOTAS" not in hojas or "CALENDARIO_NOTAS" not in hojas:
                 st.error("No se pudo leer el Excel actual para guardar los cambios.")
             else:
-                hojas["CONTROL_NOTAS"] = pd.concat([hojas["CONTROL_NOTAS"], df_control_editado], ignore_index=True)
-                hojas["CALENDARIO_NOTAS"] = pd.concat([hojas["CALENDARIO_NOTAS"], df_cal_editado], ignore_index=True)
+                # Si esta nota ya se había guardado antes (ej. re-guardado tras corregir datos),
+                # borramos primero sus filas viejas en cada hoja para no duplicar — quedarse con
+                # dos tandas mezcladas (una vieja incompleta + una nueva corregida) es peor que
+                # sobreescribir, porque un análisis de riesgo/cobros usaría ambas a la vez.
+                def _quitar_nota_vieja(df, col_nota="NOTA"):
+                    if df is None or df.empty or col_nota not in df.columns:
+                        return df
+                    return df[pd.to_numeric(df[col_nota], errors="coerce") != numero_nota].copy()
+
+                filas_viejas_control = int((pd.to_numeric(hojas["CONTROL_NOTAS"].get("NOTA"), errors="coerce") == numero_nota).sum()) if "NOTA" in hojas["CONTROL_NOTAS"].columns else 0
+                if filas_viejas_control > 0:
+                    st.info(f"Ya había {filas_viejas_control} fila(s) guardada(s) antes para la Nota {numero_nota} — se reemplazan por esta versión, no se duplican.")
+
+                hojas["CONTROL_NOTAS"] = pd.concat([_quitar_nota_vieja(hojas["CONTROL_NOTAS"]), df_control_editado], ignore_index=True)
+                hojas["CALENDARIO_NOTAS"] = pd.concat([_quitar_nota_vieja(hojas["CALENDARIO_NOTAS"]), df_cal_editado], ignore_index=True)
                 if "CALENDARIO_CALLS" in hojas and not df_calls_editado.empty:
-                    hojas["CALENDARIO_CALLS"] = pd.concat([hojas["CALENDARIO_CALLS"], df_calls_editado], ignore_index=True)
+                    hojas["CALENDARIO_CALLS"] = pd.concat([_quitar_nota_vieja(hojas["CALENDARIO_CALLS"]), df_calls_editado], ignore_index=True)
                 # Quitamos el borrador de esta misma tanda de hojas para no escribir el Excel dos veces
                 if "BORRADORES_NOTAS" in hojas and not hojas["BORRADORES_NOTAS"].empty:
                     df_b = hojas["BORRADORES_NOTAS"]
