@@ -7649,6 +7649,27 @@ def cargar_reparto_dividendos() -> pd.DataFrame:
         return pd.DataFrame(columns=["fecha", "importe", "descripcion"])
 
 
+def cargar_transferencias_jordi() -> pd.DataFrame:
+    """Lee la hoja TRANSFERENCIAS_JORDI del Excel.
+    Columnas esperadas: fecha, importe, descripcion.
+    Cada fila es una transferencia de Jordi HACIA el fondo (capital que aporta) —
+    AUMENTA la deuda con Jordi, con la misma lógica que los intereses de JEP y el
+    reparto de dividendos: es dinero que la empresa le debe devolver. Si algún día
+    hay una transferencia en sentido contrario (el fondo le devuelve a Jordi), basta
+    con cargar el importe en negativo en esa fila y esta misma función ya lo resta bien.
+    """
+    try:
+        df = pd.read_excel(ARCHIVO, sheet_name="TRANSFERENCIAS_JORDI")
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
+        df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
+        if "descripcion" not in df.columns:
+            df["descripcion"] = ""
+        return df.dropna(subset=["fecha"])
+    except Exception:
+        return pd.DataFrame(columns=["fecha", "importe", "descripcion"])
+
+
 def _reparto_dividendos_mes(df_rep, anio, mes):
     """
     Total de reparto de dividendos del mes (aumenta la deuda con Jordi).
@@ -7666,6 +7687,27 @@ def _reparto_dividendos_mes(df_rep, anio, mes):
     por_item = {}
     for _, r in mes_rows.iterrows():
         desc = str(r.get("descripcion", "") or "").strip() or "Reparto de dividendos"
+        por_item[desc] = por_item.get(desc, 0) + float(r["importe"])
+    return total, por_item
+
+
+def _transferencias_jordi_mes(df_transf, anio, mes):
+    """
+    Total de transferencias de Jordi hacia el fondo del mes (aumenta la deuda con Jordi,
+    misma lógica que JEP y reparto de dividendos). Devuelve (total, {descripcion: importe})
+    """
+    if df_transf.empty:
+        return 0.0, {}
+    mes_rows = df_transf[
+        (df_transf["fecha"].dt.year == anio) &
+        (df_transf["fecha"].dt.month == mes)
+    ]
+    if mes_rows.empty:
+        return 0.0, {}
+    total = float(mes_rows["importe"].sum())
+    por_item = {}
+    for _, r in mes_rows.iterrows():
+        desc = str(r.get("descripcion", "") or "").strip() or "Transferencia de Jordi"
         por_item[desc] = por_item.get(desc, 0) + float(r["importe"])
     return total, por_item
 
@@ -7714,6 +7756,7 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
     RESTA: beneficio fijos (Paraguay/Motoclick/Futbol/Bolivia) + beneficio notas cuenta JORDI
     SUMA:  intereses devengados a JEP (todos sus activos, pro-rata días)
            + reparto de dividendos (hoja REPARTO_DIVIDENDOS)
+           + transferencias de Jordi hacia el fondo (hoja TRANSFERENCIAS_JORDI)
     """
     hoy = pd.Timestamp.today().normalize()
     filas = []
@@ -7721,6 +7764,7 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
     anio = fecha_inicio.year
     mes = fecha_inicio.month
     df_reparto = cargar_reparto_dividendos()
+    df_transferencias = cargar_transferencias_jordi()
 
     ACTIVOS_FIJOS = [
         ("Paraguay",  "paraguay",  TASA_ANUAL_PARAGUAY),
@@ -7759,9 +7803,12 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
         # 4) Reparto de dividendos del mes (aumenta la deuda, igual que JEP)
         reparto_dividendos, reparto_por_item = _reparto_dividendos_mes(df_reparto, anio, mes)
 
+        # 5) Transferencias de Jordi hacia el fondo del mes (aumenta la deuda, igual que JEP)
+        transferencias_jordi, transferencias_por_item = _transferencias_jordi_mes(df_transferencias, anio, mes)
+
         # Total ingresos compañía = ingresos fijos + cobro notas JORDI
         resta = ingreso_fijos_total + cobro_notas_jordi
-        suma = pago_jep + reparto_dividendos
+        suma = pago_jep + reparto_dividendos + transferencias_jordi
         saldo_inicio = saldo
         saldo = saldo + suma - resta
 
@@ -7776,6 +7823,8 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
             "pago_jep": pago_jep,
             "reparto_por_item": reparto_por_item,     # dict descripcion->importe
             "reparto_dividendos": reparto_dividendos,
+            "transferencias_por_item": transferencias_por_item,  # dict descripcion->importe
+            "transferencias_jordi": transferencias_jordi,
             "total_resta": resta,
             "total_suma": suma,
             "variacion_neta": suma - resta,
@@ -7907,6 +7956,17 @@ def seccion_deuda_jordi():
                 html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#c0392b;font-weight:bold;border-top:1px solid #f5c6cb;margin-top:4px;padding-top:4px;">
                       <span>TOTAL reparto dividendos</span><span>+${fila['reparto_dividendos']:,.2f}</span></div></div>"""
 
+            # ── TRANSFERENCIAS DE JORDI: AUMENTA DEUDA ──
+            transferencias_items = fila.get("transferencias_por_item", {}) or {}
+            if transferencias_items:
+                html += f"""<div style="background:#fdf0f0;border-left:4px solid #c0392b;padding:8px 12px;margin:8px 0;border-radius:4px;">
+                  <div style="color:#c0392b;font-weight:bold;margin-bottom:4px;">➕ AUMENTA LA DEUDA — Transferencias de Jordi al fondo</div>"""
+                for desc, importe in transferencias_items.items():
+                    html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#7b241c;">
+                      <span>{desc}</span><span style="font-weight:bold;">+${importe:,.2f}</span></div>"""
+                html += f"""<div style="display:flex;justify-content:space-between;padding-left:12px;color:#c0392b;font-weight:bold;border-top:1px solid #f5c6cb;margin-top:4px;padding-top:4px;">
+                      <span>TOTAL transferencias Jordi</span><span>+${fila['transferencias_jordi']:,.2f}</span></div></div>"""
+
             # ── ACTIVOS FIJOS: REDUCE DEUDA ── cobro bruto por activo
             det_fijos = fila.get("detalle_fijos", []) or []
             if det_fijos:
@@ -7945,7 +8005,7 @@ def seccion_deuda_jordi():
 
     # ── Tabla resumen mes a mes ────────────────────────────────────────────
     st.subheader("📊 Tabla resumen")
-    cols_tabla = ["mes","saldo_inicio","ingreso_fijos","cobro_notas_jordi","total_resta","pago_jep","reparto_dividendos","variacion_neta","saldo_fin"]
+    cols_tabla = ["mes","saldo_inicio","ingreso_fijos","cobro_notas_jordi","total_resta","pago_jep","reparto_dividendos","transferencias_jordi","variacion_neta","saldo_fin"]
     tabla = df_evol[cols_tabla].copy()
     tabla = tabla.rename(columns={
         "mes": "Mes",
@@ -7955,6 +8015,7 @@ def seccion_deuda_jordi():
         "total_resta": "Total resta ($)",
         "pago_jep": "Intereses JEP ($)",
         "reparto_dividendos": "Reparto dividendos ($)",
+        "transferencias_jordi": "Transferencias Jordi ($)",
         "variacion_neta": "Variación neta ($)",
         "saldo_fin": "Saldo fin mes ($)",
     })
@@ -8908,7 +8969,7 @@ def seccion_asistente_ia_fondo():
 
 7. CHAPARRO FERNANDEZ es la sociedad gestora, no un inversor externo: no cobra interés (0%), todo lo que "cobra" en su nombre es beneficio íntegro del fondo.
 
-8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos) y el reparto de dividendos AUMENTAN esa deuda.
+8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos), el reparto de dividendos y las transferencias que Jordi le hace al fondo (hoja TRANSFERENCIAS_JORDI, capital que él aporta) AUMENTAN esa deuda — las tres juegan a favor de Jordi con la misma lógica: son dinero o valor que la empresa le debe devolver.
 
 9. MOTOCLICK — CASO ESPECIAL: a diferencia de Paraguay/Bolivia/Fútbol, el ingreso que MotoClick genera para el fondo NO es simplemente capital_invertido × 25% / 12. El capital que los inversores tienen "en el papel" asignado a MotoClick no siempre coincide con el capital que realmente está desplegado ahí día a día (puede haber devoluciones temporales de capital y reinyecciones posteriores). Por eso el ingreso real se calcula con el capital promedio diario efectivamente activo ese mes. El pago al inversor, en cambio, SIEMPRE se mantiene fijo sobre su capital nominal, sin este ajuste — solo el ingreso de la compañía varía.
 
