@@ -8428,6 +8428,42 @@ def seccion_asistente_ia_fondo():
 
             lineas.append(f"RESUMEN: {len(negativas)} rojas | {len(pendientes)} amarillas | {len(positivas)} verdes (positivas no se muestran)")
             lineas.append("(USA SIEMPRE ESTOS DATOS. NO INVENTES NI CALCULES EL ESTADO DE LAS NOTAS.)")
+
+            # ── LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──────────
+            # Esta es la ÚNICA fuente válida para responder "¿qué notas están en riesgo?".
+            # Se calcula con la misma función que usa la pantalla "Notas y riesgo" del dashboard,
+            # así el asistente y el dashboard SIEMPRE coinciden. La IA no debe reclasificar,
+            # añadir, quitar, ni inventar iconos distintos a los de aquí.
+            try:
+                resumen_ia = construir_resumen_actual_notas_alertas(df_control)
+                lineas.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
+                lineas.append(
+                    "Único criterio válido: margen % al precio de contingencia de CADA ticker. "
+                    "🔴 ROJO = margen ≤5%. 🟡 AMARILLO = margen ≤10%. Cualquier ticker/nota que NO aparezca "
+                    "abajo está en ✅ OK (margen >10%) y NO debe presentarse como en riesgo, aunque su variación "
+                    "% desde compra parezca grande. NO reclasifiques estos niveles ni uses iconos distintos a "
+                    "🔴/🟡/✅ tal como aparecen aquí — están ya calculados y son la fuente de verdad."
+                )
+                if resumen_ia is not None and not resumen_ia.empty:
+                    en_riesgo_ia = resumen_ia[resumen_ia["alerta_riesgo"].isin(["ROJO", "AMARILLO"])].copy()
+                    if en_riesgo_ia.empty:
+                        lineas.append("Ninguna nota está en riesgo (ROJO/AMARILLO) ahora mismo según el margen a la barrera.")
+                    else:
+                        orden_ia = {"ROJO": 0, "AMARILLO": 1}
+                        en_riesgo_ia["orden_ia"] = en_riesgo_ia["alerta_riesgo"].map(orden_ia)
+                        en_riesgo_ia = en_riesgo_ia.sort_values(["orden_ia", "margen_a_barrera_%"])
+                        for nota_id_ia, grupo_ia in en_riesgo_ia.groupby("nota", sort=False):
+                            for _, r_ia in grupo_ia.iterrows():
+                                icono_ia = "🔴 ROJO" if r_ia["alerta_riesgo"] == "ROJO" else "🟡 AMARILLO"
+                                lineas.append(
+                                    f"  NOTA_{int(nota_id_ia):02d} | {r_ia['ticker']} | precio_compra=${r_ia['precio_compra']:,.2f} | "
+                                    f"precio_actual=${r_ia['precio_actual']:,.2f} | precio_contingencia=${r_ia['precio_contingencia']:,.2f} | "
+                                    f"margen={r_ia['margen_a_barrera_%']:+.1f}% | {icono_ia}"
+                                )
+                else:
+                    lineas.append("No se pudo calcular (faltan precios/barreras en CONTROL_NOTAS).")
+            except Exception as _e_dfin:
+                lineas.append(f"[Error lista definitiva de riesgo: {_e_dfin}]")
         except Exception as _e_r:
             lineas.append(f"[Error riesgo notas: {_e_r}]")
 
@@ -8757,12 +8793,12 @@ def seccion_asistente_ia_fondo():
 
    ⚠️ IMPORTANTE — LO QUE "RIESGO" **NO** ES: ni la proximidad de la próxima fecha de observación/cobro, ni la variación % desde el precio de compra por sí sola, son criterio de riesgo. Que una nota tenga observación "mañana" no la hace estar "en riesgo" — puede tener su próxima observación mañana y estar perfectamente por encima de su barrera. NUNCA presentes "próxima observación inminente" como sinónimo o señal de riesgo. El riesgo se mide EXCLUSIVAMENTE por el margen % a la barrera de contingencia (la regla 24 de arriba). Las fechas de observación/cobro se añaden DESPUÉS, como información complementaria de una nota que ya identificaste como en riesgo por margen a la barrera — nunca como el criterio que decide si está en riesgo.
 
-25. CUANDO TE PREGUNTEN POR NOTAS EN RIESGO (o por una nota en riesgo concreta), identifica PRIMERO qué notas están en 🔴 ROJO o 🟡 AMARILLO mirando el margen a la barrera en ESTADO DE RIESGO DE NOTAS (regla 24), y ordénalas: primero todas las ROJO (de peor a mejor margen), después las AMARILLO. Para CADA nota en riesgo, tu respuesta SIEMPRE debe incluir, en este orden:
-   - Nivel de alerta (🔴 ROJO / 🟡 AMARILLO) y el número de nota.
-   - Por cada acción/ticker de la nota: precio de compra, precio actual, precio de contingencia (barrera en dólares) y el margen % a esa barrera. Si una nota tiene varios subyacentes, desglosa cada uno — no des solo el peor.
-   - Una breve explicación de la caída de cada acción en riesgo (usa la herramienta de búsqueda web SOLO para noticias/contexto cualitativo — resultados recientes, motivo del movimiento del precio, ratings, eventos — NUNCA para re-consultar el precio actual o la variación, que ya vienen calculados con precisión desde Yahoo Finance en ESTADO DE RIESGO DE NOTAS y son más fiables que cualquier precio que encuentres buscando en la web).
-   - La situación general de esa nota: próxima fecha de observación (bloque PRÓXIMAS OBSERVACIONES) y próxima fecha de cobro/call (bloque CALENDARIO NOTAS / PRÓXIMOS CALLS), como dato complementario, no como criterio de riesgo.
-   - Si para alguna nota falta el precio de compra o la barrera en ESTADO DE RIESGO DE NOTAS (aparece "N/D"), dilo así de simple: "no tengo la barrera/precio de compra cargados para la Nota X en CONTROL_NOTAS, revísalo". NO intentes compensar buscando datos en la web ni fabriques un análisis con información incompleta.
+25. CUANDO TE PREGUNTEN POR NOTAS EN RIESGO (o por una nota en riesgo concreta), tu ÚNICA fuente para decidir qué notas están en riesgo es el bloque "NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA)". Esa lista ya viene filtrada y ordenada (ROJO primero, de peor a mejor margen, luego AMARILLO) — NO recalcules, NO reclasifiques, NO añadas notas que no estén ahí (aunque su variación % desde compra parezca alta en la sección ESTADO DE RIESGO DE NOTAS — esa sección es solo para consultar precios de una nota específica cuando te la pidan por su número, nunca para decidir por tu cuenta qué está "en riesgo"), y NO uses iconos distintos a los 🔴/🟡 que ya vienen en la lista (nunca inventes ⚠️ u otros). Si la lista dice que está vacía, contesta que no hay ninguna nota en riesgo ahora mismo — no inventes ninguna. Para CADA nota de esa lista, tu respuesta SIEMPRE debe incluir, en este orden:
+   - Nivel de alerta (🔴 ROJO / 🟡 AMARILLO) y el número de nota, tal como aparece en la lista.
+   - Por cada ticker de esa nota que aparezca en la lista: precio de compra, precio actual, precio de contingencia y margen %, copiados tal cual de la lista (no los recalcules).
+   - Una breve explicación de la caída de cada acción en riesgo (usa la herramienta de búsqueda web SOLO para noticias/contexto cualitativo — resultados recientes, motivo del movimiento del precio, ratings, eventos — NUNCA para re-consultar el precio actual o el margen, que ya vienen calculados con precisión y son más fiables que cualquier precio que encuentres buscando en la web).
+   - La situación general de esa nota: próxima fecha de observación (bloque PRÓXIMAS OBSERVACIONES) y próxima fecha de cobro/call (bloque CALENDARIO NOTAS / PRÓXIMOS CALLS), siempre como dato complementario al final, nunca como criterio de riesgo ni como parte del título/encabezado de la nota.
+   - Si para alguna nota falta el precio de compra o la barrera (aparece "N/D" en CONTROL_NOTAS), dilo así de simple: "no tengo la barrera/precio de compra cargados para la Nota X en CONTROL_NOTAS, revísalo". NO intentes compensar buscando datos en la web ni fabriques un análisis con información incompleta.
 
 26. TONO Y FORMATO AL HABLAR DE RIESGO: mantén un tono profesional y calmado, como un analista senior informando a un socio — NUNCA alarmista. Prohibido usar mayúsculas tipo "SITUACIÓN CRÍTICA", "RIESGO EXTREMO", "ESTO ES CRÍTICO", símbolos de alerta grandes o encabezados dramáticos. Presenta los datos con claridad y deja que la gravedad se entienda por las cifras, no por el tono. Si de verdad no puedes completar un análisis (por ejemplo, por límite de búsquedas), dilo en una frase breve y sigue con lo que sí puedas dar — no lo conviertas en el titular de la respuesta.
 
