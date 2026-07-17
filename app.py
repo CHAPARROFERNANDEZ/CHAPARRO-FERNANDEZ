@@ -4494,6 +4494,48 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
     if hay_revisar:
         st.warning("Hay campos marcados con ⚠️ REVISAR — corrígelos en las tablas de arriba antes de guardar.")
 
+    # ── Comparación contra lo que YA está guardado en el Excel para esta nota ──────────
+    # Guardar ahora REEMPLAZA cualquier fila vieja de esta nota (ver _quitar_nota_vieja más abajo),
+    # así que si ya había datos guardados, hay que mostrarlos lado a lado con los nuevos ANTES de
+    # dejar guardar — si no, se puede perder sin darse cuenta una corrección manual que se había
+    # hecho directo en el Excel y que esta nueva extracción no tiene.
+    control_existente_nota = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == numero_nota].copy() if df_control is not None and not df_control.empty and "nota" in df_control.columns else pd.DataFrame()
+    hay_discrepancia = False
+    confirmar_reemplazo = True  # si no hay nada guardado todavía, no hace falta confirmar nada
+    if not control_existente_nota.empty:
+        campos_comparar = [
+            ("precio_compra", "PRECIO_COMPRA"), ("barrera_cupon", "BARRERA_CUPON"),
+            ("barrera_capital", "BARRERA_CAPITAL"), ("call_level", "CALL_LEVEL"),
+            ("emisor", "EMISOR"), ("tiene_memoria", "TIENE_MEMORIA"), ("tiene_one_star", "TIENE_ONE_STAR"),
+        ]
+        filas_comparacion = []
+        for _, fila_nueva in df_control_editado.iterrows():
+            ticker_nuevo = str(fila_nueva.get("TICKER", "")).strip().upper()
+            fila_vieja = control_existente_nota[control_existente_nota["ticker"].astype(str).str.strip().str.upper() == ticker_nuevo]
+            for col_vieja, col_nueva in campos_comparar:
+                valor_viejo = fila_vieja.iloc[0][col_vieja] if not fila_vieja.empty and col_vieja in fila_vieja.columns else "(no existía)"
+                valor_nuevo = fila_nueva.get(col_nueva)
+                iguales = str(valor_viejo).strip().upper() == str(valor_nuevo).strip().upper()
+                if not iguales:
+                    filas_comparacion.append({
+                        "ticker": ticker_nuevo, "campo": col_nueva,
+                        "valor actual en Excel": valor_viejo, "valor nuevo extraído": valor_nuevo,
+                    })
+        if filas_comparacion:
+            hay_discrepancia = True
+            st.warning(
+                f"⚠️ La Nota {numero_nota} ya tiene datos guardados en el Excel y hay {len(filas_comparacion)} "
+                "diferencia(s) con lo que se acaba de extraer/editar arriba. Si guardás, esto REEMPLAZA lo que "
+                "ya había — revisá la comparación antes de confirmar:"
+            )
+            st.dataframe(pd.DataFrame(filas_comparacion), use_container_width=True, hide_index=True)
+            confirmar_reemplazo = st.checkbox(
+                f"Revisé las diferencias de arriba y confirmo que quiero reemplazar los datos guardados de la Nota {numero_nota}",
+                key=f"confirmar_reemplazo_nota_{numero_nota}",
+            )
+        else:
+            st.caption(f"✅ Sin diferencias: coincide con lo que ya había guardado en el Excel para la Nota {numero_nota}.")
+
     col_guardar, col_avance, col_descartar = st.columns([1, 1, 1])
     with col_avance:
         if st.button(f"📌 Guardar avance de mis correcciones", help="Guarda en Google Drive lo que ya has corregido en las tablas de arriba, aunque todavía queden ⚠️ REVISAR. Útil antes de tocar el código, para no perder tus correcciones al redesplegar."):
@@ -4502,7 +4544,9 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
             with st.spinner("Guardando avance..."):
                 guardar_borrador_nota("nueva", numero_nota, extraido_actualizado)
     with col_guardar:
-        if st.button(f"💾 Guardar Nota {numero_nota} en el Excel", type="primary", disabled=hay_revisar):
+        if hay_discrepancia and not confirmar_reemplazo:
+            st.button(f"💾 Guardar Nota {numero_nota} en el Excel", type="primary", disabled=True, help="Marcá el checkbox de arriba para confirmar que revisaste las diferencias.")
+        elif st.button(f"💾 Guardar Nota {numero_nota} en el Excel", type="primary", disabled=hay_revisar):
             hojas = leer_todas_las_hojas_excel()
             if not hojas or "CONTROL_NOTAS" not in hojas or "CALENDARIO_NOTAS" not in hojas:
                 st.error("No se pudo leer el Excel actual para guardar los cambios.")
