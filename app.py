@@ -4149,6 +4149,28 @@ def extraer_datos_nota_con_ia(pdf_bytes: bytes) -> dict:
     import base64
     import json as _json
 
+    # Validación previa: si el archivo no es un PDF real, o está corrupto/cifrado, la API de
+    # Claude lo rechaza con un mensaje genérico ("The PDF specified was not valid") que no dice
+    # POR QUÉ. Detectamos estos casos antes de gastar una llamada a la API, para dar un mensaje
+    # que sí sirva para actuar.
+    if pdf_bytes and not pdf_bytes.startswith(b"%PDF-"):
+        # Caso conocido: el archivo trae pegado un envoltorio HTTP multipart/form-data alrededor
+        # del PDF real (típico de algunas herramientas de descarga/proxy) — el PDF de verdad
+        # empieza en "%PDF-" y termina en "%%EOF" en algún punto interior. Si lo encontramos,
+        # lo recortamos automáticamente en vez de rechazar el archivo.
+        _inicio = pdf_bytes.find(b"%PDF-")
+        _fin = pdf_bytes.rfind(b"%%EOF")
+        if _inicio != -1 and _fin != -1 and _fin > _inicio:
+            pdf_bytes = pdf_bytes[_inicio:_fin + len(b"%%EOF")]
+
+    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
+        return {"error": (
+            "El archivo no parece ser un PDF válido (no empieza con la firma %PDF-). "
+            "Puede que se haya subido corrupto, incompleto, o que en realidad sea otro tipo de "
+            "archivo con extensión .pdf. Probá abrirlo en tu computadora para confirmar que se ve "
+            "bien, y si hace falta, exportalo/guardalo de nuevo como PDF y volvé a subirlo."
+        )}
+
     # La API de Claude rechaza cualquier PDF de más de 100 páginas (límite duro, no de tokens).
     # Los pricing supplements suelen traer anexos legales larguísimos — si pasa de 100 páginas,
     # extraemos el texto en Python y lo mandamos como texto plano en vez de como documento.
@@ -4157,12 +4179,26 @@ def extraer_datos_nota_con_ia(pdf_bytes: bytes) -> dict:
     try:
         from pypdf import PdfReader
         lector = PdfReader(BytesIO(pdf_bytes))
+        if lector.is_encrypted:
+            try:
+                lector.decrypt("")  # algunos PDFs están "cifrados" solo con permisos, sin contraseña real
+            except Exception:
+                pass
+        if lector.is_encrypted:
+            return {"error": (
+                "El PDF está protegido con contraseña o cifrado, y no se puede leer así. "
+                "Quitale la contraseña/protección (por ejemplo abriéndolo y exportándolo de nuevo "
+                "sin seguridad) y volvé a subirlo."
+            )}
         n_paginas = len(lector.pages)
         if n_paginas > 100:
             usar_texto_plano = True
             texto_extraido = "\n\n".join((pagina.extract_text() or "") for pagina in lector.pages)
-    except Exception:
-        pass  # Si algo falla aquí, seguimos con el envío normal como documento.
+    except Exception as _e_pdf:
+        return {"error": (
+            f"El PDF no se pudo abrir para procesarlo (archivo probablemente corrupto o mal generado): {_e_pdf}. "
+            "Probá volver a exportar/descargar el documento original y subirlo de nuevo."
+        )}
 
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
 
