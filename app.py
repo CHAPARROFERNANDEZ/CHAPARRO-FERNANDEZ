@@ -2452,45 +2452,48 @@ def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def clasificar_alerta_riesgo(margen_a_barrera):
-    """Clasifica la alerta de una nota según el margen real hasta SU barrera de contingencia
-    (colchón % entre el precio actual y el precio de contingencia de esa nota concreta).
-    Este es el único criterio de riesgo: no usa la variación fija, porque dos notas con la
-    misma caída desde compra pueden tener barreras muy distintas (ej. 40% vs 50%), y lo que
-    importa es cuánto colchón le queda a CADA nota hasta incumplir SU barrera.
-    🔴 ROJO: margen ≤ 5% (ya perforó la barrera o está a punto de hacerlo).
-    🟡 AMARILLO: margen ≤ 10% (empieza a preocupar, pero todavía con algo de colchón).
+def clasificar_alerta_riesgo(variacion_pct):
+    """Clasifica el riesgo de un ticker según su variación % desde el precio de compra.
+    Criterio único y simple (a pedido de Yuri, tras sopesar pros/contras): 🔴 EN RIESGO si la
+    variación es ≤ -30%. Se eligió variación fija en vez de margen a la barrera porque:
+    (a) es mucho más fácil de verificar a mano contra el Excel, y (b) es más robusto — depende
+    solo de precio_compra (que se consulta en vivo con yfinance al crear la nota y casi nunca
+    falla), no de barrera_cupon/barrera_capital (campos que hemos visto mal extraídos varias veces).
+    El margen a la barrera de cada nota se sigue calculando y mostrando como dato adicional en el
+    contexto de la IA, pero YA NO decide si una nota entra en la lista de riesgo.
     """
-    if pd.isna(margen_a_barrera):
+    if pd.isna(variacion_pct):
         return "SIN DATO"
     try:
-        margen_a_barrera = float(margen_a_barrera)
+        variacion_pct = float(variacion_pct)
     except Exception:
         return "SIN DATO"
-    if margen_a_barrera <= 5:
+    if variacion_pct <= -30:
         return "ROJO"
-    if margen_a_barrera <= 10:
-        return "AMARILLO"
     return "OK"
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataFrame:
-    """Calcula precios actuales, variación y alerta por ticker/nota para la sección Notas y el dashboard."""
+    """Calcula precios actuales, variación y alerta por ticker/nota para la sección Notas y el dashboard.
+    El criterio de riesgo (alerta_riesgo) es variación ≤ -30% desde precio_compra. El margen a la
+    barrera de contingencia se calcula igual y se deja en margen_a_barrera_% como dato adicional,
+    pero un ticker sin barrera cargada en CONTROL_NOTAS igual se evalúa por riesgo (no se descarta)."""
     if yf is None or df_control is None or df_control.empty:
         return pd.DataFrame()
 
     control = df_control.copy()
     barrera_col = next((c for c in ["contingency", "barrera_capital", "barrera_cupon"] if c in control.columns), None)
     faltan = [c for c in ["nota", "ticker", "precio_compra"] if c not in control.columns]
-    if faltan or barrera_col is None:
+    if faltan:
         return pd.DataFrame()
 
     control["nota"] = pd.to_numeric(control["nota"], errors="coerce")
     control["ticker"] = control["ticker"].astype(str).str.strip().str.upper()
     control["precio_compra"] = pd.to_numeric(control["precio_compra"], errors="coerce")
-    control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
-    control = control.dropna(subset=["nota", "ticker", "precio_compra", barrera_col]).copy()
+    if barrera_col is not None:
+        control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
+    control = control.dropna(subset=["nota", "ticker", "precio_compra"]).copy()
 
     filas = []
     for _, row in control.iterrows():
@@ -2506,12 +2509,12 @@ def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataF
             precio_actual = None
 
         precio_compra = float(row["precio_compra"])
-        barrera = float(row[barrera_col])
-        precio_contingencia = precio_compra * barrera
+        barrera = float(row[barrera_col]) if barrera_col is not None and pd.notna(row.get(barrera_col)) else None
+        precio_contingencia = (precio_compra * barrera) if barrera is not None else None
         variacion = None if precio_actual is None else ((precio_actual - precio_compra) / precio_compra) * 100
-        margen_a_barrera = None if precio_actual is None else ((precio_actual - precio_contingencia) / precio_contingencia) * 100
-        alerta_riesgo = clasificar_alerta_riesgo(margen_a_barrera)
-        estado_barrera = "SIN DATO" if precio_actual is None else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
+        margen_a_barrera = None if (precio_actual is None or precio_contingencia is None) else ((precio_actual - precio_contingencia) / precio_contingencia) * 100
+        alerta_riesgo = clasificar_alerta_riesgo(variacion)
+        estado_barrera = "SIN DATO" if (precio_actual is None or precio_contingencia is None) else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
 
         filas.append({
             "nota": int(row["nota"]),
@@ -2534,16 +2537,14 @@ def resumen_alertas_por_nota(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame
     cols_vacio = ["nota", "alerta", "peor_margen_%", "peor_variacion_%", "tickers"]
     if resumen_notas_actual is None or resumen_notas_actual.empty:
         return pd.DataFrame(columns=cols_vacio)
-    alertas = resumen_notas_actual[resumen_notas_actual["alerta_riesgo"].isin(["AMARILLO", "ROJO"])].copy()
+    alertas = resumen_notas_actual[resumen_notas_actual["alerta_riesgo"] == "ROJO"].copy()
     if alertas.empty:
         return pd.DataFrame(columns=cols_vacio)
 
-    orden_alerta = {"ROJO": 0, "AMARILLO": 1}
     filas = []
     for nota, grupo in alertas.groupby("nota"):
         grupo = grupo.copy()
-        grupo["orden_alerta"] = grupo["alerta_riesgo"].map(orden_alerta).fillna(9)
-        peor = grupo.sort_values(["orden_alerta", "margen_a_barrera_%"], ascending=[True, True]).iloc[0]
+        peor = grupo.sort_values("variacion_%", ascending=True).iloc[0]
         filas.append({
             "nota": int(nota),
             "alerta": peor["alerta_riesgo"],
@@ -2552,8 +2553,7 @@ def resumen_alertas_por_nota(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame
             "tickers": ", ".join(grupo["ticker"].astype(str).unique()),
         })
     out = pd.DataFrame(filas)
-    out["orden"] = out["alerta"].map(orden_alerta).fillna(9)
-    return out.sort_values(["orden", "peor_margen_%"]).drop(columns=["orden"])
+    return out.sort_values("peor_variacion_%")
 
 
 def colorear_filas_alerta_notas(row):
@@ -3622,11 +3622,7 @@ def dashboard_financiero():
     alertas_notas = resumen_alertas_por_nota(resumen_notas_actual)
     if not alertas_notas.empty:
         rojas = int((alertas_notas["alerta"] == "ROJO").sum())
-        amarillas = int((alertas_notas["alerta"] == "AMARILLO").sum())
-        if rojas > 0:
-            st.error(f"Alertas de notas: {rojas} en rojo y {amarillas} en amarillo por variación negativa.")
-        else:
-            st.warning(f"Alertas de notas: {amarillas} en amarillo por variación negativa.")
+        st.error(f"Alertas de notas: {rojas} nota(s) en riesgo (variación ≤ -30% en al menos un ticker).")
         with st.expander("Ver alertas de notas por variación", expanded=False):
             tabla_alertas = alertas_notas.copy()
             tabla_alertas["peor_variacion_%"] = tabla_alertas["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
@@ -5650,11 +5646,10 @@ def seccion_notas_archivo():
             return
 
         alertas_resumen = resumen_alertas_por_nota(resumen)
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         c1.metric("Notas analizadas", resumen["nota"].nunique())
         c2.metric("Tickers", len(resumen))
-        c3.metric("Notas en amarillo", int((alertas_resumen["alerta"] == "AMARILLO").sum()) if not alertas_resumen.empty else 0)
-        c4.metric("Notas en rojo", int((alertas_resumen["alerta"] == "ROJO").sum()) if not alertas_resumen.empty else 0)
+        c3.metric("Notas en riesgo (variación ≤ -30%)", int((alertas_resumen["alerta"] == "ROJO").sum()) if not alertas_resumen.empty else 0)
 
         tabla = resumen.copy()
         tabla["variacion_%"] = pd.to_numeric(tabla["variacion_%"], errors="coerce")
@@ -5669,21 +5664,18 @@ def seccion_notas_archivo():
         st.dataframe(tabla_mostrar.style.apply(colorear_filas_alerta_notas, axis=1), use_container_width=True)
         boton_descarga_excel(tabla_mostrar, "alertas_observaciones.xlsx")
 
-        st.markdown("### Alertas por riesgo real (margen a la barrera de contingencia)")
+        st.markdown("### Alertas por variación desde precio de compra")
         st.caption(
-            "El criterio de riesgo es el colchón (margen %) entre el precio actual y el precio de "
-            "contingencia de CADA nota — no la variación fija desde compra, porque dos notas con la "
-            "misma caída pueden tener barreras muy distintas. 🟡 Amarillo: margen ≤ 10%. 🔴 Rojo: margen ≤ 5%."
+            "El criterio de riesgo es la variación % desde el precio de compra de cada ticker: "
+            "🔴 En riesgo si es ≤ -30%. La columna 'margen a la barrera' se muestra como dato adicional "
+            "de contexto (puede venir 'Sin dato' si la nota no tiene barrera cargada en CONTROL_NOTAS), "
+            "pero no decide si una nota entra en esta lista."
         )
         if alertas_resumen.empty:
-            st.success("No hay notas en amarillo ni en rojo por margen a la barrera.")
+            st.success("No hay notas en riesgo (variación ≤ -30%) ahora mismo.")
         else:
             rojas = int((alertas_resumen["alerta"] == "ROJO").sum())
-            amarillas = int((alertas_resumen["alerta"] == "AMARILLO").sum())
-            if rojas > 0:
-                st.error(f"Hay {rojas} notas en rojo y {amarillas} notas en amarillo.")
-            else:
-                st.warning(f"Hay {amarillas} notas en amarillo.")
+            st.error(f"Hay {rojas} nota(s) en riesgo (variación ≤ -30%).")
             alertas_mostrar = alertas_resumen.copy()
             alertas_mostrar["peor_margen_%"] = alertas_mostrar["peor_margen_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
             alertas_mostrar["peor_variacion_%"] = alertas_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
@@ -8518,17 +8510,18 @@ def seccion_asistente_ia_fondo():
                         if ticker:
                             p_s = f"${precio_actual:,.2f}" if not pd.isna(precio_actual) else "N/D"
                             b_s = f"${barrera_dolares:,.2f} ({barrera_pct*100:.0f}% del precio inicial)" if barrera_dolares is not None else "N/D"
-                            # Calcular variación (informativa) y margen a la barrera real (criterio de riesgo)
+                            # Criterio de riesgo: variación % desde precio_compra (≤ -30% = riesgo).
+                            # El margen a la barrera se muestra como dato adicional, no decide el nivel.
                             if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0:
                                 var = (precio_actual - precio_compra) / precio_compra * 100
                                 var_s = f" ({var:+.1f}%)"
+                                alerta_nivel = clasificar_alerta_riesgo(var)
+                                icono = {"ROJO": " 🔴 EN RIESGO (variación ≤ -30%)", "OK": " ✅ OK"}.get(alerta_nivel, "")
                                 if barrera_dolares is not None:
                                     margen_a_barrera = (precio_actual - barrera_dolares) / barrera_dolares * 100
-                                    alerta_nivel = clasificar_alerta_riesgo(margen_a_barrera)
-                                    icono = {"ROJO": " 🔴 ROJO", "AMARILLO": " 🟡 AMARILLO", "OK": " ✅ OK"}.get(alerta_nivel, "")
-                                    alerta = f"{icono} | margen a la barrera real: {margen_a_barrera:+.1f}%"
+                                    alerta = f"{icono} | margen a la barrera (dato adicional, no decide el riesgo): {margen_a_barrera:+.1f}%"
                                 else:
-                                    alerta = ""
+                                    alerta = f"{icono} | margen a la barrera: N/D (sin barrera cargada en CONTROL_NOTAS)"
                             else:
                                 var_s = ""
                                 alerta = ""
@@ -8537,30 +8530,23 @@ def seccion_asistente_ia_fondo():
                 except:
                     return ""
 
-            # Calcular estado real por nota usando el margen al precio de contingencia (criterio único de riesgo)
+            # Calcular estado real por nota usando variación % desde precio_compra (criterio único de riesgo, ≤ -30%)
             def _estado_nota_precio(nota_id):
                 try:
                     filas = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
-                    peor_margen = None
+                    peor_variacion = None
                     for _, r in filas.iterrows():
                         ticker = str(r.get("ticker","")).strip().upper()
                         precio_actual = precios_live.get(ticker, pd.to_numeric(r.get("precio_actual"), errors="coerce"))
                         precio_compra = pd.to_numeric(r.get("precio_compra"), errors="coerce")
-                        barrera_cap_pct = pd.to_numeric(r.get("barrera_capital"), errors="coerce")
-                        barrera_cup_pct = pd.to_numeric(r.get("barrera_cupon"), errors="coerce")
-                        barrera_pct = barrera_cap_pct if not pd.isna(barrera_cap_pct) else barrera_cup_pct
-                        if pd.notna(barrera_pct) and barrera_pct > 1:
-                            barrera_pct = barrera_pct / 100
-                        if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0 and pd.notna(barrera_pct):
-                            barrera_dolares = precio_compra * barrera_pct
-                            margen = (precio_actual - barrera_dolares) / barrera_dolares * 100
-                            if peor_margen is None or margen < peor_margen:
-                                peor_margen = margen
-                    if peor_margen is None:
+                        if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0:
+                            var = (precio_actual - precio_compra) / precio_compra * 100
+                            if peor_variacion is None or var < peor_variacion:
+                                peor_variacion = var
+                    if peor_variacion is None:
                         return "PENDIENTE"
-                    nivel = clasificar_alerta_riesgo(peor_margen)
+                    nivel = clasificar_alerta_riesgo(peor_variacion)
                     if nivel == "ROJO": return "ROJA"
-                    if nivel == "AMARILLO": return "AMARILLA"
                     if nivel == "OK": return "OK"
                     return "PENDIENTE"
                 except:
@@ -8609,8 +8595,6 @@ def seccion_asistente_ia_fondo():
 
                 if estado_precio == "ROJA":
                     negativas.append(linea)
-                elif estado_precio == "AMARILLA":
-                    pendientes.append(linea)
                 elif estado_precio == "OK":
                     positivas.append(linea)
                 else:
@@ -8625,20 +8609,24 @@ def seccion_asistente_ia_fondo():
                             continue
                         precio_actual_t = precios_live.get(ticker_t, pd.to_numeric(r_t.get("precio_actual"), errors="coerce"))
                         precio_compra_t = pd.to_numeric(r_t.get("precio_compra"), errors="coerce")
+                        if pd.isna(precio_actual_t) or pd.isna(precio_compra_t) or precio_compra_t <= 0:
+                            continue
+                        variacion_t = (precio_actual_t - precio_compra_t) / precio_compra_t * 100
+                        nivel_t = clasificar_alerta_riesgo(variacion_t)
+                        if nivel_t != "ROJO":
+                            continue
+                        # Margen a la barrera: solo como dato adicional, si hay barrera cargada (puede faltar o estar mal).
                         barrera_cap_t = pd.to_numeric(r_t.get("barrera_capital"), errors="coerce")
                         barrera_cup_t = pd.to_numeric(r_t.get("barrera_cupon"), errors="coerce")
                         barrera_pct_t = barrera_cap_t if not pd.isna(barrera_cap_t) else barrera_cup_t
                         if pd.notna(barrera_pct_t) and barrera_pct_t > 1:
                             barrera_pct_t = barrera_pct_t / 100
-                        if pd.isna(precio_actual_t) or pd.isna(precio_compra_t) or pd.isna(barrera_pct_t) or precio_compra_t <= 0:
-                            continue
-                        barrera_dolares_t = precio_compra_t * barrera_pct_t
-                        if barrera_dolares_t <= 0:
-                            continue
-                        margen_t = (precio_actual_t - barrera_dolares_t) / barrera_dolares_t * 100
-                        nivel_t = clasificar_alerta_riesgo(margen_t)
-                        if nivel_t in ("ROJO", "AMARILLO"):
-                            filas_riesgo_definitivo.append((nota_id, ticker_t, precio_compra_t, precio_actual_t, barrera_dolares_t, margen_t, nivel_t))
+                        precio_contingencia_t = None
+                        margen_t = None
+                        if pd.notna(barrera_pct_t) and barrera_pct_t > 0:
+                            precio_contingencia_t = precio_compra_t * barrera_pct_t
+                            margen_t = (precio_actual_t - precio_contingencia_t) / precio_contingencia_t * 100
+                        filas_riesgo_definitivo.append((nota_id, ticker_t, precio_compra_t, precio_actual_t, variacion_t, precio_contingencia_t, margen_t))
                 except Exception:
                     pass
 
@@ -8649,10 +8637,10 @@ def seccion_asistente_ia_fondo():
                 lineas.append("🔴 ROJAS / EN RIESGO: Ninguna")
 
             if pendientes:
-                lineas.append(f"🟡 AMARILLAS / PENDIENTES ({len(pendientes)}):")
+                lineas.append(f"⚪ SIN PRECIO DISPONIBLE / PENDIENTES DE DATO ({len(pendientes)}):")
                 lineas.extend(pendientes)
 
-            lineas.append(f"RESUMEN: {len(negativas)} rojas | {len(pendientes)} amarillas | {len(positivas)} verdes (positivas no se muestran)")
+            lineas.append(f"RESUMEN: {len(negativas)} en riesgo (variación ≤ -30%) | {len(pendientes)} sin dato de precio | {len(positivas)} OK (positivas no se muestran)")
             lineas.append("(USA SIEMPRE ESTOS DATOS. NO INVENTES NI CALCULES EL ESTADO DE LAS NOTAS.)")
 
             # ── LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──────────
@@ -8662,23 +8650,25 @@ def seccion_asistente_ia_fondo():
             # timeouts. La IA no debe reclasificar, añadir, quitar, ni inventar iconos distintos.
             lineas.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
             lineas.append(
-                "Único criterio válido: margen % al precio de contingencia de CADA ticker. "
-                "🔴 ROJO = margen ≤5%. 🟡 AMARILLO = margen ≤10%. Cualquier ticker/nota que NO aparezca "
-                "abajo está en ✅ OK (margen >10%) y NO debe presentarse como en riesgo, aunque su variación "
-                "% desde compra parezca grande. NO reclasifiques estos niveles ni uses iconos distintos a "
-                "🔴/🟡 tal como aparecen aquí — están ya calculados y son la fuente de verdad."
+                "Único criterio válido: variación % desde precio_compra de CADA ticker. "
+                "🔴 EN RIESGO = variación ≤ -30%. Cualquier ticker/nota que NO aparezca abajo NO está en "
+                "riesgo (variación > -30%) y NO debe presentarse como en riesgo. NO reclasifiques, no "
+                "inventes otro criterio, no uses otro umbral. El 'margen a la barrera' que aparece junto a "
+                "cada ticker es SOLO información adicional de contexto (puede venir 'N/D' si la nota no "
+                "tiene barrera cargada en CONTROL_NOTAS) — NUNCA decide si una nota entra en esta lista, "
+                "solo la variación la decide."
             )
             if not filas_riesgo_definitivo:
-                lineas.append("Ninguna nota está en riesgo (ROJO/AMARILLO) ahora mismo según el margen a la barrera.")
+                lineas.append("Ninguna nota está en riesgo (variación ≤ -30%) ahora mismo.")
             else:
-                orden_ia = {"ROJO": 0, "AMARILLO": 1}
-                filas_riesgo_definitivo.sort(key=lambda f: (orden_ia.get(f[6], 9), f[5]))
-                for nota_id_ia, ticker_ia, compra_ia, actual_ia, contingencia_ia, margen_ia, nivel_ia in filas_riesgo_definitivo:
-                    icono_ia = "🔴 ROJO" if nivel_ia == "ROJO" else "🟡 AMARILLO"
+                filas_riesgo_definitivo.sort(key=lambda f: f[4])  # peor variación primero
+                for nota_id_ia, ticker_ia, compra_ia, actual_ia, variacion_ia, contingencia_ia, margen_ia in filas_riesgo_definitivo:
+                    margen_s = f"{margen_ia:+.1f}%" if margen_ia is not None else "N/D"
+                    contingencia_s = f"${contingencia_ia:,.2f}" if contingencia_ia is not None else "N/D"
                     lineas.append(
                         f"  NOTA_{int(nota_id_ia):02d} | {ticker_ia} | precio_compra=${compra_ia:,.2f} | "
-                        f"precio_actual=${actual_ia:,.2f} | precio_contingencia=${contingencia_ia:,.2f} | "
-                        f"margen={margen_ia:+.1f}% | {icono_ia}"
+                        f"precio_actual=${actual_ia:,.2f} | variación={variacion_ia:+.1f}% | 🔴 EN RIESGO | "
+                        f"(dato adicional) precio_contingencia={contingencia_s} | margen a la barrera={margen_s}"
                     )
         except Exception as _e_r:
             import traceback as _tb_r
@@ -9007,21 +8997,21 @@ def seccion_asistente_ia_fondo():
                      − (Suma de TODOS los intereses devengados desde el inicio de cada posición hasta hoy, de TODOS los inversores con pago_intereses="reinvierte", EXCLUYENDO a JEP y excluyendo al propio Chaparro Fernández)
    Este cálculo de "intereses devengados y no pagados" es ACUMULADO desde que cada inversor empezó (no se resetea nunca, es una deuda pendiente continua) — usa la misma lógica de extractos (ignorar fecha_final_inversion en filas NUEVA sin reinversión sucesora, respetarla en CANCELADA).
 
-24. QUÉ ES UNA "NOTA EN RIESGO" — UN SOLO CRITERIO: el MARGEN REAL A LA BARRERA DE CONTINGENCIA de esa nota concreta, NUNCA la variación fija desde el precio de compra. Mirando la sección ESTADO DE RIESGO DE NOTAS, cada ticker tiene un "margen a la barrera real" (%) — el colchón entre el precio actual y el precio de contingencia (barrera) de ESA nota:
-   🔴 ROJO si el margen es ≤ 5% (ya perforó la barrera o está a un paso de hacerlo).
-   🟡 AMARILLO si el margen es ≤ 10% (empieza a preocupar, pero todavía queda algo de colchón).
-   ✅ OK si el margen es > 10%.
-   Por qué NO se usa la variación fija (ej. "-25%" o "-35%" desde compra) como criterio de riesgo: dos notas pueden haber caído exactamente lo mismo desde su compra y NO tener el mismo riesgo, porque cada nota tiene su propia barrera. Una nota al -35% con barrera al 40% del precio inicial casi no tiene colchón (alto riesgo real); otra nota también al -35% pero con barrera al 50% todavía tiene bastante colchón (riesgo mucho menor). El margen a la barrera ya captura esto correctamente combinando ambos factores en un solo número — no hace falta (ni hay que) mirar la variación por separado para decidir el color de riesgo. Podés mencionar la variación % como dato de contexto adicional si es útil, pero el color/nivel de riesgo SIEMPRE se decide por el margen a la barrera, nunca por la variación.
+24. QUÉ ES UNA "NOTA EN RIESGO" — UN SOLO CRITERIO, SIMPLE: la VARIACIÓN % desde el precio de compra de esa acción concreta.
+   🔴 EN RIESGO si la variación es ≤ -30% (ej. compra $100 → precio actual ≤ $70).
+   ✅ OK si la variación es > -30%.
+   Se eligió variación fija en vez de margen a la barrera de contingencia (que se usaba antes) por dos motivos: (a) es mucho más fácil de verificar a mano contra el Excel — es una resta simple; y (b) depende solo de precio_compra, que se consulta en vivo con Yahoo Finance al crear la nota y casi nunca falla, a diferencia de barrera_cupon/barrera_capital, que se han visto mal extraídas del PDF varias veces. El "margen a la barrera" TODAVÍA se calcula y se muestra junto a cada ticker en riesgo, como dato adicional de contexto (puede venir "N/D" si la nota no tiene barrera cargada) — pero NUNCA decide si una nota entra en la lista de riesgo ni qué color tiene. Solo la variación decide.
 
-   ⚠️ IMPORTANTE — LO QUE "RIESGO" **NO** ES: ni la proximidad de la próxima fecha de observación/cobro, ni la variación % desde el precio de compra por sí sola, son criterio de riesgo. Que una nota tenga observación "mañana" no la hace estar "en riesgo" — puede tener su próxima observación mañana y estar perfectamente por encima de su barrera. NUNCA presentes "próxima observación inminente" como sinónimo o señal de riesgo. El riesgo se mide EXCLUSIVAMENTE por el margen % a la barrera de contingencia (la regla 24 de arriba). Las fechas de observación/cobro se añaden DESPUÉS, como información complementaria de una nota que ya identificaste como en riesgo por margen a la barrera — nunca como el criterio que decide si está en riesgo.
+   ⚠️ IMPORTANTE — LO QUE "RIESGO" **NO** ES: la proximidad de la próxima fecha de observación/cobro NO es un criterio de riesgo. Que una nota tenga observación "mañana" no la hace estar "en riesgo" — puede tener su próxima observación mañana y estar perfectamente por encima del -30%. NUNCA presentes "próxima observación inminente" como sinónimo o señal de riesgo. El riesgo se mide EXCLUSIVAMENTE por la variación % desde compra (la regla de arriba). Las fechas de observación/cobro se añaden DESPUÉS, como información complementaria de una nota que ya identificaste como en riesgo por variación — nunca como el criterio que decide si está en riesgo.
 
-25. CUANDO TE PREGUNTEN POR NOTAS EN RIESGO (o por una nota en riesgo concreta), tu ÚNICA fuente para decidir qué notas están en riesgo es el bloque "NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA)". Esa lista ya viene filtrada y ordenada (ROJO primero, de peor a mejor margen, luego AMARILLO) — NO recalcules, NO reclasifiques, NO añadas notas que no estén ahí (aunque su variación % desde compra parezca alta en la sección ESTADO DE RIESGO DE NOTAS — esa sección es solo para consultar precios de una nota específica cuando te la pidan por su número, nunca para decidir por tu cuenta qué está "en riesgo"), y NO uses iconos distintos a los 🔴/🟡 que ya vienen en la lista (nunca inventes ⚠️ u otros). Si la lista dice que está vacía, contesta que no hay ninguna nota en riesgo ahora mismo — no inventes ninguna. Para CADA nota de esa lista, tu respuesta SIEMPRE debe incluir, en este orden:
-   - Nivel de alerta (🔴 ROJO / 🟡 AMARILLO) y el número de nota, tal como aparece en la lista.
-   - Por cada ticker de esa nota que aparezca en la lista: precio de compra, precio actual, precio de contingencia y margen %, copiados tal cual de la lista (no los recalcules).
-   - Una breve explicación de la caída de cada acción en riesgo (usa la herramienta de búsqueda web SOLO para noticias/contexto cualitativo — resultados recientes, motivo del movimiento del precio, ratings, eventos — NUNCA para re-consultar el precio actual o el margen, que ya vienen calculados con precisión y son más fiables que cualquier precio que encuentres buscando en la web).
+25. CUANDO TE PREGUNTEN POR NOTAS EN RIESGO (o por una nota en riesgo concreta), tu ÚNICA fuente para decidir qué notas están en riesgo es el bloque "NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA)". Esa lista ya viene filtrada y ordenada (peor variación primero) — NO recalcules, NO reclasifiques, NO añadas notas que no estén ahí, y NO uses ningún otro umbral que no sea el que ya viene aplicado ahí. Si la lista dice que está vacía, contesta que no hay ninguna nota en riesgo ahora mismo — no inventes ninguna. Para CADA nota de esa lista, tu respuesta SIEMPRE debe incluir, en este orden:
+   - El número de nota y el ticker en riesgo, tal como aparece en la lista.
+   - Precio de compra, precio actual y variación %, copiados tal cual de la lista (no los recalcules).
+   - El margen a la barrera de contingencia como dato adicional (si dice "N/D", decilo así — no es un fallo, es que esa nota no tiene barrera cargada en CONTROL_NOTAS).
+   - Una breve explicación de la caída de cada acción en riesgo (usa la herramienta de búsqueda web SOLO para noticias/contexto cualitativo — resultados recientes, motivo del movimiento del precio, ratings, eventos — NUNCA para re-consultar el precio actual o la variación, que ya vienen calculados con precisión y son más fiables que cualquier precio que encuentres buscando en la web).
    - REGLA ESTRICTA DE PRECIOS: cualquier precio, rango de precio o variación % que menciones EN CUALQUIER PARTE de tu respuesta —ya sea en la tabla de datos, en una frase tipo "situación actual de [ticker]", en la conclusión, donde sea— tiene que ser EXACTAMENTE el mismo número que ya viene en el contexto (ESTADO DE RIESGO DE NOTAS / NOTAS EN RIESGO REAL), copiado tal cual, nunca un valor nuevo ni un rango (ej. "$79.80-$79.84") que hayas visto en un resultado de búsqueda web. La búsqueda web es solo para texto cualitativo (noticias, motivo del movimiento, eventos) — jamás como fuente de un número de precio que vas a mostrar. Si en algún momento se te ocurre escribir un precio y no lo tenés ya calculado en el contexto, no lo escribas — usa una frase sin cifra o remití al dato que sí tenés.
    - La situación general de esa nota: próxima fecha de observación (bloque PRÓXIMAS OBSERVACIONES) y próxima fecha de cobro/call (bloque CALENDARIO NOTAS / PRÓXIMOS CALLS), siempre como dato complementario al final, nunca como criterio de riesgo ni como parte del título/encabezado de la nota.
-   - Si para alguna nota falta el precio de compra o la barrera (aparece "N/D" en CONTROL_NOTAS), dilo así de simple: "no tengo la barrera/precio de compra cargados para la Nota X en CONTROL_NOTAS, revísalo". NO intentes compensar buscando datos en la web ni fabriques un análisis con información incompleta.
+   - Si para alguna nota falta el precio de compra (aparece "N/D" en CONTROL_NOTAS), dilo así de simple: "no tengo el precio de compra cargado para la Nota X en CONTROL_NOTAS, revísalo". NO intentes compensar buscando datos en la web ni fabriques un análisis con información incompleta.
 
 26. TONO Y FORMATO AL HABLAR DE RIESGO: mantén un tono profesional y calmado, como un analista senior informando a un socio — NUNCA alarmista. Prohibido usar mayúsculas tipo "SITUACIÓN CRÍTICA", "RIESGO EXTREMO", "ESTO ES CRÍTICO", símbolos de alerta grandes o encabezados dramáticos. Presenta los datos con claridad y deja que la gravedad se entienda por las cifras, no por el tono. Si de verdad no puedes completar un análisis (por ejemplo, por límite de búsquedas), dilo en una frase breve y sigue con lo que sí puedas dar — no lo conviertas en el titular de la respuesta.
 
