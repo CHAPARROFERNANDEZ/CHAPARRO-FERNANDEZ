@@ -8483,8 +8483,12 @@ def seccion_asistente_ia_fondo():
                     )
         except Exception as _e_r:
             import traceback as _tb_r
+            _tb_texto = _tb_r.format_exc()
             lineas.append(f"[Error riesgo notas: {_e_r}]")
-            lineas.append(f"[Detalle técnico (no mostrar al usuario, solo para diagnóstico): {_tb_r.format_exc()[-500:]}]")
+            lineas.append(f"[Detalle técnico (no mostrar al usuario, solo para diagnóstico): {_tb_texto[-500:]}]")
+            with st.expander("⚠️ Error interno calculando riesgo de notas (clic para ver detalle técnico)", expanded=True):
+                st.error(f"{type(_e_r).__name__}: {_e_r}")
+                st.code(_tb_texto, language="python")
 
         # ══════════════════════════════════════════════════════════════════════
         # 5. TOTALES HISTÓRICOS POR ACTIVO (desde inicio)
