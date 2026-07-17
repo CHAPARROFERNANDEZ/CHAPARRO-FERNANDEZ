@@ -4313,6 +4313,50 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
             cols_mostrar = [c for c in ["ticker", "precio_compra", "barrera_cupon", "barrera_capital", "contingency", "call_level", "emisor", "tiene_memoria", "tiene_one_star"] if c in control_n.columns]
             st.dataframe(control_n[cols_mostrar], use_container_width=True, hide_index=True)
 
+            # Detección de duplicados: si un ticker aparece más de una vez para la misma nota,
+            # casi seguro es de un re-guardado viejo (antes de que existiera la limpieza automática).
+            tickers_duplicados = control_n["ticker"].value_counts()
+            tickers_duplicados = tickers_duplicados[tickers_duplicados > 1]
+            if not tickers_duplicados.empty:
+                st.warning(
+                    f"⚠️ La Nota {nota_consulta} tiene tickers repetidos en CONTROL_NOTAS: "
+                    f"{', '.join(f'{t} (x{n})' for t, n in tickers_duplicados.items())}. "
+                    "Es un resto de guardados anteriores a la corrección del bug de duplicados."
+                )
+                if st.button(f"🧹 Eliminar duplicados de la Nota {nota_consulta}", key=f"limpiar_dup_{nota_consulta}"):
+                    hojas_dedup = leer_todas_las_hojas_excel()
+                    if not hojas_dedup or "CONTROL_NOTAS" not in hojas_dedup:
+                        st.error("No se pudo leer el Excel actual para limpiar duplicados.")
+                    else:
+                        def _dedup_ultima_por_ticker(df, col_nota="NOTA", col_ticker="TICKER"):
+                            if df is None or df.empty or col_nota not in df.columns or col_ticker not in df.columns:
+                                return df
+                            es_esta_nota = pd.to_numeric(df[col_nota], errors="coerce") == nota_consulta
+                            resto = df[~es_esta_nota]
+                            esta_nota = df[es_esta_nota]
+                            # Se queda con la ÚLTIMA fila de cada ticker repetido (el guardado más reciente,
+                            # que es el que aparece más abajo tras el append) y respeta el orden original.
+                            esta_nota_dedup = esta_nota.drop_duplicates(subset=[col_ticker], keep="last")
+                            return pd.concat([resto, esta_nota_dedup], ignore_index=True)
+
+                        def _dedup_exacto(df, col_nota="NOTA"):
+                            if df is None or df.empty or col_nota not in df.columns:
+                                return df
+                            es_esta_nota = pd.to_numeric(df[col_nota], errors="coerce") == nota_consulta
+                            resto = df[~es_esta_nota]
+                            esta_nota = df[es_esta_nota].drop_duplicates(keep="last")
+                            return pd.concat([resto, esta_nota], ignore_index=True)
+
+                        hojas_dedup["CONTROL_NOTAS"] = _dedup_ultima_por_ticker(hojas_dedup["CONTROL_NOTAS"])
+                        if "CALENDARIO_NOTAS" in hojas_dedup:
+                            hojas_dedup["CALENDARIO_NOTAS"] = _dedup_exacto(hojas_dedup["CALENDARIO_NOTAS"])
+                        if "CALENDARIO_CALLS" in hojas_dedup:
+                            hojas_dedup["CALENDARIO_CALLS"] = _dedup_exacto(hojas_dedup["CALENDARIO_CALLS"])
+                        guardar_excel_completo_desde_hojas(hojas_dedup)
+                        st.cache_data.clear()
+                        st.success(f"Duplicados de la Nota {nota_consulta} eliminados. Recargando...")
+                        st.rerun()
+
             if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns:
                 cal_n = df_cal[pd.to_numeric(df_cal["nota"], errors="coerce") == nota_consulta].copy()
                 st.markdown("**Calendario de observación/pago (CALENDARIO_NOTAS):**")
