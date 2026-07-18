@@ -2035,6 +2035,50 @@ def preparar_detalle_notas(df_inv: pd.DataFrame, df_pagos: pd.DataFrame, df_cal:
     return pd.DataFrame(filas)
 
 
+def _filtrar_notas_activas_en_mes(df_inv: pd.DataFrame, inicio_mes, fin_mes) -> pd.DataFrame:
+    """Filas de NOTAS (NUEVA/CANCELADA) con posicion activa en algun momento del mes.
+    Fuente unica reutilizada por pago_inversores_notas_mes y por el prorrateo de ingresos."""
+    return df_inv[
+        (df_inv["tipo_inversion"].apply(limpiar_texto) == "nota") &
+        (df_inv["tipo_operacion"].apply(limpiar_texto).str.upper().isin(["NUEVA", "CANCELADA"])) &
+        (df_inv["fecha_inversion"].notna()) &
+        (df_inv["fecha_inversion"] <= fin_mes) &
+        (df_inv["fecha_final_inversion"].isna() | (df_inv["fecha_final_inversion"] >= inicio_mes))
+    ].copy()
+
+
+def _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes) -> float:
+    """Pago devengado a UN inversor de UNA fila de nota en el mes (pro-rata de dias +
+    tramo de tipos Biscafe/Crowe Bolivia). Fuente unica: la usan tanto pago_inversores_notas_mes
+    (total agregado) como el detalle prorrateado de ingresos, para que el pago al inversor
+    sea siempre identico se mire por donde se mire."""
+    INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+    CORTE_TRAMO = pd.Timestamp("2026-02-01")
+
+    if es_chaparro_fernandez_row(row):
+        return 0.0
+    capital = float(row.get("capital_invertido", 0) or 0)
+    inicio_calc = max(row["fecha_inversion"], inicio_mes)
+    fin_calc = fin_mes if pd.isna(row["fecha_final_inversion"]) else min(row["fecha_final_inversion"], fin_mes)
+    if inicio_calc > fin_calc:
+        return 0.0
+    dias = (fin_calc - inicio_calc).days + 1
+    inv_upper = str(row.get("inversor", "")).strip().upper()
+    if inv_upper in INVERSORES_TRAMO:
+        pago = 0.0
+        fin_t1 = pd.Timestamp("2026-01-31")
+        if inicio_calc <= fin_t1:
+            d1 = (min(fin_calc, fin_t1) - inicio_calc).days + 1
+            pago += (capital * 0.05 / 12) * d1 / dias_mes
+        if fin_calc >= CORTE_TRAMO:
+            ini_t2 = max(inicio_calc, CORTE_TRAMO)
+            d2 = (fin_calc - ini_t2).days + 1
+            pago += (capital * 0.075 / 12) * d2 / dias_mes
+        return pago
+    tasa = float(row.get("interes_inversor_anual", 0) or 0)
+    return (capital * tasa / 12) * dias / dias_mes
+
+
 def pago_inversores_notas_mes(df_inv: pd.DataFrame, anio: int, mes: int) -> float:
     """Calcula el pago a inversores de notas por DEVENGO MENSUAL.
 
@@ -2050,58 +2094,106 @@ def pago_inversores_notas_mes(df_inv: pd.DataFrame, anio: int, mes: int) -> floa
     inicio_mes = pd.Timestamp(anio, mes, 1)
     fin_mes = pd.Timestamp(anio, mes, dias_mes)
 
-    INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-    CORTE_TRAMO = pd.Timestamp("2026-02-01")
-
-    df_notas = df_inv[
-        (df_inv["tipo_inversion"].apply(limpiar_texto) == "nota") &
-        (df_inv["tipo_operacion"].apply(limpiar_texto).str.upper().isin(["NUEVA", "CANCELADA"])) &
-        (df_inv["fecha_inversion"].notna()) &
-        (df_inv["fecha_inversion"] <= fin_mes) &
-        (df_inv["fecha_final_inversion"].isna() | (df_inv["fecha_final_inversion"] >= inicio_mes))
-    ].copy()
+    df_notas = _filtrar_notas_activas_en_mes(df_inv, inicio_mes, fin_mes)
 
     total_pago = 0.0
     for _, row in df_notas.iterrows():
-        if es_chaparro_fernandez_row(row):
-            continue
+        total_pago += _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes)
+
+    return total_pago
+
+
+def detalle_notas_mes_prorrateado(df_inv: pd.DataFrame, anio: int, mes: int) -> pd.DataFrame:
+    """Detalle de INGRESOS de notas por DEVENGO MENSUAL (prorrateo), en vez de por evento de
+    cobro real del calendario.
+
+    Por que existe: algunas notas cobran trimestral (o semestralmente) en vez de mensual. Con
+    la logica normal (calendario), todo el cobro del trimestre aparece de golpe en el mes del
+    pago y los otros meses aparecen "vacios", haciendo bailar la rentabilidad mensual. Aqui se
+    reconoce cada mes su parte proporcional de ese cobro (capital x interes_nota_anual / 12,
+    pro-rateado por dias activos en el mes), independientemente de si ese mes coincide con un
+    pago real en el calendario.
+
+    Alcance (a peticion de Yuri): SOLO afecta a los INGRESOS de la nota (cobro_compania). El pago
+    al inversor NO se prorratea de forma distinta: se reutiliza el mismo devengo mensual de
+    siempre (_pago_inversor_nota_devengo / pago_inversores_notas_mes), porque el inversor cobra
+    igual cada mes exista o no exista cobro real ese mes. Esto es solo para visualizacion en el
+    Dashboard general y en la vista de Notas: no toca extractos, comparador de notas ni activos
+    fijos (futbol, motoclick, paraguay, bolivia, bitcoin).
+
+    Nota: a diferencia del detalle por calendario, este devengo no descuenta el cobro cuando una
+    observacion sale NEGATIVA (ese concepto esta ligado a un evento de pago concreto, no a un
+    devengo continuo). Si mas adelante quieres que el riesgo de la nota tambien recorte el
+    prorrateo, lo añadimos aparte.
+    """
+    import calendar as _cal
+    dias_mes = _cal.monthrange(anio, mes)[1]
+    inicio_mes = pd.Timestamp(anio, mes, 1)
+    fin_mes = pd.Timestamp(anio, mes, dias_mes)
+
+    df_notas = _filtrar_notas_activas_en_mes(df_inv, inicio_mes, fin_mes)
+
+    filas = []
+    for _, row in df_notas.iterrows():
         capital = float(row.get("capital_invertido", 0) or 0)
         inicio_calc = max(row["fecha_inversion"], inicio_mes)
         fin_calc = fin_mes if pd.isna(row["fecha_final_inversion"]) else min(row["fecha_final_inversion"], fin_mes)
         if inicio_calc > fin_calc:
             continue
         dias = (fin_calc - inicio_calc).days + 1
-        inv_upper = str(row.get("inversor", "")).strip().upper()
-        if inv_upper in INVERSORES_TRAMO:
-            pago = 0.0
-            fin_t1 = pd.Timestamp("2026-01-31")
-            if inicio_calc <= fin_t1:
-                d1 = (min(fin_calc, fin_t1) - inicio_calc).days + 1
-                pago += (capital * 0.05 / 12) * d1 / dias_mes
-            if fin_calc >= CORTE_TRAMO:
-                ini_t2 = max(inicio_calc, CORTE_TRAMO)
-                d2 = (fin_calc - ini_t2).days + 1
-                pago += (capital * 0.075 / 12) * d2 / dias_mes
-        else:
-            tasa = float(row.get("interes_inversor_anual", 0) or 0)
-            pago = (capital * tasa / 12) * dias / dias_mes
-        total_pago += pago
+        tasa_nota = float(row.get("interes_nota_anual", 0) or 0)
+        cobro_compania = (capital * tasa_nota / 12) * dias / dias_mes
 
-    return total_pago
+        pago_inversor = _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes)
+        es_chaparro = es_chaparro_fernandez_row(row)
+        beneficio_empresa = cobro_compania if es_chaparro else (cobro_compania - pago_inversor)
+
+        filas.append({
+            "fecha_pago": pd.NaT,
+            "nota": row.get("nota", ""),
+            "fecha_observacion_usada": pd.NaT,
+            "detalle_observacion": "",
+            "id_inversion": row.get("id_inversion", ""),
+            "inversor": row.get("inversor", ""),
+            "cuenta_cobro": row.get("cuenta_cobro", "SIN CLASIFICAR"),
+            "es_chaparro_fernandez": es_chaparro,
+            "tratamiento_chaparro": "INTERNO: pago = 0, beneficio = cobro nota" if es_chaparro else "NO",
+            "capital_invertido": capital,
+            "interes_nota_anual": tasa_nota,
+            "interes_inversor_anual": row.get("interes_inversor_anual", 0),
+            "cobro_teorico_compania": cobro_compania,
+            "cobro_compania": cobro_compania,
+            "pago_inversor": pago_inversor,
+            "beneficio_empresa": beneficio_empresa,
+            "resultado_observacion": "PRORRATEADO (devengo mensual)",
+            "ingreso_habilitado": "SI",
+        })
+
+    return pd.DataFrame(filas)
 
 
-def resumen_notas_mes(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int):
-    """Devuelve cobro compañía (calendario), pago inversores (devengo mensual) y beneficio.
+def resumen_notas_mes(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int, mes: int, prorratear: bool = False):
+    """Devuelve cobro compañía, pago inversores (devengo mensual) y beneficio.
 
-    - cobro_compania: calculado desde CALENDARIO_NOTAS (eventos PAGO del mes).
-    - pago_inversores: calculado por devengo mensual (capital × tasa / 12), igual que fijos.
-      Esto garantiza que el pago al inversor es siempre correcto independientemente
-      de si hay o no eventos PAGO en el calendario ese mes.
+    - cobro_compania: por defecto (prorratear=False) se calcula desde CALENDARIO_NOTAS
+      (eventos PAGO del mes) — es el cobro REAL, el mismo que usan extractos y comparador.
+      Si prorratear=True, se calcula por devengo mensual (capital × interes_nota_anual / 12,
+      pro-rateado por días activos del mes) en vez de por evento de calendario. Esto evita que
+      una nota trimestral/semestral "infle" el mes de cobro real y "vacíe" los demás — solo
+      pensado para suavizar la vista del Dashboard general y de Notas.
+    - pago_inversores: siempre por devengo mensual (capital × tasa / 12), igual que fijos e
+      igual con o sin prorrateo, porque el inversor cobra lo mismo cada mes exista o no cobro
+      real ese mes.
     """
-    pagos = pagos_notas_mes(df_cal, anio, mes)
-    detalle = preparar_detalle_notas(df_inv, pagos, df_cal=df_cal, df_control=df_control)
-    cobro_compania = float(detalle["cobro_compania"].sum()) if not detalle.empty else 0.0
-    # Pago al inversor por devengo mensual (lógica correcta)
+    if prorratear:
+        detalle = detalle_notas_mes_prorrateado(df_inv, anio, mes)
+        cobro_compania = float(detalle["cobro_compania"].sum()) if not detalle.empty else 0.0
+        pagos = pagos_notas_mes(df_cal, anio, mes)
+    else:
+        pagos = pagos_notas_mes(df_cal, anio, mes)
+        detalle = preparar_detalle_notas(df_inv, pagos, df_cal=df_cal, df_control=df_control)
+        cobro_compania = float(detalle["cobro_compania"].sum()) if not detalle.empty else 0.0
+    # Pago al inversor por devengo mensual (lógica correcta, igual con o sin prorrateo)
     pago_inversores = pago_inversores_notas_mes(df_inv, anio, mes)
     beneficio = cobro_compania - pago_inversores
     return cobro_compania, pago_inversores, beneficio, detalle, pagos
@@ -2367,18 +2459,21 @@ def detectar_alertas_financieras(df_inv, df_cal, df_control):
     return out
 
 
-def calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio: int, mes: int) -> pd.DataFrame:
+def calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio: int, mes: int, prorratear_notas: bool = False) -> pd.DataFrame:
     """
     Construye una tabla homogénea de rentabilidad mensual por inversión.
     - rentabilidad_beneficio_mes: beneficio empresa / capital.
     - rentabilidad_beneficio_anualizada: rentabilidad mensual x 12.
     - rentabilidad_pagada_inversor_mes: pago inversor / capital.
     - rentabilidad_pagada_inversor_anualizada: rentabilidad mensual pagada x 12.
+
+    prorratear_notas: si True, el cobro de notas se reparte por devengo mensual en vez de por
+    evento de calendario (ver resumen_notas_mes). Solo afecta a las filas 'notas'.
     """
     filas = []
 
     # Notas estructuradas
-    _, _, _, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
+    _, _, _, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes, prorratear=prorratear_notas)
     if detalle_notas is not None and not detalle_notas.empty:
         for _, row in detalle_notas.iterrows():
             capital = float(row.get("capital_invertido", 0) or 0)
@@ -2625,7 +2720,7 @@ def mostrar_cobros_semanales_dashboard(df_inv: pd.DataFrame, df_cal: pd.DataFram
 
 
 
-def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General", incluir_chaparro: bool = True):
+def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = None, mes: int | None = None, vista_activo: str = "General", incluir_chaparro: bool = True, prorratear_notas: bool = False):
     hoy_real = pd.Timestamp.today().normalize()
     if anio is None:
         anio = hoy_real.year
@@ -2640,7 +2735,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     if not activas.empty:
         activas["activo"] = activas.apply(detectar_activo, axis=1)
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
-    c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, int(anio), int(mes))
+    c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, int(anio), int(mes), prorratear=prorratear_notas)
     detalles_fijos = []
     for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
         det = detalle_activo_mes(df_inv, activo, tasa, int(anio), int(mes))
@@ -2662,7 +2757,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     rentabilidad_pagada_inversor_mes = pago_total_mes / capital_total if capital_total else 0
     rentabilidad_pagada_inversor_anualizada = rentabilidad_pagada_inversor_mes * 12
 
-    rentabilidad_inversiones = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, int(anio), int(mes))
+    rentabilidad_inversiones = calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, int(anio), int(mes), prorratear_notas=prorratear_notas)
 
     if not rentabilidad_inversiones.empty:
         rentabilidad_por_activo = rentabilidad_inversiones.groupby("activo", as_index=False).agg(
@@ -2761,7 +2856,7 @@ def grafico_capital_por_inversor(activas):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control):
+def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control, prorratear_notas: bool = False):
     if px is None:
         st.warning("Falta plotly. Añade plotly a requirements.txt.")
         return
@@ -2770,7 +2865,7 @@ def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control):
     for i in range(11, -1, -1):
         fecha = hoy - pd.DateOffset(months=i)
         anio, mes = fecha.year, fecha.month
-        _, _, b_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
+        _, _, b_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes, prorratear=prorratear_notas)
         detalles_fijos = []
         for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
@@ -3580,7 +3675,7 @@ def dashboard_financiero():
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
 
     hoy = pd.Timestamp.today().normalize()
-    col_activo, col_periodo_1, col_periodo_2, col_chaparro = st.columns([1.4, 1, 1, 1.2])
+    col_activo, col_periodo_1, col_periodo_2, col_chaparro, col_prorrateo = st.columns([1.3, 0.9, 0.9, 1.1, 1.1])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
         ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin"],
@@ -3591,6 +3686,12 @@ def dashboard_financiero():
         value=False,
         key="dashboard_incluir_chaparro",
         help="Si está desactivado, Chaparro Fernández queda fuera de capital, cobros, pagos y rentabilidad. Si está activado, se incluye como interno: pago inversor = cobro de la nota y beneficio = 0.",
+    )
+    prorratear_notas = col_prorrateo.checkbox(
+        "Prorratear cobro de notas",
+        value=False,
+        key="dashboard_prorratear_notas",
+        help="Si está activado, el cobro de notas trimestrales/semestrales se reparte a partes iguales entre los meses del periodo (devengo mensual) en vez de aparecer todo de golpe en el mes de cobro real. Solo afecta a los INGRESOS de notas mostrados aquí y en el desglose de Notas; el pago a inversores no cambia, y no afecta a Fútbol, MotoClick, Paraguay, Bolivia ni Bitcoin.",
     )
     anio_dashboard = int(col_periodo_1.number_input(
         "Año del dashboard",
@@ -3608,7 +3709,8 @@ def dashboard_financiero():
     ))
     st.caption(
         f"Vista seleccionada: {vista_dashboard} · Periodo: {nombre_mes_es(mes_dashboard)} {anio_dashboard} · "
-        f"Chaparro Fernández: {'incluido' if incluir_chaparro else 'excluido'}"
+        f"Chaparro Fernández: {'incluido' if incluir_chaparro else 'excluido'} · "
+        f"Cobro de notas: {'prorrateado (devengo mensual)' if prorratear_notas else 'real (calendario)'}"
     )
 
     df_inv_marcado = aplicar_filtro_chaparro_fernandez(df_inv, True)
@@ -3637,6 +3739,7 @@ def dashboard_financiero():
         mes_dashboard,
         vista_dashboard,
         incluir_chaparro=incluir_chaparro,
+        prorratear_notas=prorratear_notas,
     )
     df_inv_calculo = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
 
@@ -3736,7 +3839,7 @@ def dashboard_financiero():
     with tab2:
         grafico_capital_por_inversor(resumen["activas"])
     with tab3:
-        grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control)
+        grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control, prorratear_notas=prorratear_notas)
     with tab4:
         st.caption("Resumen del periodo seleccionado por tipo de activo. La rentabilidad anualizada es la rentabilidad mensual multiplicada por 12.")
         tabla_activo = resumen.get("rentabilidad_por_activo", pd.DataFrame())
