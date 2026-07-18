@@ -4297,16 +4297,21 @@ def extraer_datos_nota_con_ia(pdf_bytes: bytes) -> dict:
         from pypdf import PdfReader
         lector = PdfReader(BytesIO(pdf_bytes))
         if lector.is_encrypted:
+            # Muchos pricing supplements vienen con cifrado de SOLO PERMISOS (sin contraseña
+            # real para abrirlos). decrypt("") los desbloquea sin problema, pero la propiedad
+            # is_encrypted de pypdf se queda en True para siempre aunque ya esté desbloqueado
+            # -- por eso NO hay que volver a mirar is_encrypted, sino el resultado de decrypt().
+            resultado_decrypt = 0
             try:
-                lector.decrypt("")  # algunos PDFs están "cifrados" solo con permisos, sin contraseña real
+                resultado_decrypt = lector.decrypt("")
             except Exception:
-                pass
-        if lector.is_encrypted:
-            return {"error": (
-                "El PDF está protegido con contraseña o cifrado, y no se puede leer así. "
-                "Quitale la contraseña/protección (por ejemplo abriéndolo y exportándolo de nuevo "
-                "sin seguridad) y volvé a subirlo."
-            )}
+                resultado_decrypt = 0
+            if not resultado_decrypt:
+                return {"error": (
+                    "El PDF está protegido con una contraseña real (no solo permisos), y no se "
+                    "puede leer así. Quitale la contraseña (por ejemplo abriéndolo y exportándolo "
+                    "de nuevo sin seguridad) y volvé a subirlo."
+                )}
         n_paginas = len(lector.pages)
         if n_paginas > 100:
             usar_texto_plano = True
