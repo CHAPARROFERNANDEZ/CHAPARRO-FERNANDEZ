@@ -2114,12 +2114,20 @@ def detalle_notas_mes_prorrateado(df_inv: pd.DataFrame, anio: int, mes: int) -> 
     pro-rateado por dias activos en el mes), independientemente de si ese mes coincide con un
     pago real en el calendario.
 
+    Universo de capital (INGRESOS): igual que el cobro real (inversiones_activas_para_nota /
+    filtrar_notas) -- incluye posiciones NUEVA, CANCELADA y REINVERSION, porque el capital
+    reinvertido sigue generando interes real de la nota para la empresa. Si aqui solo se
+    contaran NUEVA/CANCELADA (como en el pago a inversores), el prorrateo infravaloraria el
+    ingreso de cualquier nota con reinversiones. Tambien aplica el mismo filtro
+    activo_generador_interes == "SI" que usa filtrar_notas.
+
     Alcance (a peticion de Yuri): SOLO afecta a los INGRESOS de la nota (cobro_compania). El pago
     al inversor NO se prorratea de forma distinta: se reutiliza el mismo devengo mensual de
-    siempre (_pago_inversor_nota_devengo / pago_inversores_notas_mes), porque el inversor cobra
-    igual cada mes exista o no exista cobro real ese mes. Esto es solo para visualizacion en el
-    Dashboard general y en la vista de Notas: no toca extractos, comparador de notas ni activos
-    fijos (futbol, motoclick, paraguay, bolivia, bitcoin).
+    siempre (_pago_inversor_nota_devengo), y las filas REINVERSION siguen sin generar pago propio
+    (el interes ya esta en la operacion NUEVA origen), igual que en pago_inversores_notas_mes.
+    Esto es solo para visualizacion en el Dashboard general y en la vista de Notas: no toca
+    extractos, comparador de notas ni activos fijos (futbol, motoclick, paraguay, bolivia,
+    bitcoin).
 
     Nota: a diferencia del detalle por calendario, este devengo no descuenta el cobro cuando una
     observacion sale NEGATIVA (ese concepto esta ligado a un evento de pago concreto, no a un
@@ -2131,10 +2139,15 @@ def detalle_notas_mes_prorrateado(df_inv: pd.DataFrame, anio: int, mes: int) -> 
     inicio_mes = pd.Timestamp(anio, mes, 1)
     fin_mes = pd.Timestamp(anio, mes, dias_mes)
 
-    df_notas = _filtrar_notas_activas_en_mes(df_inv, inicio_mes, fin_mes)
+    notas_todas = filtrar_notas(df_inv)
+    activas_ingreso = notas_todas[
+        notas_todas["fecha_inversion"].notna()
+        & (notas_todas["fecha_inversion"] <= fin_mes)
+        & (notas_todas["fecha_final_inversion"].isna() | (notas_todas["fecha_final_inversion"] >= inicio_mes))
+    ].copy()
 
     filas = []
-    for _, row in df_notas.iterrows():
+    for _, row in activas_ingreso.iterrows():
         capital = float(row.get("capital_invertido", 0) or 0)
         inicio_calc = max(row["fecha_inversion"], inicio_mes)
         fin_calc = fin_mes if pd.isna(row["fecha_final_inversion"]) else min(row["fecha_final_inversion"], fin_mes)
@@ -2144,13 +2157,18 @@ def detalle_notas_mes_prorrateado(df_inv: pd.DataFrame, anio: int, mes: int) -> 
         tasa_nota = float(row.get("interes_nota_anual", 0) or 0)
         cobro_compania = (capital * tasa_nota / 12) * dias / dias_mes
 
-        pago_inversor = _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes)
+        es_reinversion = str(row.get("tipo_operacion", "")).strip().upper() == "REINVERSION"
         es_chaparro = es_chaparro_fernandez_row(row)
+        if es_reinversion:
+            # La reinversion no genera pago propio: el interes ya esta en la operacion NUEVA origen.
+            pago_inversor = 0.0
+        else:
+            pago_inversor = _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes)
         beneficio_empresa = cobro_compania if es_chaparro else (cobro_compania - pago_inversor)
 
         filas.append({
             "fecha_pago": pd.NaT,
-            "nota": row.get("nota", ""),
+            "nota": row.get("nota_num", ""),
             "fecha_observacion_usada": pd.NaT,
             "detalle_observacion": "",
             "id_inversion": row.get("id_inversion", ""),
