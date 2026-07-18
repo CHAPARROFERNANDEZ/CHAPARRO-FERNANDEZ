@@ -1064,7 +1064,16 @@ def cargar_excel_completo():
     if "tipo_evento" in cal.columns:
         cal["tipo_evento"] = cal["tipo_evento"].fillna("").astype(str).str.strip().str.upper()
     if "fecha" in cal.columns:
-        cal["fecha"] = pd.to_datetime(cal["fecha"], errors="coerce", dayfirst=True).dt.normalize()
+        # IMPORTANTE: las fechas de CALENDARIO_NOTAS se guardan como texto ISO (YYYY-MM-DD).
+        # dayfirst=True sobre texto ISO invierte día/mes en fechas ambiguas y produce NaT
+        # en las que no lo son (ej. día 14 no puede ser mes), perdiendo eventos PAGO enteros.
+        # Se parsea primero como ISO (formato real actual) y solo se usa dayfirst=True como
+        # respaldo para lo que no encaje en ISO (ej. fechas en formato español DD/MM/YYYY).
+        _parsed = pd.to_datetime(cal["fecha"], errors="coerce", format="%Y-%m-%d")
+        _faltantes = _parsed.isna() & cal["fecha"].notna()
+        if _faltantes.any():
+            _parsed.loc[_faltantes] = pd.to_datetime(cal.loc[_faltantes, "fecha"], errors="coerce", dayfirst=True)
+        cal["fecha"] = _parsed.dt.normalize()
 
     if not control.empty:
         if "nota" in control.columns:
