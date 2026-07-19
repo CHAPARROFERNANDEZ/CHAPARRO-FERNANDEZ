@@ -5897,19 +5897,19 @@ def _tab_dashboard_noticias(df_inv: pd.DataFrame, df_control: pd.DataFrame):
 
     etiquetas = {t: f"{t} (Nota {', '.join(str(n) for n in _notas_de(t))})" for t in tickers_unicos}
     seleccion = st.multiselect(
-        "Compañías a incluir",
+        "Compañías a incluir (añade las que quieras)",
         options=tickers_unicos,
-        default=tickers_unicos,
+        default=[],
         format_func=lambda t: etiquetas.get(t, t),
-        help="Por defecto están todas. Quita las que no te interesen para ahorrar tokens de API.",
+        help="Vacío por defecto — añade solo las compañías que te interesen, o usa el botón de 'todas' de abajo.",
     )
-    if not seleccion:
-        st.info("Elige al menos una compañía.")
-        return
 
     col1, col2 = st.columns(2)
-    escanear = col1.button("🔍 Escanear novedades (barato)", type="primary")
-    todas_completas = col2.button("📰 Noticias completas de todas las seleccionadas")
+    escanear = col1.button("🔍 Escanear novedades (barato)", type="primary", disabled=not seleccion)
+    todas_completas = col2.button("📰 Noticias completas de todas las compañías")
+
+    if not seleccion and not todas_completas:
+        st.info("Añade compañías arriba para escanear/leer solo esas, o pulsa el botón de todas.")
 
     if escanear:
         with st.spinner(f"Escaneando {len(seleccion)} compañía(s)..."):
@@ -5949,7 +5949,7 @@ def _tab_dashboard_noticias(df_inv: pd.DataFrame, df_control: pd.DataFrame):
                 _mostrar_noticias_completas(elegidas_profundizar, control_activo, _notas_de)
 
     if todas_completas:
-        _mostrar_noticias_completas(seleccion, control_activo, _notas_de)
+        _mostrar_noticias_completas(tickers_unicos, control_activo, _notas_de)
 
 
 def _mostrar_noticias_completas(tickers: list, control_activo: pd.DataFrame, _notas_de):
@@ -8065,6 +8065,9 @@ except Exception as e:
 def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
     """
     Cobro bruto de la compañía por notas con cuenta_cobro=JORDI que tienen PAGO en el mes.
+    Solo cuentan las NOTAS 1 A 8 (las que se invirtieron con capital personal de Jordi) y que
+    estén ACTIVAS (tipo_operacion != cancelada) — una nota cancelada deja de reducir la deuda
+    a partir de su cancelación, aunque haya tenido pagos mientras estuvo activa.
     cobro = capital * interes_nota_anual / 12  (por cada nota con PAGO ese mes)
     Devuelve (total, {nombre_nota: importe})
     """
@@ -8074,13 +8077,16 @@ def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
     pagos_mes = cal_tmp[
         (cal_tmp["tipo_evento"].astype(str).str.upper() == "PAGO") &
         (cal_tmp["_fecha"].dt.year == anio) &
-        (cal_tmp["_fecha"].dt.month == mes)
+        (cal_tmp["_fecha"].dt.month == mes) &
+        (cal_tmp["_nota"] >= 1) & (cal_tmp["_nota"] <= 8)
     ]
     notas_jordi = df_inv[
         (df_inv["cuenta_cobro"].astype(str).str.strip().str.upper() == "JORDI") &
         (df_inv["activo_generador_interes"].astype(str).str.upper() == "SI") &
         (df_inv["tipo_operacion"].astype(str).str.lower() != "cancelada")
-    ]
+    ].copy()
+    notas_jordi["_nota_num"] = pd.to_numeric(notas_jordi["nombre_activo"].apply(extraer_numero_nota), errors="coerce")
+    notas_jordi = notas_jordi[notas_jordi["_nota_num"].notna() & (notas_jordi["_nota_num"] >= 1) & (notas_jordi["_nota_num"] <= 8)]
     notas_en_mes = pagos_mes["_nota"].dropna().astype(int).unique()
     total = 0.0
     por_nota = {}
