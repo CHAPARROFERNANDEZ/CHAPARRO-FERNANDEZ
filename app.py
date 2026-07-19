@@ -8064,13 +8064,23 @@ except Exception as e:
 
 def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
     """
-    Cobro bruto de la compañía por notas con cuenta_cobro=JORDI que tienen PAGO en el mes.
-    Solo cuentan las NOTAS 1 A 8 (las que se invirtieron con capital personal de Jordi) y que
-    estén ACTIVAS (tipo_operacion != cancelada) — una nota cancelada deja de reducir la deuda
-    a partir de su cancelación, aunque haya tenido pagos mientras estuvo activa.
-    cobro = capital * interes_nota_anual / 12  (por cada nota con PAGO ese mes)
+    Cobro bruto de la compañía por notas con cuenta_cobro=JORDI en el mes.
+    Solo cuentan las NOTAS 1 A 8 (las que se invirtieron con capital personal de Jordi) que
+    estén ACTIVAS en ese mes: ni canceladas (tipo_operacion != cancelada) ni ya llamadas
+    (motivo call/call final con fecha_final_inversion <= fin de este mes), y que ya existieran
+    a esa fecha (fecha_inversion <= fin de este mes). Una nota llamada deja de reducir la deuda
+    a partir del mes de su call, aunque haya tenido pagos mientras estuvo activa en meses
+    anteriores — por eso el corte se calcula mes a mes, no con 'hoy'.
+
+    IMPORTANTE: toda nota activa ese mes se incluye SIEMPRE en por_nota, aunque ese mes en
+    concreto no le tocara pago (p.ej. una nota trimestral en un mes que no es de cobro) —
+    en ese caso sale con importe 0, en vez de desaparecer de la lista sin más.
+
+    cobro = capital * interes_nota_anual / 12 * periodicidad, solo si hay PAGO ese mes en el calendario.
     Devuelve (total, {nombre_nota: importe})
     """
+    fecha_corte_mes = pd.Timestamp(anio, mes, 1) + pd.offsets.MonthEnd(0)
+
     cal_tmp = df_cal.copy()
     cal_tmp["_fecha"] = pd.to_datetime(cal_tmp["fecha"], dayfirst=True, errors="coerce")
     cal_tmp["_nota"] = pd.to_numeric(cal_tmp["nota"], errors="coerce")
@@ -8080,31 +8090,51 @@ def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
         (cal_tmp["_fecha"].dt.month == mes) &
         (cal_tmp["_nota"] >= 1) & (cal_tmp["_nota"] <= 8)
     ]
+    notas_con_pago_este_mes = set(pagos_mes["_nota"].dropna().astype(int).unique())
+
+    # Notas ya llamadas (call o call final) a fecha de cierre de este mes: dejan de contar.
+    notas_llamadas = set()
+    if "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
+        motivo_normalizado = df_inv["motivo"].astype(str).str.lower().str.strip()
+        llamadas_df = df_inv[motivo_normalizado.isin(["call", "call final"])].copy()
+        llamadas_df["fecha_final_inversion"] = pd.to_datetime(llamadas_df["fecha_final_inversion"], errors="coerce")
+        llamadas_df["nota_num"] = llamadas_df["nombre_activo"].apply(extraer_numero_nota)
+        for nota_num, grupo in llamadas_df.groupby("nota_num"):
+            if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= fecha_corte_mes)).all():
+                notas_llamadas.add(int(nota_num))
+
     notas_jordi = df_inv[
         (df_inv["cuenta_cobro"].astype(str).str.strip().str.upper() == "JORDI") &
         (df_inv["activo_generador_interes"].astype(str).str.upper() == "SI") &
         (df_inv["tipo_operacion"].astype(str).str.lower() != "cancelada")
     ].copy()
     notas_jordi["_nota_num"] = pd.to_numeric(notas_jordi["nombre_activo"].apply(extraer_numero_nota), errors="coerce")
-    notas_jordi = notas_jordi[notas_jordi["_nota_num"].notna() & (notas_jordi["_nota_num"] >= 1) & (notas_jordi["_nota_num"] <= 8)]
-    notas_en_mes = pagos_mes["_nota"].dropna().astype(int).unique()
+    notas_jordi["_fecha_inversion"] = pd.to_datetime(notas_jordi.get("fecha_inversion"), errors="coerce")
+    notas_jordi = notas_jordi[
+        notas_jordi["_nota_num"].notna() & (notas_jordi["_nota_num"] >= 1) & (notas_jordi["_nota_num"] <= 8) &
+        (~notas_jordi["_nota_num"].astype(int).isin(notas_llamadas)) &
+        (notas_jordi["_fecha_inversion"].isna() | (notas_jordi["_fecha_inversion"] <= fecha_corte_mes))
+    ]
+
     total = 0.0
     por_nota = {}
-    for nota_num in notas_en_mes:
+    for nota_num in sorted(notas_jordi["_nota_num"].astype(int).unique()):
         nombre = f"NOTA_{nota_num:02d}"
         activas = notas_jordi[notas_jordi["nombre_activo"].astype(str).str.upper() == nombre]
         if activas.empty:
             continue
         sub = 0.0
-        for _, r in activas.iterrows():
-            cap = float(r.get("capital_invertido", 0))
-            tasa_nota = float(r.get("interes_nota_anual", 0))
-            periodicidad = int(r.get("periodicidad_meses", 1) or 1)
-            cobro = cap * tasa_nota / 12 * periodicidad
-            sub += cobro
-        if sub > 0:
-            por_nota[nombre] = sub
-            total += sub
+        if nota_num in notas_con_pago_este_mes:
+            for _, r in activas.iterrows():
+                cap = float(r.get("capital_invertido", 0))
+                tasa_nota = float(r.get("interes_nota_anual", 0))
+                periodicidad = int(r.get("periodicidad_meses", 1) or 1)
+                cobro = cap * tasa_nota / 12 * periodicidad
+                sub += cobro
+        # Se incluye SIEMPRE (aunque sub sea 0) para que se vea que la nota está activa
+        # pero este mes en concreto no le tocaba cobro.
+        por_nota[nombre] = sub
+        total += sub
     return total, por_nota
 
 
