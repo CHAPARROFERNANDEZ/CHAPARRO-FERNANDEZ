@@ -2663,6 +2663,9 @@ def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataF
         margen_a_barrera = None if (precio_actual is None or precio_contingencia is None) else ((precio_actual - precio_contingencia) / precio_contingencia) * 100
         alerta_riesgo = clasificar_alerta_riesgo(variacion)
         estado_barrera = "SIN DATO" if (precio_actual is None or precio_contingencia is None) else ("OK" if precio_actual >= precio_contingencia else "RIESGO")
+        # Cuántos puntos porcentuales le quedan de colchón antes de tocar el umbral de riesgo (-30%).
+        # Si ya está en ROJO, sale ≤ 0 (ya lo cruzó).
+        distancia_a_rojo = None if variacion is None else (variacion - (-30))
 
         filas.append({
             "nota": int(row["nota"]),
@@ -2670,6 +2673,7 @@ def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataF
             "precio_compra": precio_compra,
             "precio_actual": precio_actual,
             "variacion_%": variacion,
+            "distancia_a_rojo_%": distancia_a_rojo,
             "precio_contingencia": precio_contingencia,
             "margen_a_barrera_%": margen_a_barrera,
             "estado_barrera": estado_barrera,
@@ -2702,6 +2706,48 @@ def resumen_alertas_por_nota(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame
         })
     out = pd.DataFrame(filas)
     return out.sort_values("peor_variacion_%")
+
+
+def construir_semaforo_consolidado_notas(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame:
+    """Semáforo por nota (una fila por nota, no por ticker): para cada nota se toma el ticker con
+    PEOR variación (el que manda en un worst-of), y se muestra su distancia al umbral de riesgo.
+    A diferencia de resumen_alertas_por_nota, esta función devuelve TODAS las notas (verdes y rojas),
+    para tener de un vistazo el estado completo de la cartera de notas sin entrar nota por nota."""
+    cols_vacio = ["nota", "alerta", "peor_ticker", "peor_variacion_%", "distancia_a_rojo_%", "n_tickers"]
+    if resumen_notas_actual is None or resumen_notas_actual.empty:
+        return pd.DataFrame(columns=cols_vacio)
+
+    filas = []
+    for nota, grupo in resumen_notas_actual.groupby("nota"):
+        grupo_valido = grupo.dropna(subset=["variacion_%"])
+        if grupo_valido.empty:
+            filas.append({
+                "nota": int(nota), "alerta": "SIN DATO", "peor_ticker": ", ".join(grupo["ticker"].astype(str).unique()),
+                "peor_variacion_%": None, "distancia_a_rojo_%": None, "n_tickers": len(grupo),
+            })
+            continue
+        peor = grupo_valido.sort_values("variacion_%", ascending=True).iloc[0]
+        filas.append({
+            "nota": int(nota),
+            "alerta": peor["alerta_riesgo"],
+            "peor_ticker": peor["ticker"],
+            "peor_variacion_%": peor["variacion_%"],
+            "distancia_a_rojo_%": peor.get("distancia_a_rojo_%"),
+            "n_tickers": len(grupo),
+        })
+    out = pd.DataFrame(filas)
+    return out.sort_values("peor_variacion_%", na_position="last").reset_index(drop=True) if not out.empty else out
+
+
+def colorear_semaforo_consolidado(row):
+    alerta = row.get("alerta", "")
+    if alerta == "ROJO":
+        return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
+    dist = row.get("distancia_a_rojo_%")
+    if pd.notna(dist) and dist < 10:
+        # Todavía en OK pero a menos de 10 puntos de convertirse en ROJO: aviso temprano.
+        return ["background-color: #fef3c7; color: #78350f; font-weight: 700"] * len(row)
+    return [""] * len(row)
 
 
 def colorear_filas_alerta_notas(row):
@@ -5138,9 +5184,11 @@ def _tab_ficha_compania(df_control: pd.DataFrame):
     st.caption("⚠️ Este resumen es una síntesis de noticias públicas hecha por IA, no una recomendación de inversión ni una predicción de precio.")
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
 def obtener_resumen_noticias_ia(ticker: str, nombre_compania: str) -> str:
     """Usa la API de Claude con la herramienta de búsqueda web para resumir noticias
-    recientes relevantes de una compañía. Devuelve texto, nunca cifras de precio inventadas."""
+    recientes relevantes de una compañía. Devuelve texto, nunca cifras de precio inventadas.
+    Cacheado 6h: las noticias no cambian minuto a minuto y cada llamada cuesta tokens de API."""
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
     try:
         resp = requests.post(
@@ -5444,10 +5492,26 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
         st.warning("No se pudo simular ninguna nota — revisa los tickers.")
         return
 
+    # --- Score compuesto 0-100 para rankear las candidatas de un vistazo ---
+    # 45% prob. de cobrar el cupón, 30% (1 - prob. de pérdida de capital), 25% rentabilidad neta
+    # esperada normalizada entre las candidatas comparadas (min-max, no es un valor absoluto).
+    rentas = [r["rentabilidad_esperada_neta"] for r in resultados_notas]
+    renta_min, renta_max = min(rentas), max(rentas)
+    for r in resultados_notas:
+        renta_norm = 0.5 if renta_max == renta_min else (r["rentabilidad_esperada_neta"] - renta_min) / (renta_max - renta_min)
+        score = 100 * (0.45 * r["prob_cupon_media"] + 0.30 * (1 - r["prob_perdida_capital"]) + 0.25 * renta_norm)
+        r["score"] = max(0.0, min(100.0, score))
+    resultados_notas.sort(key=lambda r: r["score"], reverse=True)
+
     st.markdown("---")
     st.markdown("### 📊 Resultados de la simulación")
+    st.caption(
+        "**Score** (0-100): combina 45% probabilidad de cobrar cupón, 30% probabilidad de NO perder capital, "
+        "25% rentabilidad neta esperada relativa entre las candidatas comparadas. Ordenado de mejor a peor. "
+        "Es una ayuda para rankear rápido, no sustituye leer el detalle de cada nota."
+    )
     df_resumen = pd.DataFrame([{
-        "Nota": r["nombre"], "Tickers": ", ".join(r["tickers"]), "Cupón anual": f"{r['cupon_anual']*100:.1f}%",
+        "🏆 Score": f"{r['score']:.0f}/100", "Nota": r["nombre"], "Tickers": ", ".join(r["tickers"]), "Cupón anual": f"{r['cupon_anual']*100:.1f}%",
         "Prob. media cupón/periodo": f"{r['prob_cupon_media']*100:.1f}%", "Prob. call (total)": f"{r['prob_call_total']*100:.1f}%",
         "Prob. pérdida capital": f"{r['prob_perdida_capital']*100:.1f}%", "Pérdida media si incumple": f"{r['perdida_pct_promedio']:.1f}%",
         "Rentabilidad neta esperada (anual)": f"{r['rentabilidad_esperada_neta']*100:.2f}%",
@@ -5735,6 +5799,141 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
         )
 
 
+def obtener_control_notas_activas(df_inv: pd.DataFrame, df_control: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve CONTROL_NOTAS excluyendo las notas ya cerradas por call (o call final/vencimiento).
+    Extraído como helper reutilizable para que el semáforo, el dashboard de noticias y el
+    calendario de earnings usen siempre el mismo criterio de 'nota activa'."""
+    if df_control is None or df_control.empty or "nota" not in df_control.columns:
+        return df_control
+    hoy = pd.Timestamp.today().normalize()
+    notas_con_call = set()
+    if df_inv is not None and "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
+        motivo_normalizado = df_inv["motivo"].astype(str).str.lower().str.strip()
+        # "call" = llamada anticipada por el emisor. "call final" = vencimiento natural sin
+        # call previo, tratado igual que un call (capital reinvertido, nota cerrada).
+        notas_df = df_inv[motivo_normalizado.isin(["call", "call final"])].copy()
+        notas_df["fecha_final_inversion"] = pd.to_datetime(notas_df["fecha_final_inversion"], errors="coerce")
+        notas_df["nota_num"] = notas_df["nombre_activo"].apply(extraer_numero_nota)
+        for nota_num, grupo in notas_df.groupby("nota_num"):
+            if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= hoy)).all():
+                notas_con_call.add(int(nota_num))
+    return df_control[~df_control["nota"].isin(notas_con_call)].copy() if notas_con_call else df_control
+
+
+def _tab_dashboard_noticias(df_inv: pd.DataFrame, df_control: pd.DataFrame):
+    st.caption(
+        "Titulares y contexto reciente de **todas** las compañías subyacentes de tus notas activas, "
+        "de un vistazo — sin tener que entrar ticker por ticker. Las noticias se cachean 6h para no "
+        "repetir llamadas de IA innecesarias."
+    )
+    control_activo = obtener_control_notas_activas(df_inv, df_control)
+    if control_activo is None or control_activo.empty or "ticker" not in control_activo.columns:
+        st.info("No hay tickers en CONTROL_NOTAS para consultar noticias.")
+        return
+
+    tickers_unicos = sorted(control_activo["ticker"].dropna().astype(str).str.strip().str.upper().unique())
+    tickers_unicos = [t for t in tickers_unicos if t]
+    if not tickers_unicos:
+        st.info("No hay tickers válidos en CONTROL_NOTAS.")
+        return
+
+    st.caption(f"{len(tickers_unicos)} compañías distintas en notas activas: {', '.join(tickers_unicos)}")
+    if not st.button("📰 Cargar noticias de todas las compañías", type="primary"):
+        st.info("Pulsa el botón para buscar noticias (consulta la API de Claude una vez por compañía, cacheado 6h).")
+        return
+
+    barra = st.progress(0.0)
+    for i, ticker in enumerate(tickers_unicos):
+        with st.spinner(f"Buscando noticias de {ticker}..."):
+            fd = obtener_datos_fundamentales(ticker)
+            nombre = fd.get("nombre") or ticker
+            noticias = obtener_resumen_noticias_ia(ticker, nombre)
+        notas_de_este_ticker = sorted(
+            int(n) for n in pd.to_numeric(control_activo[control_activo["ticker"].astype(str).str.upper() == ticker]["nota"], errors="coerce").dropna().unique()
+        )
+        titulo = f"{nombre} ({ticker}) — Nota{'s' if len(notas_de_este_ticker) != 1 else ''} {', '.join(str(n) for n in notas_de_este_ticker)}"
+        with st.expander(titulo, expanded=False):
+            if fd.get("proxima_fecha_resultados"):
+                st.caption(f"📅 Próxima fecha de resultados: {fd['proxima_fecha_resultados']}")
+            st.markdown(_md_seguro(noticias))
+        barra.progress((i + 1) / len(tickers_unicos))
+    st.caption("⚠️ Resúmenes generados por IA a partir de noticias públicas — no son recomendaciones de inversión ni predicciones de precio.")
+
+
+def _tab_calendario_earnings(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
+    st.caption(
+        "Próximas fechas de resultados (earnings) de las compañías subyacentes de tus notas activas, "
+        "cruzadas con la próxima fecha de observación de cada nota. Un earnings justo antes de una "
+        "observación es una señal de alerta real: la volatilidad suele dispararse alrededor de esos días."
+    )
+    control_activo = obtener_control_notas_activas(df_inv, df_control)
+    if control_activo is None or control_activo.empty or "ticker" not in control_activo.columns:
+        st.info("No hay tickers en CONTROL_NOTAS para consultar earnings.")
+        return
+
+    if not st.button("📅 Consultar calendario de earnings", type="primary"):
+        st.info("Pulsa el botón para consultar las próximas fechas de resultados vía Yahoo Finance.")
+        return
+
+    hoy = pd.Timestamp.today().normalize()
+    filas = []
+    tickers_unicos = sorted(control_activo["ticker"].dropna().astype(str).str.strip().str.upper().unique())
+    tickers_unicos = [t for t in tickers_unicos if t]
+    barra = st.progress(0.0)
+    for i, ticker in enumerate(tickers_unicos):
+        with st.spinner(f"Consultando {ticker}..."):
+            fd = obtener_datos_fundamentales(ticker)
+        fecha_earnings = fd.get("proxima_fecha_resultados")
+        fecha_earnings_ts = pd.to_datetime(fecha_earnings, errors="coerce") if fecha_earnings else pd.NaT
+
+        notas_ticker = pd.to_numeric(control_activo[control_activo["ticker"].astype(str).str.upper() == ticker]["nota"], errors="coerce").dropna().unique()
+        for nota_num in notas_ticker:
+            nota_num = int(nota_num)
+            fecha_obs = proximo_evento_nota(df_cal, nota_num, "OBSERVACION") if df_cal is not None and not df_cal.empty else None
+            fecha_obs_ts = pd.to_datetime(fecha_obs, errors="coerce") if fecha_obs is not None else pd.NaT
+
+            dias_hasta_earnings = (fecha_earnings_ts - hoy).days if pd.notna(fecha_earnings_ts) else None
+            alerta_cruce = ""
+            if pd.notna(fecha_earnings_ts) and pd.notna(fecha_obs_ts):
+                # Earnings cae DENTRO de los 10 días previos a la observación → alerta.
+                dias_earnings_a_obs = (fecha_obs_ts - fecha_earnings_ts).days
+                if 0 <= dias_earnings_a_obs <= 10:
+                    alerta_cruce = "⚠️ Earnings justo antes de observación"
+
+            filas.append({
+                "ticker": ticker,
+                "compañía": fd.get("nombre") or ticker,
+                "nota": nota_num,
+                "próximo earnings": fecha_earnings_ts.strftime("%d/%m/%Y") if pd.notna(fecha_earnings_ts) else "Sin dato",
+                "días hasta earnings": dias_hasta_earnings if dias_hasta_earnings is not None else "N/D",
+                "próxima observación": fecha_obs_ts.strftime("%d/%m/%Y") if pd.notna(fecha_obs_ts) else "Sin dato",
+                "alerta": alerta_cruce,
+            })
+        barra.progress((i + 1) / len(tickers_unicos))
+
+    if not filas:
+        st.info("No se encontraron datos de earnings para los tickers de tus notas activas.")
+        return
+
+    df_earnings = pd.DataFrame(filas)
+    df_earnings["_orden"] = pd.to_datetime(df_earnings["próximo earnings"], errors="coerce", dayfirst=True)
+    df_earnings = df_earnings.sort_values("_orden", na_position="last").drop(columns=["_orden"]).reset_index(drop=True)
+
+    n_alertas = int((df_earnings["alerta"] != "").sum())
+    if n_alertas:
+        st.error(f"⚠️ {n_alertas} caso(s) donde el earnings cae en los 10 días previos a una observación.")
+    else:
+        st.success("Ningún earnings próximo cae justo antes de una observación (ventana de 10 días).")
+
+    def _colorear_earnings(row):
+        if row.get("alerta"):
+            return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(df_earnings.style.apply(_colorear_earnings, axis=1), use_container_width=True, hide_index=True)
+    boton_descarga_excel(df_earnings, "calendario_earnings.xlsx")
+
+
 def seccion_notas_archivo():
     df_inv, df_cal, df_control = cargar_excel_completo()
     df_calls = _leer_calendario_calls_cached()
@@ -5742,9 +5941,10 @@ def seccion_notas_archivo():
         df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
 
-    tab_resumen, tab_nueva, tab_auditar, tab_ficha, tab_analisis, tab_comparador = st.tabs([
+    tab_resumen, tab_nueva, tab_auditar, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings = st.tabs([
         "📊 Resumen y alertas", "➕ Añadir nota nueva", "🔍 Auditar nota existente",
         "🏢 Ficha de compañía", "🔬 Análisis completo de nota", "⚖️ Comparador de notas",
+        "📰 Noticias", "📅 Calendario earnings",
     ])
 
     with tab_nueva:
@@ -5761,6 +5961,12 @@ def seccion_notas_archivo():
 
     with tab_comparador:
         _tab_comparador_notas(df_control)
+
+    with tab_noticias:
+        _tab_dashboard_noticias(df_inv, df_control)
+
+    with tab_earnings:
+        _tab_calendario_earnings(df_inv, df_cal, df_control)
 
     with tab_resumen:
         st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
@@ -5781,20 +5987,7 @@ def seccion_notas_archivo():
             st.error("En CONTROL_NOTAS falta una columna de barrera: CONTINGENCY, BARRERA_CAPITAL o BARRERA_CUPON.")
             return
 
-        hoy = pd.Timestamp.today().normalize()
-        notas_con_call = set()
-        if "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
-            motivo_normalizado = df_inv["motivo"].astype(str).str.lower().str.strip()
-            # "call" = llamada anticipada por el emisor. "call final" = vencimiento natural sin
-            # call previo, tratado igual que un call (capital reinvertido, nota cerrada).
-            notas_df = df_inv[motivo_normalizado.isin(["call", "call final"])].copy()
-            notas_df["fecha_final_inversion"] = pd.to_datetime(notas_df["fecha_final_inversion"], errors="coerce")
-            notas_df["nota_num"] = notas_df["nombre_activo"].apply(extraer_numero_nota)
-            for nota_num, grupo in notas_df.groupby("nota_num"):
-                if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= hoy)).all():
-                    notas_con_call.add(int(nota_num))
-
-        df_control_filtrado = df_control[~df_control["nota"].isin(notas_con_call)].copy() if notas_con_call else df_control
+        df_control_filtrado = obtener_control_notas_activas(df_inv, df_control)
 
         if st.button("Actualizar precios actuales"):
             st.cache_data.clear()
@@ -5813,6 +6006,27 @@ def seccion_notas_archivo():
         c2.metric("Tickers", len(resumen))
         c3.metric("Notas en riesgo (variación ≤ -30%)", int((alertas_resumen["alerta"] == "ROJO").sum()) if not alertas_resumen.empty else 0)
 
+        st.markdown("### 🚦 Semáforo consolidado por nota")
+        st.caption(
+            "Una fila por nota (no por ticker): se toma el peor ticker de cada nota (el que manda en un worst-of). "
+            "🔴 = ya en riesgo (variación ≤ -30%). 🟡 = todavía OK pero a menos de 10 puntos de entrar en riesgo. "
+            "Sin color = margen cómodo."
+        )
+        semaforo = construir_semaforo_consolidado_notas(resumen)
+        if not semaforo.empty:
+            semaforo_mostrar = semaforo.copy()
+            semaforo_mostrar["peor_variacion_%"] = semaforo_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
+            semaforo_mostrar["distancia_a_rojo_%"] = semaforo_mostrar["distancia_a_rojo_%"].apply(lambda x: f"{float(x):.2f} pts" if pd.notna(x) else "Sin dato")
+            st.dataframe(semaforo.style.apply(lambda r: colorear_semaforo_consolidado(r), axis=1).format({
+                "peor_variacion_%": lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato",
+                "distancia_a_rojo_%": lambda x: f"{float(x):.2f} pts" if pd.notna(x) else "Sin dato",
+            }), use_container_width=True, hide_index=True)
+            boton_descarga_excel(semaforo, "semaforo_consolidado_notas.xlsx")
+        else:
+            st.info("No hay notas con datos suficientes para el semáforo.")
+
+        st.markdown("---")
+        st.markdown("### Detalle por ticker")
         tabla = resumen.copy()
         tabla["variacion_%"] = pd.to_numeric(tabla["variacion_%"], errors="coerce")
         tabla["margen_a_barrera_%"] = pd.to_numeric(tabla["margen_a_barrera_%"], errors="coerce")
