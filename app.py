@@ -2710,10 +2710,11 @@ def resumen_alertas_por_nota(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame
 
 def construir_semaforo_consolidado_notas(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame:
     """Semáforo por nota (una fila por nota, no por ticker): para cada nota se toma el ticker con
-    PEOR variación (el que manda en un worst-of), y se muestra su distancia al umbral de riesgo.
-    A diferencia de resumen_alertas_por_nota, esta función devuelve TODAS las notas (verdes y rojas),
-    para tener de un vistazo el estado completo de la cartera de notas sin entrar nota por nota."""
-    cols_vacio = ["nota", "alerta", "peor_ticker", "peor_variacion_%", "distancia_a_rojo_%", "n_tickers"]
+    PEOR variación (el que manda en un worst-of), y se muestra su precio actual, su precio de
+    contingencia (barrera) y el margen % entre ambos. A diferencia de resumen_alertas_por_nota,
+    esta función devuelve TODAS las notas (verdes y rojas), para tener de un vistazo el estado
+    completo de la cartera de notas sin entrar nota por nota."""
+    cols_vacio = ["nota", "alerta", "peor_ticker", "peor_variacion_%", "precio_actual", "precio_contingencia", "margen_a_barrera_%", "distancia_a_rojo_%", "n_tickers"]
     if resumen_notas_actual is None or resumen_notas_actual.empty:
         return pd.DataFrame(columns=cols_vacio)
 
@@ -2723,7 +2724,8 @@ def construir_semaforo_consolidado_notas(resumen_notas_actual: pd.DataFrame) -> 
         if grupo_valido.empty:
             filas.append({
                 "nota": int(nota), "alerta": "SIN DATO", "peor_ticker": ", ".join(grupo["ticker"].astype(str).unique()),
-                "peor_variacion_%": None, "distancia_a_rojo_%": None, "n_tickers": len(grupo),
+                "peor_variacion_%": None, "precio_actual": None, "precio_contingencia": None,
+                "margen_a_barrera_%": None, "distancia_a_rojo_%": None, "n_tickers": len(grupo),
             })
             continue
         peor = grupo_valido.sort_values("variacion_%", ascending=True).iloc[0]
@@ -2732,6 +2734,9 @@ def construir_semaforo_consolidado_notas(resumen_notas_actual: pd.DataFrame) -> 
             "alerta": peor["alerta_riesgo"],
             "peor_ticker": peor["ticker"],
             "peor_variacion_%": peor["variacion_%"],
+            "precio_actual": peor.get("precio_actual"),
+            "precio_contingencia": peor.get("precio_contingencia"),
+            "margen_a_barrera_%": peor.get("margen_a_barrera_%"),
             "distancia_a_rojo_%": peor.get("distancia_a_rojo_%"),
             "n_tickers": len(grupo),
         })
@@ -6115,18 +6120,21 @@ def seccion_notas_archivo():
         st.markdown("### 🚦 Semáforo consolidado por nota")
         st.caption(
             "Una fila por nota (no por ticker): se toma el peor ticker de cada nota (el que manda en un worst-of). "
-            "🔴 = ya en riesgo (variación ≤ -30%). 🟡 = todavía OK pero a menos de 10 puntos de entrar en riesgo. "
-            "Sin color = margen cómodo."
+            "🔴 = ya en riesgo (variación ≤ -30% vs precio de compra). 🟡 = todavía OK pero a menos de 10 puntos de entrar en riesgo. "
+            "Sin color = margen cómodo. 'margen_a_barrera_%' es la variación entre el precio actual y el precio de contingencia (barrera)."
         )
         semaforo = construir_semaforo_consolidado_notas(resumen)
         if not semaforo.empty:
-            semaforo_mostrar = semaforo.copy()
-            semaforo_mostrar["peor_variacion_%"] = semaforo_mostrar["peor_variacion_%"].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato")
-            semaforo_mostrar["distancia_a_rojo_%"] = semaforo_mostrar["distancia_a_rojo_%"].apply(lambda x: f"{float(x):.2f} pts" if pd.notna(x) else "Sin dato")
-            st.dataframe(semaforo.style.apply(lambda r: colorear_semaforo_consolidado(r), axis=1).format({
-                "peor_variacion_%": lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato",
-                "distancia_a_rojo_%": lambda x: f"{float(x):.2f} pts" if pd.notna(x) else "Sin dato",
-            }), use_container_width=True, hide_index=True)
+            st.dataframe(
+                semaforo.style.apply(colorear_semaforo_consolidado, axis=1).format({
+                    "peor_variacion_%": lambda x: f"{float(x):.2f}%" if pd.notna(x) else "Sin dato",
+                    "precio_actual": lambda x: f"${float(x):,.2f}" if pd.notna(x) else "Sin dato",
+                    "precio_contingencia": lambda x: f"${float(x):,.2f}" if pd.notna(x) else "Sin dato",
+                    "margen_a_barrera_%": lambda x: f"{float(x):+.2f}%" if pd.notna(x) else "Sin dato",
+                }),
+                use_container_width=True, hide_index=True,
+                column_order=["nota", "alerta", "peor_ticker", "peor_variacion_%", "precio_actual", "precio_contingencia", "margen_a_barrera_%", "n_tickers"],
+            )
             boton_descarga_excel(semaforo, "semaforo_consolidado_notas.xlsx")
         else:
             st.info("No hay notas con datos suficientes para el semáforo.")
