@@ -5196,17 +5196,21 @@ def obtener_resumen_noticias_ia(ticker: str, nombre_compania: str) -> str:
             headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
             json={
                 "model": "claude-sonnet-4-5",
-                "max_tokens": 800,
-                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                "max_tokens": 1400,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
                 "system": (
                     "Buscas y resumes noticias RECIENTES (últimos 1-2 meses) que puedan afectar al precio de una acción, "
-                    "para un inversor en notas estructuradas ligadas a esa acción. Sé conciso (máximo 6-8 líneas): "
-                    "resultados financieros recientes, cambios de rating de analistas, noticias regulatorias o legales, "
-                    "eventos corporativos relevantes (fusiones, lanzamientos de producto, cambios de dirección). "
+                    "para un inversor en notas estructuradas ligadas a esa acción. Haz una búsqueda EXHAUSTIVA: "
+                    "no te quedes con el primer resultado — cruza varias fuentes (prensa financiera, comunicados de la "
+                    "propia compañía, notas de analistas) antes de concluir que no hay nada relevante. Cubre en concreto: "
+                    "resultados financieros recientes (con cifras si las encuentras), cambios de rating o precio objetivo "
+                    "de analistas, noticias regulatorias o legales, eventos corporativos relevantes (fusiones, lanzamientos "
+                    "de producto, cambios de dirección), y cualquier profit warning o guidance revisado. "
+                    "Sé conciso en la redacción final (máximo 8-10 líneas) pero exhaustivo en la búsqueda. "
                     "NUNCA inventes un precio objetivo ni una predicción — solo resume hechos y opiniones ya publicadas, citando la fuente. "
-                    "Si de verdad no encuentras NADA relevante tras buscar, dilo claramente en vez de inventar contenido."
+                    "Si de verdad no encuentras NADA relevante tras buscar en varias fuentes, dilo claramente en vez de inventar contenido."
                 ),
-                "messages": [{"role": "user", "content": f"Busca noticias recientes relevantes sobre {nombre_compania} ({ticker}) que puedan afectar su cotización."}],
+                "messages": [{"role": "user", "content": f"Busca a fondo, cruzando varias fuentes, noticias recientes relevantes sobre {nombre_compania} ({ticker}) que puedan afectar su cotización."}],
             },
             timeout=60,
         )
@@ -5820,11 +5824,62 @@ def obtener_control_notas_activas(df_inv: pd.DataFrame, df_control: pd.DataFrame
     return df_control[~df_control["nota"].isin(notas_con_call)].copy() if notas_con_call else df_control
 
 
+@st.cache_data(show_spinner=False, ttl=21600)
+def obtener_screening_noticias_ia(tickers_nombres: tuple) -> dict:
+    """Escaneo RÁPIDO y barato de varias compañías a la vez: para cada una, decide si hay o no
+    hay noticias relevantes recientes (sin desarrollarlas todavía). Sirve para elegir luego solo
+    las compañías que merece la pena leer en profundidad con obtener_resumen_noticias_ia, y así
+    gastar muchos menos tokens que haciendo un resumen completo de todas de entrada.
+    tickers_nombres: tupla de tuplas (ticker, nombre_compania), para que sea cacheable."""
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+    lista_texto = "\n".join(f"- {t} ({n})" for t, n in tickers_nombres)
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 1200,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 15}],
+                "system": (
+                    "Haces un ESCANEO RÁPIDO de varias compañías para un inversor en notas estructuradas. "
+                    "Para cada compañía de la lista, busca brevemente si ha habido noticias RELEVANTES en las "
+                    "últimas 2-4 semanas: sorpresas de resultados, cambios de rating de analistas, problemas "
+                    "legales/regulatorios, fusiones/adquisiciones, cambios de dirección, profit warnings. "
+                    "No profundices ni escribas resúmenes largos — solo detecta si hay señal o no. "
+                    "Responde ÚNICAMENTE con una línea por compañía, en este formato exacto y nada más "
+                    "(sin markdown, sin explicación adicional):\n"
+                    "TICKER|SI|razón en máximo 12 palabras\n"
+                    "TICKER|NO|\n"
+                    "Usa SI solo si de verdad encontraste algo concreto y reciente; si no encuentras nada claro, usa NO."
+                ),
+                "messages": [{"role": "user", "content": f"Escanea estas compañías:\n{lista_texto}"}],
+            },
+            timeout=90,
+        )
+        data = resp.json()
+        if data.get("type") == "error" or data.get("error"):
+            return {"_error": data.get("error", {}).get("message", str(data))}
+        contenido = data.get("content", [])
+        texto = "".join(b.get("text", "") for b in contenido if b.get("type") == "text")
+        resultado = {}
+        for linea in texto.strip().splitlines():
+            partes = [p.strip() for p in linea.split("|")]
+            if len(partes) >= 2:
+                tk = partes[0].strip().upper().lstrip("-").strip()
+                relevante = partes[1].strip().upper() == "SI"
+                razon = partes[2].strip() if len(partes) >= 3 else ""
+                resultado[tk] = {"relevante": relevante, "razon": razon}
+        return resultado
+    except Exception as e:
+        return {"_error": str(e)}
+
+
 def _tab_dashboard_noticias(df_inv: pd.DataFrame, df_control: pd.DataFrame):
     st.caption(
-        "Titulares y contexto reciente de **todas** las compañías subyacentes de tus notas activas, "
-        "de un vistazo — sin tener que entrar ticker por ticker. Las noticias se cachean 6h para no "
-        "repetir llamadas de IA innecesarias."
+        "Noticias recientes de las compañías subyacentes de tus notas activas. Para gastar menos tokens de "
+        "API, primero puedes hacer un **escaneo rápido** que solo detecta qué compañías tienen novedades "
+        "relevantes, y luego pides el resumen completo solo de esas — en vez de buscar a fondo en todas de entrada."
     )
     control_activo = obtener_control_notas_activas(df_inv, df_control)
     if control_activo is None or control_activo.empty or "ticker" not in control_activo.columns:
@@ -5837,26 +5892,80 @@ def _tab_dashboard_noticias(df_inv: pd.DataFrame, df_control: pd.DataFrame):
         st.info("No hay tickers válidos en CONTROL_NOTAS.")
         return
 
-    st.caption(f"{len(tickers_unicos)} compañías distintas en notas activas: {', '.join(tickers_unicos)}")
-    if not st.button("📰 Cargar noticias de todas las compañías", type="primary"):
-        st.info("Pulsa el botón para buscar noticias (consulta la API de Claude una vez por compañía, cacheado 6h).")
+    def _notas_de(ticker):
+        return sorted(int(n) for n in pd.to_numeric(control_activo[control_activo["ticker"].astype(str).str.upper() == ticker]["nota"], errors="coerce").dropna().unique())
+
+    etiquetas = {t: f"{t} (Nota {', '.join(str(n) for n in _notas_de(t))})" for t in tickers_unicos}
+    seleccion = st.multiselect(
+        "Compañías a incluir",
+        options=tickers_unicos,
+        default=tickers_unicos,
+        format_func=lambda t: etiquetas.get(t, t),
+        help="Por defecto están todas. Quita las que no te interesen para ahorrar tokens de API.",
+    )
+    if not seleccion:
+        st.info("Elige al menos una compañía.")
         return
 
+    col1, col2 = st.columns(2)
+    escanear = col1.button("🔍 Escanear novedades (barato)", type="primary")
+    todas_completas = col2.button("📰 Noticias completas de todas las seleccionadas")
+
+    if escanear:
+        with st.spinner(f"Escaneando {len(seleccion)} compañía(s)..."):
+            tickers_nombres = tuple((t, obtener_datos_fundamentales(t).get("nombre") or t) for t in seleccion)
+            screening = obtener_screening_noticias_ia(tickers_nombres)
+        st.session_state["screening_noticias"] = screening
+
+    screening = st.session_state.get("screening_noticias")
+
+    if screening and "_error" in screening:
+        st.error(f"⚠️ Falló el escaneo: {screening['_error']}")
+    elif screening:
+        con_novedades = [t for t in seleccion if screening.get(t, {}).get("relevante")]
+        sin_novedades = [t for t in seleccion if t in screening and not screening.get(t, {}).get("relevante")]
+        no_encontrados = [t for t in seleccion if t not in screening]
+
+        if con_novedades:
+            st.warning(f"⚠️ {len(con_novedades)} compañía(s) con novedades relevantes:")
+            for t in con_novedades:
+                st.markdown(f"- **{t}** — {screening[t].get('razon') or 'ver detalle'}")
+        else:
+            st.success("Sin novedades relevantes detectadas en las compañías escaneadas.")
+        if sin_novedades:
+            st.caption(f"Sin novedades destacables: {', '.join(sin_novedades)}")
+        if no_encontrados:
+            st.caption(f"No se pudo escanear: {', '.join(no_encontrados)}")
+
+        if con_novedades:
+            elegidas_profundizar = st.multiselect(
+                "¿De cuáles quieres leer el resumen completo?",
+                options=seleccion,
+                default=con_novedades,
+                format_func=lambda t: etiquetas.get(t, t),
+                key="elegidas_profundizar_noticias",
+            )
+            if st.button("📖 Leer resumen completo de las elegidas", type="primary") and elegidas_profundizar:
+                _mostrar_noticias_completas(elegidas_profundizar, control_activo, _notas_de)
+
+    if todas_completas:
+        _mostrar_noticias_completas(seleccion, control_activo, _notas_de)
+
+
+def _mostrar_noticias_completas(tickers: list, control_activo: pd.DataFrame, _notas_de):
     barra = st.progress(0.0)
-    for i, ticker in enumerate(tickers_unicos):
-        with st.spinner(f"Buscando noticias de {ticker}..."):
+    for i, ticker in enumerate(tickers):
+        with st.spinner(f"Buscando noticias en profundidad de {ticker}..."):
             fd = obtener_datos_fundamentales(ticker)
             nombre = fd.get("nombre") or ticker
             noticias = obtener_resumen_noticias_ia(ticker, nombre)
-        notas_de_este_ticker = sorted(
-            int(n) for n in pd.to_numeric(control_activo[control_activo["ticker"].astype(str).str.upper() == ticker]["nota"], errors="coerce").dropna().unique()
-        )
+        notas_de_este_ticker = _notas_de(ticker)
         titulo = f"{nombre} ({ticker}) — Nota{'s' if len(notas_de_este_ticker) != 1 else ''} {', '.join(str(n) for n in notas_de_este_ticker)}"
-        with st.expander(titulo, expanded=False):
+        with st.expander(titulo, expanded=True):
             if fd.get("proxima_fecha_resultados"):
                 st.caption(f"📅 Próxima fecha de resultados: {fd['proxima_fecha_resultados']}")
             st.markdown(_md_seguro(noticias))
-        barra.progress((i + 1) / len(tickers_unicos))
+        barra.progress((i + 1) / len(tickers))
     st.caption("⚠️ Resúmenes generados por IA a partir de noticias públicas — no son recomendaciones de inversión ni predicciones de precio.")
 
 
@@ -5941,17 +6050,14 @@ def seccion_notas_archivo():
         df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
 
-    tab_resumen, tab_nueva, tab_auditar, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings = st.tabs([
-        "📊 Resumen y alertas", "➕ Añadir nota nueva", "🔍 Auditar nota existente",
+    tab_resumen, tab_nueva, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings = st.tabs([
+        "📊 Resumen y alertas", "➕ Añadir nota nueva",
         "🏢 Ficha de compañía", "🔬 Análisis completo de nota", "⚖️ Comparador de notas",
         "📰 Noticias", "📅 Calendario earnings",
     ])
 
     with tab_nueva:
         _tab_añadir_nota_nueva(df_control, df_cal, df_calls)
-
-    with tab_auditar:
-        _tab_auditar_nota(df_inv, df_cal, df_control, df_calls)
 
     with tab_ficha:
         _tab_ficha_compania(df_control)
