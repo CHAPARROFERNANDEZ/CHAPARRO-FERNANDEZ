@@ -3818,11 +3818,12 @@ def dashboard_financiero():
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
 
-    tarjeta_bitcoin_etf()
+    if vista_dashboard == "General":
+        tarjeta_bitcoin_etf()
 
-    st.markdown("---")
-    with st.expander("🧭 Concentración de la cartera (emisor y sector)", expanded=False):
-        _tab_concentracion_cartera(df_inv, df_control)
+        st.markdown("---")
+        with st.expander("🧭 Concentración de la cartera (emisor y sector)", expanded=False):
+            _tab_concentracion_cartera(df_inv, df_control)
 
     if vista_dashboard in ["General", "Notas"]:
         fecha_analisis_notas = pd.Timestamp(anio_dashboard, mes_dashboard, ultimo_dia_mes(anio_dashboard, mes_dashboard)).normalize()
