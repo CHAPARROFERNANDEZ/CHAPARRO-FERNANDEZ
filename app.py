@@ -9021,86 +9021,60 @@ def seccion_asistente_ia_fondo():
             # El estado real de cada nota se calcula en vivo comparando CONTROL_NOTAS
             # (precio_compra/barrera) contra precios actuales de yfinance, más abajo.
 
-            # 2. Precios actuales — reutiliza obtener_datos_fundamentales(), la misma función
-            # robusta (con reintentos y espera creciente) que usa el wizard "Añadir nota" para
-            # las tarjetas de compañía. Está cacheada (ttl=900) así que no es lenta, y no se cae
-            # entera si Yahoo falla en un solo ticker (a diferencia del yf.download() en lote de antes).
-            tickers_unicos = df_control["ticker"].dropna().unique().tolist() if "ticker" in df_control.columns else []
-            precios_live = {}
-            tickers_sin_precio = []
-            for _tk in tickers_unicos:
-                _tk_s = str(_tk).strip().upper()
-                if not _tk_s:
-                    continue
-                try:
-                    _datos_tk = obtener_datos_fundamentales(_tk_s)
-                    if _datos_tk and _datos_tk.get("precio_actual") is not None:
-                        precios_live[_tk_s] = float(_datos_tk["precio_actual"])
-                    else:
-                        tickers_sin_precio.append(_tk_s)
-                except Exception:
-                    tickers_sin_precio.append(_tk_s)
+            # 2. Precios actuales y variación por ticker — REUTILIZA construir_resumen_actual_notas_alertas(),
+            # la MISMA función (idéntico criterio, idéntica fuente de precio: yf.Ticker().history)
+            # que alimenta el semáforo consolidado que ve Yuri en la pantalla "Notas estructuradas".
+            # Antes esta sección llamaba a obtener_datos_fundamentales() por separado (más pesada:
+            # t.info con 4 reintentos + analyst_price_targets + history 1y + calendar por ticker),
+            # lo que la exponía a rate-limits de Yahoo con más facilidad; y cuando fallaba, caía
+            # silenciosamente en el precio "precio_actual" ya guardado en CONTROL_NOTAS (un valor
+            # estático, no en vivo), lo que podía hacer que la IA reportara "sin riesgo" notas que
+            # el semáforo sí marcaba en ROJO. Para que la IA NUNCA pueda divergir de lo que se ve
+            # en pantalla, se usa aquí exactamente el mismo cálculo, con el mismo filtro de notas
+            # activas (obtener_control_notas_activas) que usa el semáforo.
+            df_control_riesgo_ia = obtener_control_notas_activas(df_inv, df_control)
+            resumen_riesgo_ia = construir_resumen_actual_notas_alertas(df_control_riesgo_ia)
 
             def _precios_nota(nota_id):
-                try:
-                    filas = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
-                    if filas.empty: return ""
-                    partes = []
-                    for _, r in filas.iterrows():
-                        ticker = str(r.get("ticker","")).strip().upper()
-                        precio_actual = precios_live.get(ticker, pd.to_numeric(r.get("precio_actual"), errors="coerce"))
-                        precio_compra = pd.to_numeric(r.get("precio_compra"), errors="coerce")
-                        barrera_cap_pct = pd.to_numeric(r.get("barrera_capital"), errors="coerce")
-                        barrera_cup_pct = pd.to_numeric(r.get("barrera_cupon"), errors="coerce")
-                        barrera_pct = barrera_cap_pct if not pd.isna(barrera_cap_pct) else barrera_cup_pct
-                        if pd.notna(barrera_pct) and barrera_pct > 1:
-                            barrera_pct = barrera_pct / 100  # normaliza si viene como 60 en vez de 0.6
-                        # La barrera en CONTROL_NOTAS es un % (ej. 0.6 = 60%) del precio de compra, no un precio en dólares.
-                        barrera_dolares = (precio_compra * barrera_pct) if (not pd.isna(barrera_pct) and not pd.isna(precio_compra)) else None
-                        if ticker:
-                            p_s = f"${precio_actual:,.2f}" if not pd.isna(precio_actual) else "N/D"
-                            b_s = f"${barrera_dolares:,.2f} ({barrera_pct*100:.0f}% del precio inicial)" if barrera_dolares is not None else "N/D"
-                            # Criterio de riesgo: variación % desde precio_compra (≤ -30% = riesgo).
-                            # El margen a la barrera se muestra como dato adicional, no decide el nivel.
-                            if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0:
-                                var = (precio_actual - precio_compra) / precio_compra * 100
-                                var_s = f" ({var:+.1f}%)"
-                                alerta_nivel = clasificar_alerta_riesgo(var)
-                                icono = {"ROJO": " 🔴 EN RIESGO (variación ≤ -30%)", "OK": " ✅ OK"}.get(alerta_nivel, "")
-                                if barrera_dolares is not None:
-                                    margen_a_barrera = (precio_actual - barrera_dolares) / barrera_dolares * 100
-                                    alerta = f"{icono} | margen a la barrera (dato adicional, no decide el riesgo): {margen_a_barrera:+.1f}%"
-                                else:
-                                    alerta = f"{icono} | margen a la barrera: N/D (sin barrera cargada en CONTROL_NOTAS)"
-                            else:
-                                var_s = ""
-                                alerta = ""
-                            partes.append(f"{ticker}: precio={p_s}{var_s} | barrera={b_s}{alerta}")
-                    return " | ".join(partes)
-                except:
+                if resumen_riesgo_ia.empty:
                     return ""
+                filas = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
+                if filas.empty:
+                    return ""
+                partes = []
+                for _, r in filas.iterrows():
+                    ticker = r["ticker"]
+                    precio_actual = r["precio_actual"]
+                    variacion = r["variacion_%"]
+                    precio_contingencia = r["precio_contingencia"]
+                    margen_a_barrera = r["margen_a_barrera_%"]
+                    alerta_nivel = r["alerta_riesgo"]
+                    p_s = f"${precio_actual:,.2f}" if pd.notna(precio_actual) else "N/D"
+                    var_s = f" ({variacion:+.1f}%)" if pd.notna(variacion) else ""
+                    b_s = f"${precio_contingencia:,.2f}" if pd.notna(precio_contingencia) else "N/D"
+                    icono = {"ROJO": " 🔴 EN RIESGO (variación ≤ -30%)", "OK": " ✅ OK"}.get(alerta_nivel, " ⚪ SIN DATO")
+                    if pd.notna(margen_a_barrera):
+                        alerta = f"{icono} | margen a la barrera (dato adicional, no decide el riesgo): {margen_a_barrera:+.1f}%"
+                    else:
+                        alerta = f"{icono} | margen a la barrera: N/D (sin barrera cargada en CONTROL_NOTAS)"
+                    partes.append(f"{ticker}: precio={p_s}{var_s} | barrera={b_s}{alerta}")
+                return " | ".join(partes)
 
-            # Calcular estado real por nota usando variación % desde precio_compra (criterio único de riesgo, ≤ -30%)
+            # Estado por nota = peor ticker de esa nota (mismo criterio que resumen_alertas_por_nota / el semáforo)
             def _estado_nota_precio(nota_id):
-                try:
-                    filas = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
-                    peor_variacion = None
-                    for _, r in filas.iterrows():
-                        ticker = str(r.get("ticker","")).strip().upper()
-                        precio_actual = precios_live.get(ticker, pd.to_numeric(r.get("precio_actual"), errors="coerce"))
-                        precio_compra = pd.to_numeric(r.get("precio_compra"), errors="coerce")
-                        if not pd.isna(precio_actual) and not pd.isna(precio_compra) and precio_compra > 0:
-                            var = (precio_actual - precio_compra) / precio_compra * 100
-                            if peor_variacion is None or var < peor_variacion:
-                                peor_variacion = var
-                    if peor_variacion is None:
-                        return "PENDIENTE"
-                    nivel = clasificar_alerta_riesgo(peor_variacion)
-                    if nivel == "ROJO": return "ROJA"
-                    if nivel == "OK": return "OK"
+                if resumen_riesgo_ia.empty:
                     return "PENDIENTE"
-                except:
+                filas = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
+                if filas.empty:
                     return "PENDIENTE"
+                variaciones = pd.to_numeric(filas["variacion_%"], errors="coerce").dropna()
+                if variaciones.empty:
+                    return "PENDIENTE"
+                peor_variacion = variaciones.min()
+                nivel = clasificar_alerta_riesgo(peor_variacion)
+                if nivel == "ROJO": return "ROJA"
+                if nivel == "OK": return "OK"
+                return "PENDIENTE"
 
             # 3. Próxima observación futura (CALENDARIO_NOTAS)
             df_c_riesgo = df_cal.copy()
@@ -9121,17 +9095,17 @@ def seccion_asistente_ia_fondo():
                 if ni not in prox_call_dict:
                     prox_call_dict[ni] = pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y")
 
-            # Universo de notas a evaluar: todas las que están en CONTROL_NOTAS (fuente fiable)
-            # más cualquiera con observación futura programada.
+            # Universo de notas a evaluar: todas las que están en el resumen (mismas notas activas que
+            # ve el semáforo) más cualquiera con observación futura programada.
             notas_en_control = set()
-            if "nota" in df_control.columns:
-                notas_en_control = set(int(n) for n in pd.to_numeric(df_control["nota"], errors="coerce").dropna().unique())
+            if not resumen_riesgo_ia.empty:
+                notas_en_control = set(int(n) for n in pd.to_numeric(resumen_riesgo_ia["nota"], errors="coerce").dropna().unique())
             todas_notas = sorted(notas_en_control | set(prox_obs_dict.keys()))
             negativas, pendientes, positivas = [], [], []
-            filas_riesgo_definitivo = []  # (nota_id, ticker, precio_compra, precio_actual, precio_contingencia, margen, nivel)
+            filas_riesgo_definitivo = []  # (nota_id, ticker, precio_compra, precio_actual, variación, precio_contingencia, margen)
 
             for nota_id in todas_notas:
-                # Estado por variación de precio (igual que pantalla Notas estructuradas)
+                # Estado por variación de precio (igual que pantalla Notas estructuradas / semáforo)
                 estado_precio = _estado_nota_precio(nota_id)
                 prox_obs_s = prox_obs_dict.get(nota_id, "Sin obs programada")
                 prox_call_s = prox_call_dict.get(nota_id, "")
@@ -9150,35 +9124,16 @@ def seccion_asistente_ia_fondo():
                 else:
                     pendientes.append(linea)  # PENDIENTE = sin precio disponible
 
-                # Detalle por ticker para la lista definitiva (reutiliza precios_live, sin llamadas nuevas)
-                try:
-                    filas_nota = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
+                # Detalle por ticker para la lista definitiva (misma fila que ya calculó el semáforo, sin llamadas nuevas)
+                if not resumen_riesgo_ia.empty:
+                    filas_nota = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
                     for _, r_t in filas_nota.iterrows():
-                        ticker_t = str(r_t.get("ticker", "")).strip().upper()
-                        if not ticker_t:
+                        if r_t["alerta_riesgo"] != "ROJO":
                             continue
-                        precio_actual_t = precios_live.get(ticker_t, pd.to_numeric(r_t.get("precio_actual"), errors="coerce"))
-                        precio_compra_t = pd.to_numeric(r_t.get("precio_compra"), errors="coerce")
-                        if pd.isna(precio_actual_t) or pd.isna(precio_compra_t) or precio_compra_t <= 0:
-                            continue
-                        variacion_t = (precio_actual_t - precio_compra_t) / precio_compra_t * 100
-                        nivel_t = clasificar_alerta_riesgo(variacion_t)
-                        if nivel_t != "ROJO":
-                            continue
-                        # Margen a la barrera: solo como dato adicional, si hay barrera cargada (puede faltar o estar mal).
-                        barrera_cap_t = pd.to_numeric(r_t.get("barrera_capital"), errors="coerce")
-                        barrera_cup_t = pd.to_numeric(r_t.get("barrera_cupon"), errors="coerce")
-                        barrera_pct_t = barrera_cap_t if not pd.isna(barrera_cap_t) else barrera_cup_t
-                        if pd.notna(barrera_pct_t) and barrera_pct_t > 1:
-                            barrera_pct_t = barrera_pct_t / 100
-                        precio_contingencia_t = None
-                        margen_t = None
-                        if pd.notna(barrera_pct_t) and barrera_pct_t > 0:
-                            precio_contingencia_t = precio_compra_t * barrera_pct_t
-                            margen_t = (precio_actual_t - precio_contingencia_t) / precio_contingencia_t * 100
-                        filas_riesgo_definitivo.append((nota_id, ticker_t, precio_compra_t, precio_actual_t, variacion_t, precio_contingencia_t, margen_t))
-                except Exception:
-                    pass
+                        filas_riesgo_definitivo.append((
+                            nota_id, r_t["ticker"], r_t["precio_compra"], r_t["precio_actual"],
+                            r_t["variacion_%"], r_t["precio_contingencia"], r_t["margen_a_barrera_%"],
+                        ))
 
             if negativas:
                 lineas.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
@@ -9195,9 +9150,8 @@ def seccion_asistente_ia_fondo():
 
             # ── LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──────────
             # Esta es la ÚNICA fuente válida para responder "¿qué notas están en riesgo?".
-            # Reutiliza los precios ya descargados en lote arriba (precios_live) — NO vuelve a
-            # llamar a Yahoo Finance ticker por ticker, para no duplicar tráfico ni arriesgar
-            # timeouts. La IA no debe reclasificar, añadir, quitar, ni inventar iconos distintos.
+            # Calculada con la MISMA función y el mismo filtro de notas activas que el semáforo
+            # de la pantalla "Notas estructuradas" — no puede divergir de lo que ve Yuri en pantalla.
             lineas.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
             lineas.append(
                 "Único criterio válido: variación % desde precio_compra de CADA ticker. "
@@ -9213,8 +9167,8 @@ def seccion_asistente_ia_fondo():
             else:
                 filas_riesgo_definitivo.sort(key=lambda f: f[4])  # peor variación primero
                 for nota_id_ia, ticker_ia, compra_ia, actual_ia, variacion_ia, contingencia_ia, margen_ia in filas_riesgo_definitivo:
-                    margen_s = f"{margen_ia:+.1f}%" if margen_ia is not None else "N/D"
-                    contingencia_s = f"${contingencia_ia:,.2f}" if contingencia_ia is not None else "N/D"
+                    margen_s = f"{margen_ia:+.1f}%" if pd.notna(margen_ia) else "N/D"
+                    contingencia_s = f"${contingencia_ia:,.2f}" if pd.notna(contingencia_ia) else "N/D"
                     lineas.append(
                         f"  NOTA_{int(nota_id_ia):02d} | {ticker_ia} | precio_compra=${compra_ia:,.2f} | "
                         f"precio_actual=${actual_ia:,.2f} | variación={variacion_ia:+.1f}% | 🔴 EN RIESGO | "
