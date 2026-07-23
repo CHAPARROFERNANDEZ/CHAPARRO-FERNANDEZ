@@ -3824,7 +3824,8 @@ def dashboard_financiero():
             columnas_auditoria = [c for c in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "capital_invertido", "interes_inversor_anual", "fecha_inversion", "fecha_final_inversion"] if c in inversiones_chaparro.columns]
             st.dataframe(preparar_tabla_monetaria(inversiones_chaparro[columnas_auditoria], ["capital_invertido"]), use_container_width=True)
 
-    resumen_notas_actual = construir_resumen_actual_notas_alertas(df_control)
+    df_control_dashboard = obtener_control_notas_activas(df_inv, df_control)
+    resumen_notas_actual = construir_resumen_actual_notas_alertas(df_control_dashboard)
     alertas_notas = resumen_alertas_por_nota(resumen_notas_actual)
     if not alertas_notas.empty:
         rojas = int((alertas_notas["alerta"] == "ROJO").sum())
@@ -9013,8 +9014,12 @@ def seccion_asistente_ia_fondo():
 
         # Estado de riesgo de notas
         # Fuente: RESULTADOS_OBSERVACION (estado real) + CONTROL_NOTAS (precio/barrera) + CALENDARIO_NOTAS (próx obs)
+        # Se acumula aparte en 'lineas_riesgo' (no en 'lineas') para poder insertarla SIEMPRE al
+        # principio del contexto, antes de truncar. Así, aunque el resto del contexto crezca mucho
+        # (más inversores, más meses), la lista de notas en riesgo real nunca puede quedar cortada.
+        lineas_riesgo = []
         try:
-            lineas.append(f"\n=== ESTADO DE RIESGO DE NOTAS ===")
+            lineas_riesgo.append(f"\n=== ESTADO DE RIESGO DE NOTAS ===")
             hoy_r = pd.Timestamp.today().normalize()
 
             # NOTA: la hoja RESULTADOS_OBSERVACION NO se usa — no se mantiene actualizada.
@@ -9136,24 +9141,24 @@ def seccion_asistente_ia_fondo():
                         ))
 
             if negativas:
-                lineas.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
+                lineas_riesgo.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
                 lineas.extend(negativas)
             else:
-                lineas.append("🔴 ROJAS / EN RIESGO: Ninguna")
+                lineas_riesgo.append("🔴 ROJAS / EN RIESGO: Ninguna")
 
             if pendientes:
-                lineas.append(f"⚪ SIN PRECIO DISPONIBLE / PENDIENTES DE DATO ({len(pendientes)}):")
+                lineas_riesgo.append(f"⚪ SIN PRECIO DISPONIBLE / PENDIENTES DE DATO ({len(pendientes)}):")
                 lineas.extend(pendientes)
 
-            lineas.append(f"RESUMEN: {len(negativas)} en riesgo (variación ≤ -30%) | {len(pendientes)} sin dato de precio | {len(positivas)} OK (positivas no se muestran)")
-            lineas.append("(USA SIEMPRE ESTOS DATOS. NO INVENTES NI CALCULES EL ESTADO DE LAS NOTAS.)")
+            lineas_riesgo.append(f"RESUMEN: {len(negativas)} en riesgo (variación ≤ -30%) | {len(pendientes)} sin dato de precio | {len(positivas)} OK (positivas no se muestran)")
+            lineas_riesgo.append("(USA SIEMPRE ESTOS DATOS. NO INVENTES NI CALCULES EL ESTADO DE LAS NOTAS.)")
 
             # ── LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──────────
             # Esta es la ÚNICA fuente válida para responder "¿qué notas están en riesgo?".
             # Calculada con la MISMA función y el mismo filtro de notas activas que el semáforo
             # de la pantalla "Notas estructuradas" — no puede divergir de lo que ve Yuri en pantalla.
-            lineas.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
-            lineas.append(
+            lineas_riesgo.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
+            lineas_riesgo.append(
                 "Único criterio válido: variación % desde precio_compra de CADA ticker. "
                 "🔴 EN RIESGO = variación ≤ -30%. Cualquier ticker/nota que NO aparezca abajo NO está en "
                 "riesgo (variación > -30%) y NO debe presentarse como en riesgo. NO reclasifiques, no "
@@ -9163,13 +9168,13 @@ def seccion_asistente_ia_fondo():
                 "solo la variación la decide."
             )
             if not filas_riesgo_definitivo:
-                lineas.append("Ninguna nota está en riesgo (variación ≤ -30%) ahora mismo.")
+                lineas_riesgo.append("Ninguna nota está en riesgo (variación ≤ -30%) ahora mismo.")
             else:
                 filas_riesgo_definitivo.sort(key=lambda f: f[4])  # peor variación primero
                 for nota_id_ia, ticker_ia, compra_ia, actual_ia, variacion_ia, contingencia_ia, margen_ia in filas_riesgo_definitivo:
                     margen_s = f"{margen_ia:+.1f}%" if pd.notna(margen_ia) else "N/D"
                     contingencia_s = f"${contingencia_ia:,.2f}" if pd.notna(contingencia_ia) else "N/D"
-                    lineas.append(
+                    lineas_riesgo.append(
                         f"  NOTA_{int(nota_id_ia):02d} | {ticker_ia} | precio_compra=${compra_ia:,.2f} | "
                         f"precio_actual=${actual_ia:,.2f} | variación={variacion_ia:+.1f}% | 🔴 EN RIESGO | "
                         f"(dato adicional) precio_contingencia={contingencia_s} | margen a la barrera={margen_s}"
@@ -9177,8 +9182,8 @@ def seccion_asistente_ia_fondo():
         except Exception as _e_r:
             import traceback as _tb_r
             _tb_texto = _tb_r.format_exc()
-            lineas.append(f"[Error riesgo notas: {_e_r}]")
-            lineas.append(f"[Detalle técnico (no mostrar al usuario, solo para diagnóstico): {_tb_texto[-500:]}]")
+            lineas_riesgo.append(f"[Error riesgo notas: {_e_r}]")
+            lineas_riesgo.append(f"[Detalle técnico (no mostrar al usuario, solo para diagnóstico): {_tb_texto[-500:]}]")
             with st.expander("⚠️ Error interno calculando riesgo de notas (clic para ver detalle técnico)", expanded=True):
                 st.error(f"{type(_e_r).__name__}: {_e_r}")
                 st.code(_tb_texto, language="python")
@@ -9361,7 +9366,11 @@ def seccion_asistente_ia_fondo():
         except Exception as e:
             lineas.append(f"[Error notas en borrador: {e}]")
 
-        return "\n".join(lineas)
+        # Insertamos la sección de riesgo al principio (justo tras la cabecera de fecha/fuente),
+        # para que NUNCA pueda perderse por el recorte de caracteres al final del contexto,
+        # sin importar cuánto crezca el resto (más inversores, más meses, más notas).
+        lineas_final = lineas[:2] + lineas_riesgo + lineas[2:]
+        return "\n".join(lineas_final)
 
     # ── Chat ──────────────────────────────────────────────────────────────────
     if "chat_ia_cf" not in st.session_state:
@@ -9422,7 +9431,7 @@ def seccion_asistente_ia_fondo():
                     contenido = []
                     for nombre_pdf, pdf_b64 in pdfs_sel.items():
                         contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
-                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:20000]}\n\n---\nPREGUNTA: {ultima}"})
+                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:60000]}\n\n---\nPREGUNTA: {ultima}"})
 
                     # Solo los últimos 2 turnos del historial (sin datos pesados)
                     historial = []
