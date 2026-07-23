@@ -32,11 +32,12 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(
-    page_title="Sistema Fondo",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+if __name__ == "__main__":  # page config: solo se ejecuta con `streamlit run`, no al importar
+    st.set_page_config(
+        page_title="Sistema Fondo",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
 ARCHIVO = "inversiones.xlsx"
 GDRIVE_FILE_ID = "1CImiIbg7kSLrYNpWgzPHEBCmI3KRVlBX"
@@ -857,72 +858,73 @@ def mostrar_hero(usuario=None):
     )
 
 
-aplicar_estilo_profesional()
+if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit run`, no al importar
+    aplicar_estilo_profesional()
 
 
-# =========================
-# LOGIN
-# =========================
-USUARIOS = {"Yuri": "1234", "Jordi": "12345", "Alan": "123456"}
-# Portal de inversores: acceso limitado, solo ven su propia posición.
-# El "usuario" debe coincidir exactamente (en mayúsculas) con el valor de la columna 'inversor' en INVERSIONES.
-USUARIOS_INVERSORES = {"PAM": "Pam2026Wealth!"}
+    # =========================
+    # LOGIN
+    # =========================
+    USUARIOS = {"Yuri": "1234", "Jordi": "12345", "Alan": "123456"}
+    # Portal de inversores: acceso limitado, solo ven su propia posición.
+    # El "usuario" debe coincidir exactamente (en mayúsculas) con el valor de la columna 'inversor' en INVERSIONES.
+    USUARIOS_INVERSORES = {"PAM": "Pam2026Wealth!"}
 
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
-if "usuario" not in st.session_state:
-    st.session_state.usuario = None
-if "tipo_usuario" not in st.session_state:
-    st.session_state.tipo_usuario = None  # "admin" o "inversor"
+    if "autenticado" not in st.session_state:
+        st.session_state.autenticado = False
+    if "usuario" not in st.session_state:
+        st.session_state.usuario = None
+    if "tipo_usuario" not in st.session_state:
+        st.session_state.tipo_usuario = None  # "admin" o "inversor"
 
-if not st.session_state.autenticado:
-    st.markdown(
-        """
-        <div class="login-card">
-            <div class="login-logo">CF</div>
-            <div class="login-title">Chaparro Fernández Wealth</div>
-            <div class="login-subtitle">Acceso privado al sistema financiero interno</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    tipo_acceso = st.radio("Tipo de acceso", ["Equipo interno", "Portal de inversor"], horizontal=True, label_visibility="collapsed")
-    if tipo_acceso == "Equipo interno":
-        with st.form("login_form"):
-            usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
-            password = st.text_input("Contraseña", type="password")
-            entrar = st.form_submit_button("Entrar")
-        if entrar:
-            if USUARIOS.get(usuario) == password:
-                st.session_state.autenticado = True
-                st.session_state.usuario = usuario
-                st.session_state.tipo_usuario = "admin"
-                st.rerun()
-            else:
-                st.error("Usuario o contraseña incorrectos")
-    else:
-        with st.form("login_form_inversor"):
-            usuario_inv = st.selectbox("Inversor", list(USUARIOS_INVERSORES.keys()))
-            password_inv = st.text_input("Contraseña", type="password", key="pwd_inversor")
-            entrar_inv = st.form_submit_button("Entrar")
-        if entrar_inv:
-            if USUARIOS_INVERSORES.get(usuario_inv) == password_inv:
-                st.session_state.autenticado = True
-                st.session_state.usuario = usuario_inv
-                st.session_state.tipo_usuario = "inversor"
-                st.rerun()
-            else:
-                st.error("Usuario o contraseña incorrectos")
-    st.stop()
+    if not st.session_state.autenticado:
+        st.markdown(
+            """
+            <div class="login-card">
+                <div class="login-logo">CF</div>
+                <div class="login-title">Chaparro Fernández Wealth</div>
+                <div class="login-subtitle">Acceso privado al sistema financiero interno</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        tipo_acceso = st.radio("Tipo de acceso", ["Equipo interno", "Portal de inversor"], horizontal=True, label_visibility="collapsed")
+        if tipo_acceso == "Equipo interno":
+            with st.form("login_form"):
+                usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
+                password = st.text_input("Contraseña", type="password")
+                entrar = st.form_submit_button("Entrar")
+            if entrar:
+                if USUARIOS.get(usuario) == password:
+                    st.session_state.autenticado = True
+                    st.session_state.usuario = usuario
+                    st.session_state.tipo_usuario = "admin"
+                    st.rerun()
+                else:
+                    st.error("Usuario o contraseña incorrectos")
+        else:
+            with st.form("login_form_inversor"):
+                usuario_inv = st.selectbox("Inversor", list(USUARIOS_INVERSORES.keys()))
+                password_inv = st.text_input("Contraseña", type="password", key="pwd_inversor")
+                entrar_inv = st.form_submit_button("Entrar")
+            if entrar_inv:
+                if USUARIOS_INVERSORES.get(usuario_inv) == password_inv:
+                    st.session_state.autenticado = True
+                    st.session_state.usuario = usuario_inv
+                    st.session_state.tipo_usuario = "inversor"
+                    st.rerun()
+                else:
+                    st.error("Usuario o contraseña incorrectos")
+        st.stop()
 
-st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
-st.sidebar.caption("🔧 Build de prueba: persistencia de borradores (v2)")
-st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá automáticamente.")
-if st.sidebar.button("Cerrar sesión"):
-    st.session_state.autenticado = False
-    st.session_state.usuario = None
-    st.session_state.tipo_usuario = None
-    st.rerun()
+    st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+    st.sidebar.caption("🔧 Build de prueba: persistencia de borradores (v2)")
+    st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá automáticamente.")
+    if st.sidebar.button("Cerrar sesión"):
+        st.session_state.autenticado = False
+        st.session_state.usuario = None
+        st.session_state.tipo_usuario = None
+        st.rerun()
 
 
 # =========================
@@ -8059,16 +8061,17 @@ def seccion_gestion_excel():
 # =========================
 # APP FINAL
 # =========================
-tag_sesion = st.session_state.usuario + (" (Portal de inversor)" if st.session_state.get("tipo_usuario") == "inversor" else "")
-mostrar_hero(tag_sesion)
+if __name__ == "__main__":  # carga inicial + hero: solo se ejecuta con `streamlit run`, no al importar
+    tag_sesion = st.session_state.usuario + (" (Portal de inversor)" if st.session_state.get("tipo_usuario") == "inversor" else "")
+    mostrar_hero(tag_sesion)
 
-try:
-    df_inv, df_cal, df_control = cargar_excel_completo()
-except Exception as e:
-    st.error("No se ha podido cargar inversiones.xlsx. Revisa que el archivo esté subido a GitHub y que las hojas existan.")
-    with st.expander("Ver detalle técnico"):
-        st.exception(e)
-    st.stop()
+    try:
+        df_inv, df_cal, df_control = cargar_excel_completo()
+    except Exception as e:
+        st.error("No se ha podido cargar inversiones.xlsx. Revisa que el archivo esté subido a GitHub y que las hojas existan.")
+        with st.expander("Ver detalle técnico"):
+            st.exception(e)
+        st.stop()
 
 
 def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
@@ -8587,6 +8590,957 @@ def seccion_deuda_jordi():
     st.plotly_chart(fig, use_container_width=True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# CEREBRO DEL ASISTENTE IA — función de nivel de módulo (no depende de Streamlit
+# salvo el flag opcional mostrar_debug_ui), para que la reutilice tanto la pestaña
+# "Asistente IA" de la app web como el servicio de WhatsApp, con idéntico resultado.
+# ═══════════════════════════════════════════════════════════════════════════
+def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha_limite=None, mostrar_debug_ui: bool = False) -> str:
+    """
+    Contexto COMPLETO con fuentes correctas para cada dato:
+    - Intereses a inversores: lógica de EXTRACTOS (solo NUEVA+CANCELADA, sin reinversiones)
+    - Ingresos compañía / cobros notas: lógica de DASHBOARD (detalle_activo_mes + resumen_notas_mes)
+    - Capital activo por inversor: lógica de CENTRO DE CONTROL (capital_activo_en_fecha)
+    """
+    hoy = pd.Timestamp.today().normalize()
+    anio_hoy, mes_hoy = hoy.year, hoy.month
+    p = pregunta.lower()
+
+    # Detectar mes mencionado en la pregunta
+    meses_map = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+                 "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
+    mes_mencionado = next((v for k,v in meses_map.items() if k in p), None)
+    mes_pregunta = mes_mencionado if mes_mencionado is not None else mes_hoy
+
+    # Detectar un año explícito de 4 dígitos (ej. "2025") en la pregunta.
+    import re as _re
+    anio_match = _re.search(r"\b(20\d{2})\b", p)
+    anio_pregunta = int(anio_match.group(1)) if anio_match else anio_hoy
+
+    # Si se menciona un año pero NO un mes concreto, se interpreta como petición de TOTAL ANUAL
+    # (ej. "cuántos intereses se pagaron a PAM en 2025" → los 12 meses de 2025, no solo el mes actual).
+    pedir_total_anual = (anio_match is not None) and (mes_mencionado is None)
+
+    # Calcular resumen dashboard al inicio para usarlo en todos los bloques
+    try:
+        resumen_dash = obtener_resumen_dashboard(
+            df_inv, df_cal, df_control,
+            anio=anio_pregunta, mes=mes_pregunta,
+            vista_activo="General", incluir_chaparro=True
+        )
+    except Exception:
+        resumen_dash = {}
+
+    lineas = [
+        f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
+        f"Mes de referencia: {mes_pregunta}/{anio_pregunta}",
+        "",
+        "FUENTE DE DATOS:",
+        "- Intereses pagados a inversores → lógica EXTRACTOS (solo operaciones NUEVA y CANCELADA, sin reinversiones)",
+        "- Ingresos y beneficio empresa → lógica DASHBOARD (obtener_resumen_dashboard, incluir_chaparro=True)",
+        "- Capital activo → capital_activo_en_fecha + obtener_resumen_dashboard",
+    ]
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 1. CAPITAL ACTIVO HOY — fuente: capital_activo_en_fecha (Centro de control)
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        lineas.append(f"\n=== CAPITAL ACTIVO HOY ===")
+        # Total con Chaparro Fernández incluido (igual que Dashboard con checkbox activado)
+        cap_con_chaparro = resumen_dash.get("capital_total", 0.0)
+        # Total sin Chaparro Fernández (igual que Centro de control por defecto)
+        df_sin_cf = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro=False)
+        cap_sin_chaparro = capital_activo_en_fecha(df_sin_cf, hoy)
+        lineas.append(f"TOTAL FONDO (CON Chaparro Fernández, como Dashboard): ${cap_con_chaparro:,.2f}")
+        lineas.append(f"TOTAL FONDO (SIN Chaparro Fernández, como Centro de control): ${cap_sin_chaparro:,.2f}")
+
+        # Desglose por activo (con Chaparro incluido)
+        df_notas_cap = df_inv[df_inv["tipo_inversion"].astype(str).str.lower().str.strip() == "nota"]
+        cap_notas = capital_activo_en_fecha(df_notas_cap, hoy)
+        lineas.append(f"  NOTAS: ${cap_notas:,.2f}")
+        for activo in ["futbol","paraguay","bolivia","motoclick","bitcoin"]:
+            cap = capital_activo_en_fecha(df_inv, hoy, activo)
+            lineas.append(f"  {activo.upper()}: ${cap:,.2f}")
+
+        # Capital activo por inversor
+        lineas.append("\nCapital activo por inversor (todos, incluyendo Chaparro Fernández):")
+        df_cap = df_inv.copy()
+        df_cap["fecha_inversion"] = pd.to_datetime(df_cap.get("fecha_inversion"), errors="coerce", dayfirst=True)
+        df_cap["fecha_final_inversion"] = pd.to_datetime(df_cap.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
+        df_cap["capital_invertido"] = pd.to_numeric(df_cap.get("capital_invertido"), errors="coerce").fillna(0)
+        df_cap["tipo_op_n"] = df_cap["tipo_operacion"].astype(str).str.strip().str.upper()
+        activas_cc = df_cap[
+            (df_cap["fecha_inversion"].notna()) &
+            (df_cap["fecha_inversion"] <= hoy) &
+            (df_cap["fecha_final_inversion"].isna() | (df_cap["fecha_final_inversion"] >= hoy))
+        ].copy()
+        es_cancelada = activas_cc["tipo_op_n"] == "CANCELADA"
+        activas_cc = activas_cc[~es_cancelada]
+        cap_por_inv = activas_cc.groupby("inversor")["capital_invertido"].sum().sort_values(ascending=False)
+        for inv, cap in cap_por_inv.items():
+            lineas.append(f"  {inv}: ${cap:,.2f}")
+    except Exception as e:
+        lineas.append(f"[Error capital activo: {e}]")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 2. INTERESES A INVERSORES DEL MES — fuente: lógica EXTRACTOS
+    #    Solo NUEVA y CANCELADA. Reinversiones NO generan pago independiente.
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        df_ext = df_inv.copy()
+        for col in ["inversor","tipo_inversion","subtipo_inversion","nombre_activo","tipo_operacion","id_inversion"]:
+            if col in df_ext.columns:
+                df_ext[col] = df_ext[col].fillna("").astype(str).str.strip()
+        df_ext["tipo_op_n"] = df_ext["tipo_operacion"].str.upper()
+        df_ext = df_ext[df_ext["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
+        df_ext["fecha_inversion"] = pd.to_datetime(df_ext.get("fecha_inversion"), errors="coerce", dayfirst=True)
+        df_ext["fecha_final_inversion"] = pd.to_datetime(df_ext.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
+        df_ext["capital_invertido"] = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
+        df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
+
+        INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+        CORTE_TRAMO = datetime(2026, 2, 1)
+        fin_tramo1 = datetime(2026, 1, 31)
+
+        def _calcular_intereses_mes(anio_m, mes_m):
+            dias_mes_ext = ultimo_dia_mes(anio_m, mes_m)
+            fecha_corte_ext = pd.Timestamp(datetime(anio_m, mes_m, dias_mes_ext))
+            filas = []
+            for _, row in df_ext.iterrows():
+                fi = row.get("fecha_inversion")
+                if pd.isna(fi):
+                    continue
+                fi_dt = fi.to_pydatetime()
+                tipo_op = row["tipo_op_n"]
+                ff = row.get("fecha_final_inversion")
+
+                if tipo_op == "CANCELADA":
+                    if pd.isna(ff):
+                        continue
+                    fecha_fin_dt = min(ff.to_pydatetime(), fecha_corte_ext.to_pydatetime())
+                else:
+                    fecha_fin_dt = fecha_corte_ext.to_pydatetime()
+
+                inicio_mes_dt = datetime(anio_m, mes_m, 1)
+                fin_mes_dt = datetime(anio_m, mes_m, dias_mes_ext)
+                inicio_calc = max(fi_dt, inicio_mes_dt)
+                fin_calc = min(fecha_fin_dt, fin_mes_dt)
+                if inicio_calc > fin_calc:
+                    continue
+
+                dias = (fin_calc - inicio_calc).days + 1
+                capital = float(row["capital_invertido"])
+                tasa = float(row["interes_inversor_anual"])
+                inv_upper = str(row.get("inversor","")).strip().upper()
+
+                if inv_upper in INVERSORES_TRAMO:
+                    interes_mes = 0.0
+                    if inicio_calc <= fin_tramo1:
+                        fin_t1 = min(fin_calc, fin_tramo1)
+                        dias_t1 = (fin_t1 - inicio_calc).days + 1
+                        interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_ext, 2)
+                    if fin_calc >= CORTE_TRAMO:
+                        ini_t2 = max(inicio_calc, CORTE_TRAMO)
+                        dias_t2 = (fin_calc - ini_t2).days + 1
+                        interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_ext, 2)
+                else:
+                    interes_mes = round((capital * tasa / 12) * dias / dias_mes_ext, 2)
+
+                filas.append({
+                    "mes": f"{mes_m:02d}/{anio_m}",
+                    "inversor": str(row.get("inversor","")),
+                    "nombre_activo": str(row.get("nombre_activo","")),
+                    "capital": capital,
+                    "tasa_anual": tasa,
+                    "dias": dias,
+                    "interes_mes": interes_mes,
+                })
+            return filas
+
+        if pedir_total_anual:
+            lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES — TOTAL AÑO {anio_pregunta} (fuente: lógica Extractos) ===")
+            lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas. Suma de los 12 meses del año solicitado.")
+            filas_int = []
+            for m in range(1, 13):
+                filas_int.extend(_calcular_intereses_mes(anio_pregunta, m))
+        else:
+            lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES {mes_pregunta}/{anio_pregunta} (fuente: lógica Extractos) ===")
+            lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas.")
+            filas_int = _calcular_intereses_mes(anio_pregunta, mes_pregunta)
+
+        if filas_int:
+            df_int = pd.DataFrame(filas_int)
+            # Por inversor agrupado (total del periodo solicitado, sea un mes o el año completo)
+            por_inv = df_int.groupby("inversor")["interes_mes"].sum().sort_values(ascending=False)
+            total_int = por_inv.sum()
+            for inv, val in por_inv.items():
+                lineas.append(f"  {inv}: ${val:,.2f}")
+            lineas.append(f"  >> TOTAL INTERESES A PAGAR: ${total_int:,.2f}")
+            if pedir_total_anual:
+                lineas.append("\nDesglose mensual por inversor (para el año solicitado):")
+                desglose = df_int.groupby(["inversor","mes"])["interes_mes"].sum().reset_index()
+                for inv in por_inv.index:
+                    sub = desglose[desglose["inversor"] == inv]
+                    detalle_meses = ", ".join(f"{r['mes']}: ${r['interes_mes']:,.2f}" for _, r in sub.iterrows())
+                    lineas.append(f"  {inv} → {detalle_meses}")
+            else:
+                lineas.append("\nDetalle por posición:")
+                for r in filas_int:
+                    lineas.append(f"  {r['inversor']} | {r['nombre_activo']} | Capital: ${r['capital']:,.2f} | Tasa: {r['tasa_anual']*100:.1f}% | Días: {r['dias']} | Interés: ${r['interes_mes']:,.2f}")
+        else:
+            lineas.append("  Sin datos de intereses para ese periodo.")
+    except Exception as e:
+        lineas.append(f"[Error intereses extracto: {e}]")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 2b. CAPITAL DE CHAPARRO FERNÁNDEZ Y BENEFICIO REAL DE LA COMPAÑÍA
+    #     (precalculado para que la IA no tenga que sumar decenas de filas ella misma)
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        df_cf = df_ext.copy()  # ya filtrado a NUEVA/CANCELADA, con pago_intereses disponible
+        df_cf["inversor_up"] = df_cf["inversor"].str.upper()
+        df_cf["pago_intereses"] = df_cf.get("pago_intereses", "").fillna("").astype(str).str.strip().str.lower()
+
+        # Capital hoy a nombre de Chaparro Fernández — se usa la misma función canónica que
+        # el Centro de Control (capital_activo_en_fecha), que ya excluye correctamente las
+        # posiciones "nueva" que fueron reinvertidas (fecha_final_inversion pasada), evitando
+        # duplicar capital entre una fila nueva ya cerrada y su reinversión sucesora.
+        df_inv_cf = df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == "CHAPARRO FERNANDEZ"].copy()
+        capital_cf_hoy = capital_activo_en_fecha(df_inv_cf, hoy)
+
+        # Intereses devengados y NO pagados acumulados: todos los inversores con pago_intereses="reinvierte",
+        # EXCLUYENDO a JEP (que sí cobra en efectivo) y a Chaparro Fernández (no se debe nada a sí mismo).
+        # Se suman TODOS los meses desde que empezó cada posición hasta hoy (deuda acumulada, nunca se resetea).
+        df_reinv = df_cf[(df_cf["pago_intereses"] == "reinvierte") & (df_cf["inversor_up"] != "CHAPARRO FERNANDEZ")]
+        if not df_reinv.empty:
+            fecha_min_reinv = df_reinv["fecha_inversion"].min()
+            total_devengado_no_pagado = 0.0
+            por_inv_devengado = {}
+            f_iter = pd.Timestamp(fecha_min_reinv.year, fecha_min_reinv.month, 1)
+            while f_iter <= hoy:
+                for _, r in df_reinv.iterrows():
+                    v = 0.0
+                    fi = r.get("fecha_inversion")
+                    if pd.isna(fi):
+                        continue
+                    dias_m = ultimo_dia_mes(f_iter.year, f_iter.month)
+                    inicio_mes_r = datetime(f_iter.year, f_iter.month, 1)
+                    fin_mes_r = datetime(f_iter.year, f_iter.month, dias_m)
+                    ff = r.get("fecha_final_inversion")
+                    if r["tipo_op_n"] == "CANCELADA" and pd.notna(ff):
+                        fecha_fin_r = min(ff.to_pydatetime(), fin_mes_r)
+                    else:
+                        fecha_fin_r = fin_mes_r
+                    inicio_calc_r = max(fi.to_pydatetime(), inicio_mes_r)
+                    fin_calc_r = min(fecha_fin_r, fin_mes_r)
+                    if inicio_calc_r > fin_calc_r:
+                        continue
+                    dias_r = (fin_calc_r - inicio_calc_r).days + 1
+                    v = round(float(r["capital_invertido"]) * float(r["interes_inversor_anual"]) / 12 * dias_r / dias_m, 2)
+                    total_devengado_no_pagado += v
+                    por_inv_devengado[r["inversor"]] = por_inv_devengado.get(r["inversor"], 0) + v
+                f_iter += pd.DateOffset(months=1)
+
+            beneficio_real = capital_cf_hoy - total_devengado_no_pagado
+            lineas.append(f"\n=== CAPITAL CHAPARRO FERNÁNDEZ Y BENEFICIO REAL DE LA COMPAÑÍA (precalculado) ===")
+            lineas.append(f"Capital hoy a nombre de CHAPARRO FERNANDEZ: ${capital_cf_hoy:,.2f}")
+            lineas.append(f"Intereses devengados y NO pagados acumulados (todos los inversores excepto JEP, desde que empezó cada uno hasta hoy): ${total_devengado_no_pagado:,.2f}")
+            lineas.append(f"  Desglose: " + ", ".join(f"{k}: ${v:,.2f}" for k, v in sorted(por_inv_devengado.items(), key=lambda x: -x[1])))
+            lineas.append(f">> BENEFICIO REAL DE LA COMPAÑÍA = ${capital_cf_hoy:,.2f} - ${total_devengado_no_pagado:,.2f} = ${beneficio_real:,.2f}")
+    except Exception as e:
+        lineas.append(f"[Error cálculo beneficio real Chaparro Fernández: {e}]")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 3. INGRESOS EMPRESA DEL MES — fuente: obtener_resumen_dashboard (EXACTAMENTE igual que el Dashboard)
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        cobro_total   = resumen_dash.get("cobro_total_mes", 0.0)
+        pago_total    = resumen_dash.get("pago_total_mes", 0.0)
+        benef_total   = resumen_dash.get("beneficio_total_mes", 0.0)
+        cap_dashboard = resumen_dash.get("capital_total", 0.0)
+
+        lineas.append(f"\n=== INGRESOS COMPAÑÍA {mes_pregunta}/{anio_pregunta} (fuente: Dashboard — obtener_resumen_dashboard) ===")
+        lineas.append(f"  COBRO TOTAL COMPAÑÍA: ${cobro_total:,.2f}")
+        lineas.append(f"  PAGO TOTAL INVERSORES (dashboard): ${pago_total:,.2f}")
+        lineas.append(f"  BENEFICIO EMPRESA: ${benef_total:,.2f}")
+        lineas.append(f"  CAPITAL ACTIVO (dashboard): ${cap_dashboard:,.2f}")
+
+        # Desglose por activo si está disponible
+        rent_activo = resumen_dash.get("rentabilidad_por_activo", None)
+        if rent_activo is not None and not rent_activo.empty:
+            lineas.append("  Desglose por activo:")
+            for _, r in rent_activo.iterrows():
+                lineas.append(f"    {str(r.get('activo','')).upper()}: cobro ${float(r.get('cobro_compania_mes',0)):,.2f} | pago inversores ${float(r.get('pago_inversor_mes',0)):,.2f} | beneficio ${float(r.get('beneficio_empresa_mes',0)):,.2f}")
+    except Exception as e:
+        lineas.append(f"[Error ingresos empresa: {e}]")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 3b. DESGLOSE DE COBROS DE NOTAS DEL MES SOLICITADO — YA CALCULADO Y SUMADO
+    #     Fuente: resumen_notas_mes (idéntica lógica que el Dashboard, calendario real).
+    #     Existe para que la IA NO tenga que extraer/sumar filas a mano de la tabla ancha
+    #     de "CALENDARIO INTEGRADO PRÓXIMOS 180 DÍAS" de más abajo — eso ya causó un error
+    #     real (una nota olvidada y fechas desplazadas al resumir una tabla larga). Para
+    #     preguntas tipo "¿cuánto cobraremos de notas en agosto?" o "dame el calendario de
+    #     cobros de notas de [mes]", usa ESTE bloque tal cual, no el de 180 días.
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        _, _, _, detalle_mes_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio_pregunta, mes_pregunta, prorratear=False)
+        lineas.append(f"\n=== COBROS DE NOTAS {mes_pregunta}/{anio_pregunta} — DESGLOSE YA SUMADO POR FECHA Y NOTA (usar tal cual, no recalcular) ===")
+        if detalle_mes_notas is not None and not detalle_mes_notas.empty:
+            agg_notas_mes = detalle_mes_notas.groupby(["fecha_pago", "nota"], as_index=False).agg(
+                monto_cobro=("cobro_compania", "sum"),
+                resultado_observacion=("resultado_observacion", "first"),
+            ).sort_values(["fecha_pago", "nota"])
+            for r in agg_notas_mes.itertuples():
+                fecha_str = pd.Timestamp(r.fecha_pago).strftime("%d/%m/%Y") if pd.notna(r.fecha_pago) else "sin fecha"
+                lineas.append(f"  {fecha_str} | Nota {int(r.nota)} | ${float(r.monto_cobro):,.2f} | Estado: {r.resultado_observacion}")
+            lineas.append(f"  >> TOTAL COBROS DE NOTAS {mes_pregunta}/{anio_pregunta}: ${agg_notas_mes['monto_cobro'].sum():,.2f} (debe coincidir con COBRO TOTAL COMPAÑÍA de arriba menos ingresos de activos fijos)")
+        else:
+            lineas.append(f"  Sin cobros de notas para {mes_pregunta}/{anio_pregunta}.")
+    except Exception as e:
+        lineas.append(f"[Error desglose cobros notas del mes: {e}]")
+    #    Fuente: preparar_calendario_integrado_notas() — EXACTAMENTE igual que Alertas/Calendario
+    #    Incluye monto_cobro calculado correctamente por cada nota
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        hoy_ts = pd.Timestamp.today().normalize()
+        limite_180 = hoy_ts + pd.Timedelta(days=180)
+        df_calls_ctx = leer_hoja_excel("CALENDARIO_CALLS")
+        cal_integrado = preparar_calendario_integrado_notas(
+            df_inv=df_inv,
+            df_cal=df_cal,
+            df_control=df_control,
+            df_calls=df_calls_ctx,
+            fecha_inicio=hoy_ts,
+            fecha_fin=limite_180,
+        )
+
+        lineas.append(f"\n=== CALENDARIO INTEGRADO PRÓXIMOS 180 DÍAS (fuente: Alertas/Calendario, misma lógica que pantalla) ===")
+        lineas.append("  NOTA: para '¿cuánto cobraremos de notas en [mes]?' usa el bloque 'COBROS DE NOTAS [mes] — DESGLOSE YA SUMADO' de más arriba, no sumes filas de esta tabla a mano — es fácil saltarse una fila en una tabla tan larga.")
+
+        if cal_integrado.empty:
+            lineas.append("  Sin eventos en los próximos 180 días.")
+        else:
+            # Tabla completa
+            cols_show = [c for c in ["fecha","tipo_evento","nota","estado","monto_cobro","detalle"] if c in cal_integrado.columns]
+            lineas.append(cal_integrado[cols_show].to_string(index=False))
+
+            # ── PRÓXIMO PAGO (cobro de la compañía) ──────────────────────────
+            pagos = cal_integrado[
+                (cal_integrado["tipo_evento"] == "PAGO") &
+                (pd.to_numeric(cal_integrado.get("monto_cobro", pd.Series(dtype=float)), errors="coerce").fillna(0) > 0)
+            ].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
+
+            lineas.append(f"\n=== PRÓXIMO COBRO DE NOTAS (PAGO con importe > 0) ===")
+            if not pagos.empty:
+                prox = pagos.iloc[0]
+                lineas.append(f"  FECHA: {pd.Timestamp(prox['fecha']).strftime('%d/%m/%Y')}")
+                lineas.append(f"  NOTA: {prox.get('nota','')}")
+                lineas.append(f"  IMPORTE: ${float(prox.get('monto_cobro', 0)):,.2f}")
+                lineas.append(f"  ESTADO: {prox.get('estado','')}")
+                if len(pagos) > 1:
+                    sig = pagos.iloc[1]
+                    lineas.append(f"  SIGUIENTE: {pd.Timestamp(sig['fecha']).strftime('%d/%m/%Y')} | Nota {sig.get('nota','')} | ${float(sig.get('monto_cobro',0)):,.2f}")
+                # Total cobros próximos 30 días
+                hoy_30 = hoy_ts + pd.Timedelta(days=30)
+                pagos_30 = pagos[pd.to_datetime(pagos["fecha"]) <= hoy_30]
+                if not pagos_30.empty:
+                    tot_30 = pd.to_numeric(pagos_30["monto_cobro"], errors="coerce").fillna(0).sum()
+                    lineas.append(f"  >> TOTAL COBROS PRÓXIMOS 30 DÍAS: ${tot_30:,.2f}")
+                tot_180 = pd.to_numeric(pagos["monto_cobro"], errors="coerce").fillna(0).sum()
+                lineas.append(f"  >> TOTAL COBROS PRÓXIMOS 180 DÍAS: ${tot_180:,.2f}")
+            else:
+                lineas.append("  Sin pagos con importe > 0 en los próximos 180 días.")
+
+            # ── PRÓXIMA OBSERVACIÓN POR NOTA ─────────────────────────────────
+            obs = cal_integrado[cal_integrado["tipo_evento"] == "OBSERVACION"].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
+            lineas.append(f"\n=== PRÓXIMA OBSERVACIÓN POR NOTA ===")
+            if not obs.empty:
+                for nota_id, grupo in obs.groupby("nota"):
+                    prox_obs = grupo.iloc[0]
+                    lineas.append(f"  Nota {nota_id}: {pd.Timestamp(prox_obs['fecha']).strftime('%d/%m/%Y')} | Estado: {prox_obs.get('estado','')}")
+            else:
+                lineas.append("  Sin observaciones futuras.")
+
+            # ── PRÓXIMOS CALLS ────────────────────────────────────────────────
+            calls_cal = cal_integrado[cal_integrado["tipo_evento"] == "CALL"].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
+            if not calls_cal.empty:
+                lineas.append(f"\n=== PRÓXIMOS CALLS / VENCIMIENTOS ===")
+                for _, r in calls_cal.head(10).iterrows():
+                    lineas.append(f"  Nota {r.get('nota','')}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')}")
+
+    except Exception as e:
+        lineas.append(f"[Error calendario notas: {e}]")
+
+    # Estado de riesgo de notas
+    # Fuente: RESULTADOS_OBSERVACION (estado real) + CONTROL_NOTAS (precio/barrera) + CALENDARIO_NOTAS (próx obs)
+    # Se acumula aparte en 'lineas_riesgo' (no en 'lineas') para poder insertarla SIEMPRE al
+    # principio del contexto, antes de truncar. Así, aunque el resto del contexto crezca mucho
+    # (más inversores, más meses), la lista de notas en riesgo real nunca puede quedar cortada.
+    lineas_riesgo = []
+    try:
+        lineas_riesgo.append(f"\n=== ESTADO DE RIESGO DE NOTAS ===")
+        hoy_r = pd.Timestamp.today().normalize()
+
+        # NOTA: la hoja RESULTADOS_OBSERVACION NO se usa — no se mantiene actualizada.
+        # El estado real de cada nota se calcula en vivo comparando CONTROL_NOTAS
+        # (precio_compra/barrera) contra precios actuales de yfinance, más abajo.
+
+        # 2. Precios actuales y variación por ticker — REUTILIZA construir_resumen_actual_notas_alertas(),
+        # la MISMA función (idéntico criterio, idéntica fuente de precio: yf.Ticker().history)
+        # que alimenta el semáforo consolidado que ve Yuri en la pantalla "Notas estructuradas".
+        # Antes esta sección llamaba a obtener_datos_fundamentales() por separado (más pesada:
+        # t.info con 4 reintentos + analyst_price_targets + history 1y + calendar por ticker),
+        # lo que la exponía a rate-limits de Yahoo con más facilidad; y cuando fallaba, caía
+        # silenciosamente en el precio "precio_actual" ya guardado en CONTROL_NOTAS (un valor
+        # estático, no en vivo), lo que podía hacer que la IA reportara "sin riesgo" notas que
+        # el semáforo sí marcaba en ROJO. Para que la IA NUNCA pueda divergir de lo que se ve
+        # en pantalla, se usa aquí exactamente el mismo cálculo, con el mismo filtro de notas
+        # activas (obtener_control_notas_activas) que usa el semáforo.
+        df_control_riesgo_ia = obtener_control_notas_activas(df_inv, df_control)
+        resumen_riesgo_ia = construir_resumen_actual_notas_alertas(df_control_riesgo_ia)
+
+        def _precios_nota(nota_id):
+            if resumen_riesgo_ia.empty:
+                return ""
+            filas = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
+            if filas.empty:
+                return ""
+            partes = []
+            for _, r in filas.iterrows():
+                ticker = r["ticker"]
+                precio_actual = r["precio_actual"]
+                variacion = r["variacion_%"]
+                precio_contingencia = r["precio_contingencia"]
+                margen_a_barrera = r["margen_a_barrera_%"]
+                alerta_nivel = r["alerta_riesgo"]
+                p_s = f"${precio_actual:,.2f}" if pd.notna(precio_actual) else "N/D"
+                var_s = f" ({variacion:+.1f}%)" if pd.notna(variacion) else ""
+                b_s = f"${precio_contingencia:,.2f}" if pd.notna(precio_contingencia) else "N/D"
+                icono = {"ROJO": " 🔴 EN RIESGO (variación ≤ -30%)", "OK": " ✅ OK"}.get(alerta_nivel, " ⚪ SIN DATO")
+                if pd.notna(margen_a_barrera):
+                    alerta = f"{icono} | margen a la barrera (dato adicional, no decide el riesgo): {margen_a_barrera:+.1f}%"
+                else:
+                    alerta = f"{icono} | margen a la barrera: N/D (sin barrera cargada en CONTROL_NOTAS)"
+                partes.append(f"{ticker}: precio={p_s}{var_s} | barrera={b_s}{alerta}")
+            return " | ".join(partes)
+
+        # Estado por nota = peor ticker de esa nota (mismo criterio que resumen_alertas_por_nota / el semáforo)
+        def _estado_nota_precio(nota_id):
+            if resumen_riesgo_ia.empty:
+                return "PENDIENTE"
+            filas = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
+            if filas.empty:
+                return "PENDIENTE"
+            variaciones = pd.to_numeric(filas["variacion_%"], errors="coerce").dropna()
+            if variaciones.empty:
+                return "PENDIENTE"
+            peor_variacion = variaciones.min()
+            nivel = clasificar_alerta_riesgo(peor_variacion)
+            if nivel == "ROJO": return "ROJA"
+            if nivel == "OK": return "OK"
+            return "PENDIENTE"
+
+        # 3. Próxima observación futura (CALENDARIO_NOTAS)
+        df_c_riesgo = df_cal.copy()
+        df_c_riesgo["fecha"] = pd.to_datetime(df_c_riesgo["fecha"], errors="coerce")
+        df_c_riesgo["tipo_evento"] = df_c_riesgo["tipo_evento"].fillna("").astype(str).str.upper()
+        obs_futuras = df_c_riesgo[(df_c_riesgo["tipo_evento"]=="OBSERVACION") & (df_c_riesgo["fecha"]>=hoy_r)].sort_values("fecha")
+        prox_obs = obs_futuras.groupby("nota").first().reset_index()
+        prox_obs_dict = {int(r["nota"]): pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y") 
+                        for _, r in prox_obs.iterrows() if not pd.isna(r.get("nota"))}
+
+        # 4. Próximo call (CALENDARIO_NOTAS)
+        calls_fut = df_c_riesgo[(df_c_riesgo["tipo_evento"]=="CALL") & (df_c_riesgo["fecha"]>=hoy_r)].sort_values("fecha")
+        prox_call_dict = {}
+        for _, r in calls_fut.iterrows():
+            n = pd.to_numeric(r.get("nota"), errors="coerce")
+            if pd.isna(n): continue
+            ni = int(n)
+            if ni not in prox_call_dict:
+                prox_call_dict[ni] = pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y")
+
+        # Universo de notas a evaluar: todas las que están en el resumen (mismas notas activas que
+        # ve el semáforo) más cualquiera con observación futura programada.
+        notas_en_control = set()
+        if not resumen_riesgo_ia.empty:
+            notas_en_control = set(int(n) for n in pd.to_numeric(resumen_riesgo_ia["nota"], errors="coerce").dropna().unique())
+        todas_notas = sorted(notas_en_control | set(prox_obs_dict.keys()))
+        negativas, pendientes, positivas = [], [], []
+        filas_riesgo_definitivo = []  # (nota_id, ticker, precio_compra, precio_actual, variación, precio_contingencia, margen)
+
+        for nota_id in todas_notas:
+            # Estado por variación de precio (igual que pantalla Notas estructuradas / semáforo)
+            estado_precio = _estado_nota_precio(nota_id)
+            prox_obs_s = prox_obs_dict.get(nota_id, "Sin obs programada")
+            prox_call_s = prox_call_dict.get(nota_id, "")
+            precios_s = _precios_nota(nota_id)
+
+            linea = f"  NOTA_{nota_id:02d} | Estado: {estado_precio} | Próx obs: {prox_obs_s}"
+            if prox_call_s:
+                linea += f" | Próx call: {prox_call_s}"
+            if precios_s:
+                linea += f"\n    Precios: {precios_s}"
+
+            if estado_precio == "ROJA":
+                negativas.append(linea)
+            elif estado_precio == "OK":
+                positivas.append(linea)
+            else:
+                pendientes.append(linea)  # PENDIENTE = sin precio disponible
+
+            # Detalle por ticker para la lista definitiva (misma fila que ya calculó el semáforo, sin llamadas nuevas)
+            if not resumen_riesgo_ia.empty:
+                filas_nota = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
+                for _, r_t in filas_nota.iterrows():
+                    if r_t["alerta_riesgo"] != "ROJO":
+                        continue
+                    filas_riesgo_definitivo.append((
+                        nota_id, r_t["ticker"], r_t["precio_compra"], r_t["precio_actual"],
+                        r_t["variacion_%"], r_t["precio_contingencia"], r_t["margen_a_barrera_%"],
+                    ))
+
+        if negativas:
+            lineas_riesgo.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
+            lineas.extend(negativas)
+        else:
+            lineas_riesgo.append("🔴 ROJAS / EN RIESGO: Ninguna")
+
+        if pendientes:
+            lineas_riesgo.append(f"⚪ SIN PRECIO DISPONIBLE / PENDIENTES DE DATO ({len(pendientes)}):")
+            lineas.extend(pendientes)
+
+        lineas_riesgo.append(f"RESUMEN: {len(negativas)} en riesgo (variación ≤ -30%) | {len(pendientes)} sin dato de precio | {len(positivas)} OK (positivas no se muestran)")
+        lineas_riesgo.append("(USA SIEMPRE ESTOS DATOS. NO INVENTES NI CALCULES EL ESTADO DE LAS NOTAS.)")
+
+        # ── LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──────────
+        # Esta es la ÚNICA fuente válida para responder "¿qué notas están en riesgo?".
+        # Calculada con la MISMA función y el mismo filtro de notas activas que el semáforo
+        # de la pantalla "Notas estructuradas" — no puede divergir de lo que ve Yuri en pantalla.
+        lineas_riesgo.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
+        lineas_riesgo.append(
+            "Único criterio válido: variación % desde precio_compra de CADA ticker. "
+            "🔴 EN RIESGO = variación ≤ -30%. Cualquier ticker/nota que NO aparezca abajo NO está en "
+            "riesgo (variación > -30%) y NO debe presentarse como en riesgo. NO reclasifiques, no "
+            "inventes otro criterio, no uses otro umbral. El 'margen a la barrera' que aparece junto a "
+            "cada ticker es SOLO información adicional de contexto (puede venir 'N/D' si la nota no "
+            "tiene barrera cargada en CONTROL_NOTAS) — NUNCA decide si una nota entra en esta lista, "
+            "solo la variación la decide."
+        )
+        if not filas_riesgo_definitivo:
+            lineas_riesgo.append("Ninguna nota está en riesgo (variación ≤ -30%) ahora mismo.")
+        else:
+            filas_riesgo_definitivo.sort(key=lambda f: f[4])  # peor variación primero
+            for nota_id_ia, ticker_ia, compra_ia, actual_ia, variacion_ia, contingencia_ia, margen_ia in filas_riesgo_definitivo:
+                margen_s = f"{margen_ia:+.1f}%" if pd.notna(margen_ia) else "N/D"
+                contingencia_s = f"${contingencia_ia:,.2f}" if pd.notna(contingencia_ia) else "N/D"
+                lineas_riesgo.append(
+                    f"  NOTA_{int(nota_id_ia):02d} | {ticker_ia} | precio_compra=${compra_ia:,.2f} | "
+                    f"precio_actual=${actual_ia:,.2f} | variación={variacion_ia:+.1f}% | 🔴 EN RIESGO | "
+                    f"(dato adicional) precio_contingencia={contingencia_s} | margen a la barrera={margen_s}"
+                )
+    except Exception as _e_r:
+        import traceback as _tb_r
+        _tb_texto = _tb_r.format_exc()
+        lineas_riesgo.append(f"[Error riesgo notas: {_e_r}]")
+        lineas_riesgo.append(f"[Detalle técnico (no mostrar al usuario, solo para diagnóstico): {_tb_texto[-500:]}]")
+        if mostrar_debug_ui:
+            with st.expander("⚠️ Error interno calculando riesgo de notas (clic para ver detalle técnico)", expanded=True):
+                st.error(f"{type(_e_r).__name__}: {_e_r}")
+                st.code(_tb_texto, language="python")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 5. TOTALES HISTÓRICOS POR ACTIVO (desde inicio)
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        lineas.append("\n=== TOTALES HISTÓRICOS POR ACTIVO (desde inicio, fuente: Dashboard) ===")
+        for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
+                              ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
+                              ("bitcoin",TASA_ANUAL_BITCOIN)]:
+            ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
+            pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
+            lineas.append(f"  {activo}: ingresado ${ing:,.2f} | pagado inversores ${pag:,.2f} | beneficio empresa ${ing-pag:,.2f}")
+    except Exception as e:
+        lineas.append(f"[Error históricos: {e}]")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 6. EXTRACTO ACUMULADO — PRE-CALCULADO Y FILTRADO POR INVERSOR
+    #    Si se detecta un inversor en la pregunta: solo sus datos
+    #    Si no: resumen anual de todos (compacto)
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        df_ext = df_inv.copy()
+        for col in ["inversor","tipo_operacion"]:
+            if col in df_ext.columns:
+                df_ext[col] = df_ext[col].fillna("").astype(str).str.strip()
+        df_ext["tipo_op_n"] = df_ext["tipo_operacion"].str.upper()
+        df_ext = df_ext[df_ext["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
+        df_ext["fecha_inversion"]        = pd.to_datetime(df_ext.get("fecha_inversion"), errors="coerce", dayfirst=True)
+        df_ext["fecha_final_inversion"]  = pd.to_datetime(df_ext.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
+        df_ext["capital_invertido"]      = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
+        df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
+
+        TRAMO_INV_E = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
+        CORTE_T_E   = datetime(2026, 2, 1)
+        FIN_T1_E    = datetime(2026, 1, 31)
+
+        # Detectar inversor en la pregunta
+        inversores_todos = df_ext["inversor"].dropna().unique().tolist()
+        inv_detectado = None
+        p_up = p.upper()
+        for inv in inversores_todos:
+            if inv.upper() in p_up or any(pt in p_up for pt in inv.upper().split() if len(pt) > 3):
+                inv_detectado = inv
+                break
+
+        # Detectar año en la pregunta
+        import re as _re2
+        match_anio2 = _re2.search(r'\b(202[0-9])\b', p)
+        anio_filtro = int(match_anio2.group(1)) if match_anio2 else None
+
+        # Si hay inversor detectado, filtrar solo ese
+        if inv_detectado:
+            df_ext = df_ext[df_ext["inversor"].str.upper() == inv_detectado.upper()].copy()
+
+        # Calcular desde inicio hasta hoy
+        fecha_min = df_ext["fecha_inversion"].dropna().min()
+        if pd.isna(fecha_min):
+            fecha_min = datetime(2025, 9, 1)
+        else:
+            fecha_min = fecha_min.to_pydatetime()
+
+        filas_e = []
+        ai_e, mi_e = fecha_min.year, fecha_min.month
+        while (ai_e, mi_e) <= (anio_hoy, mes_hoy):
+            # Si hay filtro de año, saltar años que no interesan
+            if anio_filtro and ai_e != anio_filtro and not inv_detectado:
+                mi_e = mi_e + 1 if mi_e < 12 else 1
+                ai_e = ai_e if mi_e > 1 else ai_e + 1
+                continue
+            dm_e = ultimo_dia_mes(ai_e, mi_e)
+            im_e = datetime(ai_e, mi_e, 1)
+            fm_e = datetime(ai_e, mi_e, dm_e)
+            for _, row in df_ext.iterrows():
+                fi = row.get("fecha_inversion")
+                if pd.isna(fi): continue
+                fi_dt   = fi.to_pydatetime()
+                tipo_op = row["tipo_op_n"]
+                ff      = row.get("fecha_final_inversion")
+                if tipo_op == "CANCELADA":
+                    if pd.isna(ff): continue
+                    ffd = min(ff.to_pydatetime(), fm_e)
+                else:
+                    ffd = fm_e
+                ic = max(fi_dt, im_e)
+                fc = min(ffd, fm_e)
+                if ic > fc: continue
+                dias    = (fc - ic).days + 1
+                capital = float(row["capital_invertido"])
+                tasa    = float(row["interes_inversor_anual"])
+                inv_up  = str(row.get("inversor","")).strip().upper()
+                if inv_up in TRAMO_INV_E:
+                    interes = 0.0
+                    if ic <= FIN_T1_E:
+                        ft1 = min(fc, FIN_T1_E)
+                        interes += round((capital*0.05/12)*((ft1-ic).days+1)/dm_e, 2)
+                    if fc >= CORTE_T_E:
+                        it2 = max(ic, CORTE_T_E)
+                        interes += round((capital*0.075/12)*((fc-it2).days+1)/dm_e, 2)
+                else:
+                    interes = round((capital*tasa/12)*dias/dm_e, 2)
+                filas_e.append({
+                    "inversor": str(row.get("inversor","")),
+                    "anio": ai_e,
+                    "mes": f"{mi_e:02d}/{ai_e}",
+                    "interes_mes": interes,
+                })
+            mi_e = mi_e + 1 if mi_e < 12 else 1
+            ai_e = ai_e if mi_e > 1 else ai_e + 1
+
+        if filas_e:
+            df_tot = pd.DataFrame(filas_e)
+            lineas.append(f"\n=== EXTRACTO INTERESES PAGADOS A INVERSORES ===")
+            lineas.append(f"(LEE ESTOS DATOS DIRECTAMENTE. PROHIBIDO CALCULAR POR TU CUENTA.)")
+
+            if inv_detectado:
+                # Detalle completo del inversor detectado
+                lineas.append(f"\n-- {inv_detectado} --")
+                for anio_k in sorted(df_tot["anio"].unique()):
+                    df_a = df_tot[df_tot["anio"] == anio_k]
+                    total_anio = float(df_a["interes_mes"].sum())
+                    lineas.append(f"  {anio_k}: ${total_anio:,.2f}")
+                    for mes_k, int_k in df_a.groupby("mes")["interes_mes"].sum().items():
+                        if float(int_k) > 0:
+                            lineas.append(f"    {mes_k}: ${float(int_k):,.2f}")
+                lineas.append(f"  TOTAL ACUMULADO DESDE INICIO: ${float(df_tot['interes_mes'].sum()):,.2f}")
+            else:
+                # Resumen compacto de todos — solo totales por inversor y año
+                for inv in sorted(df_tot["inversor"].unique()):
+                    df_i = df_tot[df_tot["inversor"] == inv]
+                    resumen = " | ".join([f"{a}: ${float(df_i[df_i['anio']==a]['interes_mes'].sum()):,.2f}" for a in sorted(df_i["anio"].unique())])
+                    lineas.append(f"  {inv}: {resumen} | TOTAL: ${float(df_i['interes_mes'].sum()):,.2f}")
+                lineas.append(f"  GRAN TOTAL: ${float(df_tot['interes_mes'].sum()):,.2f}")
+
+    except Exception as e:
+        lineas.append(f"[Error extracto acumulado: {e}]")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 7. NOTAS EN BORRADOR (extraídas por IA en el wizard, AÚN NO GUARDADAS)
+    # ══════════════════════════════════════════════════════════════════════
+    lineas_borradores = []
+    try:
+        import json as _json_ia
+        df_borr = leer_hoja_excel("BORRADORES_NOTAS")
+        if not df_borr.empty:
+            df_borr.columns = [str(c).strip().upper() for c in df_borr.columns]
+            lineas_borradores.append("\n=== NOTAS EN BORRADOR — EXTRAÍDAS POR IA EN EL WIZARD, TODAVÍA NO GUARDADAS EN CONTROL_NOTAS ===")
+            lineas_borradores.append(
+                "(IMPORTANTE: esto NO son posiciones activas ni confirmadas — es una extracción de un PDF que "
+                "Yuri está revisando en 'Notas estructuradas → Añadir nota nueva / Auditar nota existente'. "
+                "Si te pregunta por una de estas notas, acláraselo explícitamente ('esto es un borrador, aún no "
+                "guardado') y avisa de que puede haber campos marcados como REVISAR pendientes de corregir. "
+                "NUNCA mezcles estos datos con las notas oficiales de CONTROL_NOTAS al calcular capital, cobros "
+                "o beneficios — son fuentes completamente distintas.)"
+            )
+            for _, fila_b in df_borr.iterrows():
+                tipo_b = str(fila_b.get("TIPO", "")).strip()
+                nota_b = fila_b.get("NOTA", "")
+                try:
+                    datos_b = _json_ia.loads(fila_b.get("JSON_DATOS", "{}"))
+                except Exception:
+                    continue
+                etiqueta_tipo = "nueva nota, aún no creada en CONTROL_NOTAS" if tipo_b == "nueva" else "auditoría en curso de una nota ya existente"
+                lineas_borradores.append(f"\n-- Borrador Nota {nota_b} ({etiqueta_tipo}) --")
+                lineas_borradores.append(f"  Emisor: {datos_b.get('emisor', 'REVISAR')} | Cupón anual: {datos_b.get('cupon_anual_pct', 'REVISAR')} | Vencimiento: {datos_b.get('fecha_vencimiento', 'REVISAR')}")
+                tickers_b = datos_b.get("tickers", [])
+                if tickers_b:
+                    resumen_tk = ", ".join(
+                        f"{t.get('ticker','?')} (barrera cupón {t.get('barrera_cupon_pct','REVISAR')}, barrera capital {t.get('barrera_capital_pct','REVISAR')}, call {t.get('call_level_pct','REVISAR')})"
+                        for t in tickers_b
+                    )
+                    lineas_borradores.append(f"  Tickers: {resumen_tk}")
+                calendario_b = datos_b.get("calendario", [])
+                if calendario_b:
+                    lineas_borradores.append(f"  Calendario: {len(calendario_b)} eventos de observación/pago extraídos")
+                fechas_call_b = datos_b.get("fechas_call", [])
+                if fechas_call_b:
+                    lineas_borradores.append(f"  Fechas de posible call: {', '.join(str(f) for f in fechas_call_b)}")
+    except Exception as e:
+        lineas_borradores.append(f"[Error notas en borrador: {e}]")
+
+    # Insertamos las secciones de riesgo y de notas en borrador al principio (justo tras la
+    # cabecera de fecha/fuente), para que NUNCA puedan perderse por el recorte de caracteres al
+    # final del contexto, sin importar cuánto crezca el resto (más inversores, más meses, más notas).
+    lineas_final = lineas[:2] + lineas_riesgo + lineas_borradores + lineas[2:]
+    return "\n".join(lineas_final)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Llamada al modelo (mismo modelo/prompt/criterio para web y WhatsApp)
+# ═══════════════════════════════════════════════════════════════════════════
+def preguntar_asistente_ia_fondo(pregunta: str, df_inv, df_cal, df_control,
+                                   historial_previo=None, pdfs_b64=None) -> str:
+    """Llama al asistente IA del fondo: mismo modelo, mismo system prompt, mismo criterio
+    de riesgo y misma función de contexto (construir_contexto_ia_fondo) que usa la pestaña
+    'Asistente IA' de la app web. La reutiliza también el servicio de WhatsApp, para que
+    ambos canales den siempre la misma respuesta ante la misma pregunta.
+    historial_previo: lista opcional de {"role":..,"content":str} con turnos previos.
+    """
+    import re as _re_ia, requests as _req_ia
+    if pdfs_b64 is None:
+        pdfs_b64 = pdfs_disponibles_notas()
+    try:
+        # Detectar fecha límite en la pregunta (ej: "hasta el 07/06/2026")
+        fecha_limite = None
+        m_fecha = _re_ia.search(r"hasta\s+(?:el\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", pregunta.lower())
+        if m_fecha:
+            d, mo = int(m_fecha.group(1)), int(m_fecha.group(2))
+            yr = int(m_fecha.group(3)) if m_fecha.group(3) else pd.Timestamp.today().year
+            fecha_limite = f"{yr}-{mo:02d}-{d:02d}"
+
+        ctx = construir_contexto_ia_fondo(pregunta, df_inv, df_cal, df_control, fecha_limite=fecha_limite, mostrar_debug_ui=False)
+
+        # Seleccionar PDFs relevantes (máx 2 para no superar tokens)
+        nums = _re_ia.findall(r"nota[_\s]*(\d+)", pregunta.lower())
+        if nums:
+            def _norm(s): return _re_ia.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
+            pdfs_sel = {k:v for k,v in pdfs_b64.items() if any(_norm(k)==f"nota{n}" for n in nums)}
+            if not pdfs_sel: pdfs_sel = dict(list(pdfs_b64.items())[:2])
+        elif any(w in pregunta.lower() for w in ["call","cobro","pago","barrera","vencimiento","próximo","proximo"]):
+            pdfs_sel = dict(list(pdfs_b64.items())[:2])
+        else:
+            pdfs_sel = {}
+
+        # Construir mensaje con PDFs + contexto
+        contenido = []
+        for nombre_pdf, pdf_b64 in pdfs_sel.items():
+            contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
+        contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:60000]}\n\n---\nPREGUNTA: {pregunta}"})
+
+        # Solo los últimos 2 turnos del historial (sin datos pesados)
+        historial = []
+        mensajes_prev = historial_previo or []
+        for m in mensajes_prev[-4:]:
+            # Solo texto plano del historial, nunca los bloques con PDFs/contexto
+            if isinstance(m["content"], str):
+                historial.append({"role": m["role"], "content": m["content"]})
+        historial.append({"role": "user", "content": contenido})
+
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY","") or st.secrets.get("anthropic",{}).get("api_key","")
+        except Exception:
+            api_key = ""
+        if not api_key:
+            import os as _os_key
+            api_key = _os_key.environ.get("ANTHROPIC_API_KEY", "")
+        resp = _req_ia.post("https://api.anthropic.com/v1/messages",
+            headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
+            json={"model":"claude-sonnet-4-5","max_tokens":2000,
+                  "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                  "system": """Eres el analista financiero senior de Chaparro Fernández Wealth Management, un fondo de inversión privado. Tu trabajo es razonar sobre el negocio como lo haría un socio del fondo, no solo repetir datos sueltos.
+
+== CÓMO FUNCIONA EL NEGOCIO (esto es la base de todo razonamiento) ==
+
+1. CAPTACIÓN: el fondo recibe capital de inversores. Cada inversor tiene una tasa de interés FIJA anual pactada (7.5%, 10%, 15%...) que se le paga siempre, TODOS LOS MESES, sobre su capital, pro-rata por días. Esa tasa es personal del inversor y NO depende de en qué activo esté invertido su dinero.
+
+2. DESPLIEGUE: ese capital se invierte en:
+- ACTIVOS FIJOS (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin): pagan al fondo un % fijo y conocido de antemano.
+- NOTAS ESTRUCTURADAS: cada nota tiene su propio cupón anual (ej. 37.5%), pero el cobro es CONDICIONAL: solo se cobra si en la fecha de OBSERVACIÓN el precio de TODAS las acciones subyacentes está por encima de la barrera de cupón (normalmente 40-60% del precio inicial). Si algún activo está por debajo, ese periodo NO se cobra nada de esa nota, pero el fondo SIGUE pagando al inversor su fijo igual — esa pérdida la asume el fondo, nunca el inversor.
+
+3. EL BENEFICIO (spread) es la diferencia entre lo que cobra el fondo del activo y lo que paga al inversor:
+- Notas: beneficio = cobro real de la nota (puede ser $0 algún periodo) − pago fijo al inversor (siempre igual).
+- Activos fijos: beneficio = (% del activo − % del inversor) × capital.
+
+4. PERIODICIDAD DE COBRO DE NOTAS: la mayoría de notas pagan cupón mensualmente, pero algunas pagan trimestralmente (revisan y cobran cada 3 meses en vez de cada mes). Esto ya está detectado automáticamente a partir del calendario real de cada nota en los datos que se te dan — los importes de cobro que ves en el contexto YA incluyen el ajuste correcto (si es trimestral, el cobro de ese mes ya representa el acumulado de 3 meses). No necesitas ni debes recalcular esto tú mismo.
+
+5. REINVERSIONES: cuando un inversor no retira su capital (por ejemplo tras un call), ese capital se reinvierte en otro activo/nota. Esto SÍ cambia lo que cobra el fondo (nuevo % del activo), pero NO cambia lo que se paga al inversor (sigue siendo su % fijo original, sobre el capital original, desde la fecha ORIGINAL de inversión — la reinversión no reinicia su reloj de intereses).
+
+6. CALLS (llamadas anticipadas de notas): el emisor puede llamar una nota antes de vencimiento, normalmente si TODAS las acciones subyacentes están en positivo respecto al precio INICIAL (¡ojo! este umbral es mucho más exigente que la barrera de cupón — una nota puede estar pagando cupón tranquilamente sin estar ni cerca de que la llamen). Cuando hay call:
+- El capital deja de generar cobro para el fondo desde esa fecha hasta que se reinvierta en otro sitio.
+- El inversor sigue cobrando su fijo igual aunque el capital esté parado — pérdida pura para el fondo mientras dure.
+- La condición EXACTA de call varía nota a nota y está en el documento oficial (PDF) — si tienes el PDF de esa nota cargado, úsalo como fuente principal para analizar la probabilidad de call, comparando el precio actual de cada ticker (sección ESTADO DE RIESGO DE NOTAS) contra su precio INICIAL, no contra la barrera de cupón.
+
+7. CHAPARRO FERNANDEZ es la sociedad gestora, no un inversor externo: no cobra interés (0%), todo lo que "cobra" en su nombre es beneficio íntegro del fondo.
+
+8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos), el reparto de dividendos y las transferencias que Jordi le hace al fondo (hoja TRANSFERENCIAS_JORDI, capital que él aporta) AUMENTAN esa deuda — las tres juegan a favor de Jordi con la misma lógica: son dinero o valor que la empresa le debe devolver.
+
+9. MOTOCLICK — CASO ESPECIAL: a diferencia de Paraguay/Bolivia/Fútbol, el ingreso que MotoClick genera para el fondo NO es simplemente capital_invertido × 25% / 12. El capital que los inversores tienen "en el papel" asignado a MotoClick no siempre coincide con el capital que realmente está desplegado ahí día a día (puede haber devoluciones temporales de capital y reinyecciones posteriores). Por eso el ingreso real se calcula con el capital promedio diario efectivamente activo ese mes. El pago al inversor, en cambio, SIEMPRE se mantiene fijo sobre su capital nominal, sin este ajuste — solo el ingreso de la compañía varía.
+
+10. VENCIMIENTO DE UNA NOTA SIN CALL PREVIO: si una nota llega a su fecha de vencimiento (maturity) sin haber sido llamada antes, se trata exactamente igual que un call — el capital se reinvierte en otro activo/nota, y el inversor sigue cobrando su fijo igual durante todo el proceso. En los datos, esto se marca con motivo "call final" (distinto de "call", que es la llamada anticipada por el emisor), pero a efectos de negocio ambos son equivalentes: la nota se cierra y su capital se reinvierte.
+
+11. LA HOJA RESULTADOS_OBSERVACION NO SE USA NUNCA: no está mantenida y puede contener datos obsoletos. Si el usuario pregunta por ella, dile que esa hoja no se usa como fuente y que el estado real de cada nota se calcula en vivo con precios actuales.
+
+12. FECHA DE INICIO DE UNA NOTA PARA EFECTOS DE PAGO AL INVERSOR: no es la fecha en la que arranca la nota en el mercado (Initial Valuation Date), sino la PRIMERA FECHA DE PAGO (cobro) del calendario de esa nota, menos 1 mes. Ej.: si la nota empieza el 19/09 y el primer pago es el 25/10, la fecha de inicio que cuenta para calcular los intereses del inversor es el 25/09 (un mes antes del primer pago), no el 19/09.
+
+13. LA HOJA REINVERSIONES ES SOLO TRAZABILIDAD HISTÓRICA, no una fuente de cálculo financiero. Vincula cada operación de reinversión (id_inversion_destino) con de dónde venía originalmente ese capital (id_inversion_origen), para poder responder preguntas del tipo "¿de dónde viene el capital de esta nota?" aunque haya pasado por muchas reinversiones. Los importes de esta hoja NO tienen por qué cuadrar exactamente con el capital_invertido actual de la posición destino — no la uses para calcular capital, ingresos ni beneficios, solo para explicar el origen/historial de un capital si te lo preguntan explícitamente.
+
+14. LOS CALLS SIEMPRE SON TOTALES: cuando una nota es llamada, se cancela el 100% de su capital de golpe, nunca una parte. Si un documento menciona la posibilidad de un call parcial por sorteo entre tenedores (algunos prospectos legales lo mencionan como cláusula genérica), ignóralo — en la operativa real del fondo nunca ha pasado y no debe asumirse salvo que el usuario diga lo contrario explícitamente.
+
+15. DIVISA Y REDONDEO: todo el fondo opera en dólares estadounidenses (USD). Los importes siempre se redondean a 2 decimales.
+
+16. TRASPASOS ENTRE INVERSORES: si un inversor cede su posición a otro (ej. Jordi le pasa capital a Eva), se registra como una CANCELACIÓN de la posición del que cede + una inversión NUEVA (o una REINVERSIÓN, si el capital que se traspasa proviene de una posición previa que venció por call o vencimiento) del que recibe. Si ves una cancelación y una nueva/reinversión con fechas coincidentes y capital similar, puede tratarse de un traspaso de este tipo.
+
+17. NO EXISTE EL RETIRO PARCIAL DE CAPITAL: un inversor solo puede retirar los intereses que genera su capital, nunca una parte del principal. Para sacar dinero del principal, la única vía es cancelar la posición COMPLETA (fila entera). Si un inversor tenía $50,000 y ahora aparece con $30,000, eso NO es un retiro parcial — implica que se canceló la posición de $50,000 y se abrió una nueva de $30,000 (dos operaciones distintas, no un ajuste de la misma).
+
+18. NO SE PUEDE ENTRAR CON CAPITAL NUEVO A MITAD DE VIDA DE UNA NOTA YA ACTIVA: la única forma de que un inversor gane exposición a una nota que ya lleva tiempo funcionando es comprando la posición de otro inversor que ya estaba dentro (un traspaso, ver punto 16) — nunca aportando capital fresco directamente a una nota en curso. En un traspaso de este tipo, todos los términos de la nota (precio de compra, barreras, fechas de calendario, calls) se mantienen EXACTAMENTE igual que en la posición original — solo cambia el nombre del inversor en esa fila de INVERSIONES.
+
+19. CUANDO UNA NOTA CON VARIOS INVERSORES ES LLAMADA (call), el capital de cada inversor se reinvierte de forma INDEPENDIENTE, pudiendo acabar en sitios distintos (ej. si la nota tenía 4 inversores, cada uno puede terminar reinvertido en una nota o activo diferente, no necesariamente juntos). No asumas que todos los inversores de una nota llamada siguen juntos después del call.
+
+20. NO HAY COMISIÓN DE GESTIÓN ADICIONAL: el spread (diferencia entre lo que cobra el fondo del activo y lo que paga al inversor) es la ÚNICA fuente de ingreso del fondo. No existe ningún "management fee" u otra comisión extra sobre el capital de los inversores.
+
+21. EL PAGO AL INVERSOR ES UNA GARANTÍA UNIVERSAL, EN CUALQUIER TIPO DE ACTIVO: no es exclusivo de las notas estructuradas — si un activo fijo (Paraguay, MotoClick, Fútbol, Bolivia) no paga su % pactado algún mes por el motivo que sea, el fondo sigue pagando al inversor su tasa fija igualmente, asumiendo la pérdida él mismo. El inversor cobra su fijo pase lo que pase, sea cual sea el activo donde esté su capital.
+
+22. RENTABILIDAD MEDIA — DOS PERSPECTIVAS DISTINTAS, no las confundas:
+- "Rentabilidad que PAGA el fondo a los inversores" = media ponderada por capital de interes_inversor_anual sobre el capital activo de TODOS los inversores (excluyendo a Chaparro Fernández, que no es un inversor real). Esta es la perspectiva del COSTE del fondo.
+- "Rentabilidad que OBTIENE Chaparro Fernández como inversor" (o "rentabilidad de las inversiones de Chaparro Fernández") = media ponderada por capital de interes_nota_anual / tasa fija del activo, SOLO sobre las filas donde inversor = CHAPARRO FERNANDEZ (incluyendo sus reinversiones). Esta es la perspectiva del RENDIMIENTO del capital propio de la compañía colocado en los activos, y será bastante más alta que la anterior (activos rinden 15-38%, muy por encima del 10-15% que se paga a inversores externos).
+Si te preguntan "rentabilidad media de las inversiones de/en Chaparro Fernández" sin más contexto, usa la SEGUNDA interpretación (rendimiento del capital propio como inversor).
+
+23. BENEFICIO REAL DE LA COMPAÑÍA (distinto del "capital a nombre de Chaparro Fernández"): el capital que aparece invertido bajo el nombre "CHAPARRO FERNANDEZ" en INVERSIONES son los beneficios acumulados de la compañía que se han ido reinvirtiendo, PERO no todo ese capital es beneficio realmente disponible — una parte es, en realidad, intereses ya devengados a otros inversores que aún NO se les ha pagado en efectivo (porque su `pago_intereses = "reinvierte"`, es decir, todos los inversores EXCEPTO JEP, que es el único con `pago_intereses = "paga"`). Fórmula:
+BENEFICIO REAL = (Capital total a nombre de CHAPARRO FERNANDEZ activo hoy — usando fecha_final_inversion para excluir posiciones ya cerradas/reinvertidas, sin duplicar entre una fila original cerrada y su reinversión sucesora)
+         − (Suma de TODOS los intereses devengados desde el inicio de cada posición hasta hoy, de TODOS los inversores con pago_intereses="reinvierte", EXCLUYENDO a JEP y excluyendo al propio Chaparro Fernández)
+Este cálculo de "intereses devengados y no pagados" es ACUMULADO desde que cada inversor empezó (no se resetea nunca, es una deuda pendiente continua) — usa la misma lógica de extractos (ignorar fecha_final_inversion en filas NUEVA sin reinversión sucesora, respetarla en CANCELADA).
+
+24. QUÉ ES UNA "NOTA EN RIESGO" — UN SOLO CRITERIO, SIMPLE: la VARIACIÓN % desde el precio de compra de esa acción concreta.
+🔴 EN RIESGO si la variación es ≤ -30% (ej. compra $100 → precio actual ≤ $70).
+✅ OK si la variación es > -30%.
+Se eligió variación fija en vez de margen a la barrera de contingencia (que se usaba antes) por dos motivos: (a) es mucho más fácil de verificar a mano contra el Excel — es una resta simple; y (b) depende solo de precio_compra, que se consulta en vivo con Yahoo Finance al crear la nota y casi nunca falla, a diferencia de barrera_cupon/barrera_capital, que se han visto mal extraídas del PDF varias veces. El "margen a la barrera" TODAVÍA se calcula y se muestra junto a cada ticker en riesgo, como dato adicional de contexto (puede venir "N/D" si la nota no tiene barrera cargada) — pero NUNCA decide si una nota entra en la lista de riesgo ni qué color tiene. Solo la variación decide.
+
+⚠️ IMPORTANTE — LO QUE "RIESGO" **NO** ES: la proximidad de la próxima fecha de observación/cobro NO es un criterio de riesgo. Que una nota tenga observación "mañana" no la hace estar "en riesgo" — puede tener su próxima observación mañana y estar perfectamente por encima del -30%. NUNCA presentes "próxima observación inminente" como sinónimo o señal de riesgo. El riesgo se mide EXCLUSIVAMENTE por la variación % desde compra (la regla de arriba). Las fechas de observación/cobro se añaden DESPUÉS, como información complementaria de una nota que ya identificaste como en riesgo por variación — nunca como el criterio que decide si está en riesgo.
+
+25. CUANDO TE PREGUNTEN POR NOTAS EN RIESGO (o por una nota en riesgo concreta), tu ÚNICA fuente para decidir qué notas están en riesgo es el bloque "NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA)". Esa lista ya viene filtrada y ordenada (peor variación primero) — NO recalcules, NO reclasifiques, NO añadas notas que no estén ahí, y NO uses ningún otro umbral que no sea el que ya viene aplicado ahí. Si la lista dice que está vacía, contesta que no hay ninguna nota en riesgo ahora mismo — no inventes ninguna. Para CADA nota de esa lista, tu respuesta SIEMPRE debe incluir, en este orden:
+- El número de nota y el ticker en riesgo, tal como aparece en la lista.
+- Precio de compra, precio actual y variación %, copiados tal cual de la lista (no los recalcules).
+- El margen a la barrera de contingencia como dato adicional (si dice "N/D", decilo así — no es un fallo, es que esa nota no tiene barrera cargada en CONTROL_NOTAS).
+- Una breve explicación de la caída de cada acción en riesgo (usa la herramienta de búsqueda web SOLO para noticias/contexto cualitativo — resultados recientes, motivo del movimiento del precio, ratings, eventos — NUNCA para re-consultar el precio actual o la variación, que ya vienen calculados con precisión y son más fiables que cualquier precio que encuentres buscando en la web).
+- REGLA ESTRICTA DE PRECIOS: cualquier precio, rango de precio o variación % que menciones EN CUALQUIER PARTE de tu respuesta —ya sea en la tabla de datos, en una frase tipo "situación actual de [ticker]", en la conclusión, donde sea— tiene que ser EXACTAMENTE el mismo número que ya viene en el contexto (ESTADO DE RIESGO DE NOTAS / NOTAS EN RIESGO REAL), copiado tal cual, nunca un valor nuevo ni un rango (ej. "$79.80-$79.84") que hayas visto en un resultado de búsqueda web. La búsqueda web es solo para texto cualitativo (noticias, motivo del movimiento, eventos) — jamás como fuente de un número de precio que vas a mostrar. Si en algún momento se te ocurre escribir un precio y no lo tenés ya calculado en el contexto, no lo escribas — usa una frase sin cifra o remití al dato que sí tenés.
+- La situación general de esa nota: próxima fecha de observación (bloque PRÓXIMAS OBSERVACIONES) y próxima fecha de cobro/call (bloque CALENDARIO NOTAS / PRÓXIMOS CALLS), siempre como dato complementario al final, nunca como criterio de riesgo ni como parte del título/encabezado de la nota.
+- Si para alguna nota falta el precio de compra (aparece "N/D" en CONTROL_NOTAS), dilo así de simple: "no tengo el precio de compra cargado para la Nota X en CONTROL_NOTAS, revísalo". NO intentes compensar buscando datos en la web ni fabriques un análisis con información incompleta.
+
+26. TONO Y FORMATO AL HABLAR DE RIESGO: mantén un tono profesional y calmado, como un analista senior informando a un socio — NUNCA alarmista. Prohibido usar mayúsculas tipo "SITUACIÓN CRÍTICA", "RIESGO EXTREMO", "ESTO ES CRÍTICO", símbolos de alerta grandes o encabezados dramáticos. Presenta los datos con claridad y deja que la gravedad se entienda por las cifras, no por el tono. Si de verdad no puedes completar un análisis (por ejemplo, por límite de búsquedas), dilo en una frase breve y sigue con lo que sí puedas dar — no lo conviertas en el titular de la respuesta.
+
+27. NOTAS EN BORRADOR (sección "NOTAS EN BORRADOR" del contexto): son extracciones de PDF hechas por IA en el wizard "Notas estructuradas", que Yuri puede estar revisando y todavía NO están guardadas en CONTROL_NOTAS/CALENDARIO_NOTAS. Si te pregunta por una nota y solo la encuentras ahí (no en las fuentes oficiales), dile explícitamente que es un borrador sin guardar, con los datos que tengas, y avisa de que puede haber campos "REVISAR" sin corregir todavía. Puedes usarla para responder preguntas sobre esa nota en concreto, pero NUNCA la incluyas en cálculos de capital activo, cobros o beneficios del fondo — para eso solo cuentan las notas ya confirmadas en CONTROL_NOTAS.
+
+28. REGLA GENERAL DE PRECIOS (aplica a CUALQUIER pregunta sobre una nota o ticker, no solo a las de riesgo): cada vez que menciones un precio, un rango de precio o una variación % de un ticker —en un resumen de nota, en una tabla, en una frase de "situación actual", en una conclusión, donde sea—, tiene que ser EXACTAMENTE el número que ya viene calculado en el contexto (ESTADO DE RIESGO DE NOTAS / NOTAS EN RIESGO REAL), copiado tal cual, nunca un valor que hayas visto en un resultado de búsqueda web. Señal de alerta: si estás a punto de escribir un precio como rango (ej. "$79.80-$79.84") en vez de un número único, es casi seguro que lo sacaste de una búsqueda web y no del contexto — pará y usa el número exacto del contexto en su lugar. La búsqueda web sirve únicamente para texto cualitativo (noticias, motivo de un movimiento, eventos de la compañía, resultados trimestrales) — nunca como fuente de un precio, rango o variación % que vayas a mostrarle a Yuri. Si no tenés el precio de un ticker ya calculado en el contexto, no inventes uno ni lo completes con la web — decí que no lo tenés.
+
+== TUS FUENTES DE DATOS EN EL CONTEXTO ==
+- CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
+- ESTADO DE RIESGO DE NOTAS: precio actual vs barrera, por nota y ticker.
+- INTERESES A PAGAR A INVERSORES / EXTRACTO: pagos ya calculados con la lógica de extractos (solo NUEVA/CANCELADA, reinversiones excluidas del pago pero no del capital activo).
+- CAPITAL ACTIVO: capital desplegado por activo e inversor.
+- NOTAS EN BORRADOR: extracciones de IA aún no guardadas — ver regla 27, úsalas solo para responder sobre esa nota puntual, nunca en cálculos agregados.
+- PDFs de notas (si están cargados y son relevantes): documento oficial con condiciones exactas de call, barreras, cupón y fechas — tu fuente más fiable para razonar sobre probabilidad de call o condiciones legales exactas.
+
+== CÓMO RESPONDER ==
+- Si la pregunta pide un dato que YA está calculado en el contexto (fecha, importe, capital) → léelo y repítelo tal cual. No lo "mejores" ni lo recalcules — el contexto ya sigue las reglas correctas del negocio explicadas arriba.
+- Si la pregunta requiere COMBINAR o RAZONAR sobre varios datos que sí tienes (ej. "¿es probable que llamen la Nota 15?", "¿cuánto perderíamos si no llaman ninguna nota este trimestre?", "compárame el riesgo de estas dos notas") → SÍ debes razonar, aplicando la lógica de negocio de arriba y, si hay PDF, sus condiciones exactas. Explica brevemente tu razonamiento, no solo la conclusión.
+- Para preguntas de CALLS concretos: compara precio actual de cada ticker contra su precio INICIAL (no la barrera de cupón) y da un veredicto argumentado — probable / improbable / imposible de saber sin más datos — señalando qué ticker concreto lo impide si aplica.
+- Si no tienes el dato ni puedes derivarlo razonando sobre lo que sí tienes, dilo con claridad — no inventes cifras.
+
+== INVERSORES Y TASAS ==
+LEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%
+ROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+CROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%
+CHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago
+GOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%
+JORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%
+
+== FORMATO ==
+Responde SIEMPRE en español. Sé conciso cuando el dato es directo; desarrolla el razonamiento cuando la pregunta lo requiera. Fechas DD/MM/YYYY, importes con $ y 2 decimales.""",
+                  "messages":historial},timeout=60)
+        data = resp.json()
+        respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
+        if not respuesta:
+            respuesta = f"Error API: {data.get('error',{}).get('message',str(data))}"
+        return respuesta
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def pdfs_disponibles_notas() -> dict:
+    """Lista y codifica en base64 los PDFs de notas estructuradas (carpeta notas_pdfs/ del repo
+    + subidas temporales). Función de nivel de módulo para que la reutilicen tanto la app web
+    como el servicio de WhatsApp."""
+    import os, re as _re_ia, tempfile, base64 as _b64
+    carpeta_tmp = os.path.join(tempfile.gettempdir(), "notas_pdfs_cf")
+    carpeta_repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notas_pdfs")
+    os.makedirs(carpeta_tmp, exist_ok=True)
+    pdfs = {}
+    for carpeta in [carpeta_repo, carpeta_tmp]:
+        if not os.path.exists(carpeta) or not os.path.isdir(carpeta):
+            continue
+        for fname in sorted(os.listdir(carpeta)):
+            if fname.lower().endswith(".pdf"):
+                clave = _re_ia.sub(r"[^a-z0-9]", "", fname.lower().replace(".pdf",""))
+                if clave not in {_re_ia.sub(r"[^a-z0-9]","",k.lower().replace(".pdf","")) for k in pdfs}:
+                    try:
+                        with open(os.path.join(carpeta, fname), "rb") as f:
+                            pdfs[fname] = _b64.standard_b64encode(f.read()).decode()
+                    except Exception:
+                        pass
+    return pdfs
+
+
 def seccion_asistente_ia_fondo():
     """IA única: fondo completo + PDFs de notas estructuradas."""
     df_inv, df_cal, df_control = cargar_excel_completo()
@@ -8601,23 +9555,7 @@ def seccion_asistente_ia_fondo():
     carpeta_repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notas_pdfs")
     os.makedirs(carpeta_tmp, exist_ok=True)
 
-    def _pdfs_disponibles():
-        pdfs = {}
-        for carpeta in [carpeta_repo, carpeta_tmp]:
-            if not os.path.exists(carpeta) or not os.path.isdir(carpeta):
-                continue
-            for fname in sorted(os.listdir(carpeta)):
-                if fname.lower().endswith(".pdf"):
-                    clave = _re_ia.sub(r"[^a-z0-9]", "", fname.lower().replace(".pdf",""))
-                    if clave not in {_re_ia.sub(r"[^a-z0-9]","",k.lower().replace(".pdf","")) for k in pdfs}:
-                        try:
-                            with open(os.path.join(carpeta, fname), "rb") as f:
-                                pdfs[fname] = _b64.standard_b64encode(f.read()).decode()
-                        except Exception:
-                            pass
-        return pdfs
-
-    pdfs_b64 = _pdfs_disponibles()
+    pdfs_b64 = pdfs_disponibles_notas()
     n_pdfs = len(pdfs_b64)
 
     with st.expander(f"📂 PDFs de notas cargados ({n_pdfs})", expanded=n_pdfs == 0):
@@ -8634,743 +9572,7 @@ def seccion_asistente_ia_fondo():
             st.success(f"✅ {len(subidos)} PDF(s) guardado(s).")
             st.rerun()
 
-    # ── Contexto del Excel ────────────────────────────────────────────────────
-    def _contexto_excel(pregunta: str = "", fecha_limite=None) -> str:
-        """
-        Contexto COMPLETO con fuentes correctas para cada dato:
-        - Intereses a inversores: lógica de EXTRACTOS (solo NUEVA+CANCELADA, sin reinversiones)
-        - Ingresos compañía / cobros notas: lógica de DASHBOARD (detalle_activo_mes + resumen_notas_mes)
-        - Capital activo por inversor: lógica de CENTRO DE CONTROL (capital_activo_en_fecha)
-        """
-        hoy = pd.Timestamp.today().normalize()
-        anio_hoy, mes_hoy = hoy.year, hoy.month
-        p = pregunta.lower()
-
-        # Detectar mes mencionado en la pregunta
-        meses_map = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-                     "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12}
-        mes_mencionado = next((v for k,v in meses_map.items() if k in p), None)
-        mes_pregunta = mes_mencionado if mes_mencionado is not None else mes_hoy
-
-        # Detectar un año explícito de 4 dígitos (ej. "2025") en la pregunta.
-        import re as _re
-        anio_match = _re.search(r"\b(20\d{2})\b", p)
-        anio_pregunta = int(anio_match.group(1)) if anio_match else anio_hoy
-
-        # Si se menciona un año pero NO un mes concreto, se interpreta como petición de TOTAL ANUAL
-        # (ej. "cuántos intereses se pagaron a PAM en 2025" → los 12 meses de 2025, no solo el mes actual).
-        pedir_total_anual = (anio_match is not None) and (mes_mencionado is None)
-
-        # Calcular resumen dashboard al inicio para usarlo en todos los bloques
-        try:
-            resumen_dash = obtener_resumen_dashboard(
-                df_inv, df_cal, df_control,
-                anio=anio_pregunta, mes=mes_pregunta,
-                vista_activo="General", incluir_chaparro=True
-            )
-        except Exception:
-            resumen_dash = {}
-
-        lineas = [
-            f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
-            f"Mes de referencia: {mes_pregunta}/{anio_pregunta}",
-            "",
-            "FUENTE DE DATOS:",
-            "- Intereses pagados a inversores → lógica EXTRACTOS (solo operaciones NUEVA y CANCELADA, sin reinversiones)",
-            "- Ingresos y beneficio empresa → lógica DASHBOARD (obtener_resumen_dashboard, incluir_chaparro=True)",
-            "- Capital activo → capital_activo_en_fecha + obtener_resumen_dashboard",
-        ]
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 1. CAPITAL ACTIVO HOY — fuente: capital_activo_en_fecha (Centro de control)
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            lineas.append(f"\n=== CAPITAL ACTIVO HOY ===")
-            # Total con Chaparro Fernández incluido (igual que Dashboard con checkbox activado)
-            cap_con_chaparro = resumen_dash.get("capital_total", 0.0)
-            # Total sin Chaparro Fernández (igual que Centro de control por defecto)
-            df_sin_cf = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro=False)
-            cap_sin_chaparro = capital_activo_en_fecha(df_sin_cf, hoy)
-            lineas.append(f"TOTAL FONDO (CON Chaparro Fernández, como Dashboard): ${cap_con_chaparro:,.2f}")
-            lineas.append(f"TOTAL FONDO (SIN Chaparro Fernández, como Centro de control): ${cap_sin_chaparro:,.2f}")
-
-            # Desglose por activo (con Chaparro incluido)
-            df_notas_cap = df_inv[df_inv["tipo_inversion"].astype(str).str.lower().str.strip() == "nota"]
-            cap_notas = capital_activo_en_fecha(df_notas_cap, hoy)
-            lineas.append(f"  NOTAS: ${cap_notas:,.2f}")
-            for activo in ["futbol","paraguay","bolivia","motoclick","bitcoin"]:
-                cap = capital_activo_en_fecha(df_inv, hoy, activo)
-                lineas.append(f"  {activo.upper()}: ${cap:,.2f}")
-
-            # Capital activo por inversor
-            lineas.append("\nCapital activo por inversor (todos, incluyendo Chaparro Fernández):")
-            df_cap = df_inv.copy()
-            df_cap["fecha_inversion"] = pd.to_datetime(df_cap.get("fecha_inversion"), errors="coerce", dayfirst=True)
-            df_cap["fecha_final_inversion"] = pd.to_datetime(df_cap.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
-            df_cap["capital_invertido"] = pd.to_numeric(df_cap.get("capital_invertido"), errors="coerce").fillna(0)
-            df_cap["tipo_op_n"] = df_cap["tipo_operacion"].astype(str).str.strip().str.upper()
-            activas_cc = df_cap[
-                (df_cap["fecha_inversion"].notna()) &
-                (df_cap["fecha_inversion"] <= hoy) &
-                (df_cap["fecha_final_inversion"].isna() | (df_cap["fecha_final_inversion"] >= hoy))
-            ].copy()
-            es_cancelada = activas_cc["tipo_op_n"] == "CANCELADA"
-            activas_cc = activas_cc[~es_cancelada]
-            cap_por_inv = activas_cc.groupby("inversor")["capital_invertido"].sum().sort_values(ascending=False)
-            for inv, cap in cap_por_inv.items():
-                lineas.append(f"  {inv}: ${cap:,.2f}")
-        except Exception as e:
-            lineas.append(f"[Error capital activo: {e}]")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 2. INTERESES A INVERSORES DEL MES — fuente: lógica EXTRACTOS
-        #    Solo NUEVA y CANCELADA. Reinversiones NO generan pago independiente.
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            df_ext = df_inv.copy()
-            for col in ["inversor","tipo_inversion","subtipo_inversion","nombre_activo","tipo_operacion","id_inversion"]:
-                if col in df_ext.columns:
-                    df_ext[col] = df_ext[col].fillna("").astype(str).str.strip()
-            df_ext["tipo_op_n"] = df_ext["tipo_operacion"].str.upper()
-            df_ext = df_ext[df_ext["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
-            df_ext["fecha_inversion"] = pd.to_datetime(df_ext.get("fecha_inversion"), errors="coerce", dayfirst=True)
-            df_ext["fecha_final_inversion"] = pd.to_datetime(df_ext.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
-            df_ext["capital_invertido"] = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
-            df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
-
-            INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-            CORTE_TRAMO = datetime(2026, 2, 1)
-            fin_tramo1 = datetime(2026, 1, 31)
-
-            def _calcular_intereses_mes(anio_m, mes_m):
-                dias_mes_ext = ultimo_dia_mes(anio_m, mes_m)
-                fecha_corte_ext = pd.Timestamp(datetime(anio_m, mes_m, dias_mes_ext))
-                filas = []
-                for _, row in df_ext.iterrows():
-                    fi = row.get("fecha_inversion")
-                    if pd.isna(fi):
-                        continue
-                    fi_dt = fi.to_pydatetime()
-                    tipo_op = row["tipo_op_n"]
-                    ff = row.get("fecha_final_inversion")
-
-                    if tipo_op == "CANCELADA":
-                        if pd.isna(ff):
-                            continue
-                        fecha_fin_dt = min(ff.to_pydatetime(), fecha_corte_ext.to_pydatetime())
-                    else:
-                        fecha_fin_dt = fecha_corte_ext.to_pydatetime()
-
-                    inicio_mes_dt = datetime(anio_m, mes_m, 1)
-                    fin_mes_dt = datetime(anio_m, mes_m, dias_mes_ext)
-                    inicio_calc = max(fi_dt, inicio_mes_dt)
-                    fin_calc = min(fecha_fin_dt, fin_mes_dt)
-                    if inicio_calc > fin_calc:
-                        continue
-
-                    dias = (fin_calc - inicio_calc).days + 1
-                    capital = float(row["capital_invertido"])
-                    tasa = float(row["interes_inversor_anual"])
-                    inv_upper = str(row.get("inversor","")).strip().upper()
-
-                    if inv_upper in INVERSORES_TRAMO:
-                        interes_mes = 0.0
-                        if inicio_calc <= fin_tramo1:
-                            fin_t1 = min(fin_calc, fin_tramo1)
-                            dias_t1 = (fin_t1 - inicio_calc).days + 1
-                            interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_ext, 2)
-                        if fin_calc >= CORTE_TRAMO:
-                            ini_t2 = max(inicio_calc, CORTE_TRAMO)
-                            dias_t2 = (fin_calc - ini_t2).days + 1
-                            interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_ext, 2)
-                    else:
-                        interes_mes = round((capital * tasa / 12) * dias / dias_mes_ext, 2)
-
-                    filas.append({
-                        "mes": f"{mes_m:02d}/{anio_m}",
-                        "inversor": str(row.get("inversor","")),
-                        "nombre_activo": str(row.get("nombre_activo","")),
-                        "capital": capital,
-                        "tasa_anual": tasa,
-                        "dias": dias,
-                        "interes_mes": interes_mes,
-                    })
-                return filas
-
-            if pedir_total_anual:
-                lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES — TOTAL AÑO {anio_pregunta} (fuente: lógica Extractos) ===")
-                lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas. Suma de los 12 meses del año solicitado.")
-                filas_int = []
-                for m in range(1, 13):
-                    filas_int.extend(_calcular_intereses_mes(anio_pregunta, m))
-            else:
-                lineas.append(f"\n=== INTERESES A PAGAR A INVERSORES {mes_pregunta}/{anio_pregunta} (fuente: lógica Extractos) ===")
-                lineas.append("REGLA: solo operaciones NUEVA y CANCELADA. Reinversiones excluidas.")
-                filas_int = _calcular_intereses_mes(anio_pregunta, mes_pregunta)
-
-            if filas_int:
-                df_int = pd.DataFrame(filas_int)
-                # Por inversor agrupado (total del periodo solicitado, sea un mes o el año completo)
-                por_inv = df_int.groupby("inversor")["interes_mes"].sum().sort_values(ascending=False)
-                total_int = por_inv.sum()
-                for inv, val in por_inv.items():
-                    lineas.append(f"  {inv}: ${val:,.2f}")
-                lineas.append(f"  >> TOTAL INTERESES A PAGAR: ${total_int:,.2f}")
-                if pedir_total_anual:
-                    lineas.append("\nDesglose mensual por inversor (para el año solicitado):")
-                    desglose = df_int.groupby(["inversor","mes"])["interes_mes"].sum().reset_index()
-                    for inv in por_inv.index:
-                        sub = desglose[desglose["inversor"] == inv]
-                        detalle_meses = ", ".join(f"{r['mes']}: ${r['interes_mes']:,.2f}" for _, r in sub.iterrows())
-                        lineas.append(f"  {inv} → {detalle_meses}")
-                else:
-                    lineas.append("\nDetalle por posición:")
-                    for r in filas_int:
-                        lineas.append(f"  {r['inversor']} | {r['nombre_activo']} | Capital: ${r['capital']:,.2f} | Tasa: {r['tasa_anual']*100:.1f}% | Días: {r['dias']} | Interés: ${r['interes_mes']:,.2f}")
-            else:
-                lineas.append("  Sin datos de intereses para ese periodo.")
-        except Exception as e:
-            lineas.append(f"[Error intereses extracto: {e}]")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 2b. CAPITAL DE CHAPARRO FERNÁNDEZ Y BENEFICIO REAL DE LA COMPAÑÍA
-        #     (precalculado para que la IA no tenga que sumar decenas de filas ella misma)
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            df_cf = df_ext.copy()  # ya filtrado a NUEVA/CANCELADA, con pago_intereses disponible
-            df_cf["inversor_up"] = df_cf["inversor"].str.upper()
-            df_cf["pago_intereses"] = df_cf.get("pago_intereses", "").fillna("").astype(str).str.strip().str.lower()
-
-            # Capital hoy a nombre de Chaparro Fernández — se usa la misma función canónica que
-            # el Centro de Control (capital_activo_en_fecha), que ya excluye correctamente las
-            # posiciones "nueva" que fueron reinvertidas (fecha_final_inversion pasada), evitando
-            # duplicar capital entre una fila nueva ya cerrada y su reinversión sucesora.
-            df_inv_cf = df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == "CHAPARRO FERNANDEZ"].copy()
-            capital_cf_hoy = capital_activo_en_fecha(df_inv_cf, hoy)
-
-            # Intereses devengados y NO pagados acumulados: todos los inversores con pago_intereses="reinvierte",
-            # EXCLUYENDO a JEP (que sí cobra en efectivo) y a Chaparro Fernández (no se debe nada a sí mismo).
-            # Se suman TODOS los meses desde que empezó cada posición hasta hoy (deuda acumulada, nunca se resetea).
-            df_reinv = df_cf[(df_cf["pago_intereses"] == "reinvierte") & (df_cf["inversor_up"] != "CHAPARRO FERNANDEZ")]
-            if not df_reinv.empty:
-                fecha_min_reinv = df_reinv["fecha_inversion"].min()
-                total_devengado_no_pagado = 0.0
-                por_inv_devengado = {}
-                f_iter = pd.Timestamp(fecha_min_reinv.year, fecha_min_reinv.month, 1)
-                while f_iter <= hoy:
-                    for _, r in df_reinv.iterrows():
-                        v = 0.0
-                        fi = r.get("fecha_inversion")
-                        if pd.isna(fi):
-                            continue
-                        dias_m = ultimo_dia_mes(f_iter.year, f_iter.month)
-                        inicio_mes_r = datetime(f_iter.year, f_iter.month, 1)
-                        fin_mes_r = datetime(f_iter.year, f_iter.month, dias_m)
-                        ff = r.get("fecha_final_inversion")
-                        if r["tipo_op_n"] == "CANCELADA" and pd.notna(ff):
-                            fecha_fin_r = min(ff.to_pydatetime(), fin_mes_r)
-                        else:
-                            fecha_fin_r = fin_mes_r
-                        inicio_calc_r = max(fi.to_pydatetime(), inicio_mes_r)
-                        fin_calc_r = min(fecha_fin_r, fin_mes_r)
-                        if inicio_calc_r > fin_calc_r:
-                            continue
-                        dias_r = (fin_calc_r - inicio_calc_r).days + 1
-                        v = round(float(r["capital_invertido"]) * float(r["interes_inversor_anual"]) / 12 * dias_r / dias_m, 2)
-                        total_devengado_no_pagado += v
-                        por_inv_devengado[r["inversor"]] = por_inv_devengado.get(r["inversor"], 0) + v
-                    f_iter += pd.DateOffset(months=1)
-
-                beneficio_real = capital_cf_hoy - total_devengado_no_pagado
-                lineas.append(f"\n=== CAPITAL CHAPARRO FERNÁNDEZ Y BENEFICIO REAL DE LA COMPAÑÍA (precalculado) ===")
-                lineas.append(f"Capital hoy a nombre de CHAPARRO FERNANDEZ: ${capital_cf_hoy:,.2f}")
-                lineas.append(f"Intereses devengados y NO pagados acumulados (todos los inversores excepto JEP, desde que empezó cada uno hasta hoy): ${total_devengado_no_pagado:,.2f}")
-                lineas.append(f"  Desglose: " + ", ".join(f"{k}: ${v:,.2f}" for k, v in sorted(por_inv_devengado.items(), key=lambda x: -x[1])))
-                lineas.append(f">> BENEFICIO REAL DE LA COMPAÑÍA = ${capital_cf_hoy:,.2f} - ${total_devengado_no_pagado:,.2f} = ${beneficio_real:,.2f}")
-        except Exception as e:
-            lineas.append(f"[Error cálculo beneficio real Chaparro Fernández: {e}]")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 3. INGRESOS EMPRESA DEL MES — fuente: obtener_resumen_dashboard (EXACTAMENTE igual que el Dashboard)
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            cobro_total   = resumen_dash.get("cobro_total_mes", 0.0)
-            pago_total    = resumen_dash.get("pago_total_mes", 0.0)
-            benef_total   = resumen_dash.get("beneficio_total_mes", 0.0)
-            cap_dashboard = resumen_dash.get("capital_total", 0.0)
-
-            lineas.append(f"\n=== INGRESOS COMPAÑÍA {mes_pregunta}/{anio_pregunta} (fuente: Dashboard — obtener_resumen_dashboard) ===")
-            lineas.append(f"  COBRO TOTAL COMPAÑÍA: ${cobro_total:,.2f}")
-            lineas.append(f"  PAGO TOTAL INVERSORES (dashboard): ${pago_total:,.2f}")
-            lineas.append(f"  BENEFICIO EMPRESA: ${benef_total:,.2f}")
-            lineas.append(f"  CAPITAL ACTIVO (dashboard): ${cap_dashboard:,.2f}")
-
-            # Desglose por activo si está disponible
-            rent_activo = resumen_dash.get("rentabilidad_por_activo", None)
-            if rent_activo is not None and not rent_activo.empty:
-                lineas.append("  Desglose por activo:")
-                for _, r in rent_activo.iterrows():
-                    lineas.append(f"    {str(r.get('activo','')).upper()}: cobro ${float(r.get('cobro_compania_mes',0)):,.2f} | pago inversores ${float(r.get('pago_inversor_mes',0)):,.2f} | beneficio ${float(r.get('beneficio_empresa_mes',0)):,.2f}")
-        except Exception as e:
-            lineas.append(f"[Error ingresos empresa: {e}]")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 3b. DESGLOSE DE COBROS DE NOTAS DEL MES SOLICITADO — YA CALCULADO Y SUMADO
-        #     Fuente: resumen_notas_mes (idéntica lógica que el Dashboard, calendario real).
-        #     Existe para que la IA NO tenga que extraer/sumar filas a mano de la tabla ancha
-        #     de "CALENDARIO INTEGRADO PRÓXIMOS 180 DÍAS" de más abajo — eso ya causó un error
-        #     real (una nota olvidada y fechas desplazadas al resumir una tabla larga). Para
-        #     preguntas tipo "¿cuánto cobraremos de notas en agosto?" o "dame el calendario de
-        #     cobros de notas de [mes]", usa ESTE bloque tal cual, no el de 180 días.
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            _, _, _, detalle_mes_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio_pregunta, mes_pregunta, prorratear=False)
-            lineas.append(f"\n=== COBROS DE NOTAS {mes_pregunta}/{anio_pregunta} — DESGLOSE YA SUMADO POR FECHA Y NOTA (usar tal cual, no recalcular) ===")
-            if detalle_mes_notas is not None and not detalle_mes_notas.empty:
-                agg_notas_mes = detalle_mes_notas.groupby(["fecha_pago", "nota"], as_index=False).agg(
-                    monto_cobro=("cobro_compania", "sum"),
-                    resultado_observacion=("resultado_observacion", "first"),
-                ).sort_values(["fecha_pago", "nota"])
-                for r in agg_notas_mes.itertuples():
-                    fecha_str = pd.Timestamp(r.fecha_pago).strftime("%d/%m/%Y") if pd.notna(r.fecha_pago) else "sin fecha"
-                    lineas.append(f"  {fecha_str} | Nota {int(r.nota)} | ${float(r.monto_cobro):,.2f} | Estado: {r.resultado_observacion}")
-                lineas.append(f"  >> TOTAL COBROS DE NOTAS {mes_pregunta}/{anio_pregunta}: ${agg_notas_mes['monto_cobro'].sum():,.2f} (debe coincidir con COBRO TOTAL COMPAÑÍA de arriba menos ingresos de activos fijos)")
-            else:
-                lineas.append(f"  Sin cobros de notas para {mes_pregunta}/{anio_pregunta}.")
-        except Exception as e:
-            lineas.append(f"[Error desglose cobros notas del mes: {e}]")
-        #    Fuente: preparar_calendario_integrado_notas() — EXACTAMENTE igual que Alertas/Calendario
-        #    Incluye monto_cobro calculado correctamente por cada nota
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            hoy_ts = pd.Timestamp.today().normalize()
-            limite_180 = hoy_ts + pd.Timedelta(days=180)
-            df_calls_ctx = leer_hoja_excel("CALENDARIO_CALLS")
-            cal_integrado = preparar_calendario_integrado_notas(
-                df_inv=df_inv,
-                df_cal=df_cal,
-                df_control=df_control,
-                df_calls=df_calls_ctx,
-                fecha_inicio=hoy_ts,
-                fecha_fin=limite_180,
-            )
-
-            lineas.append(f"\n=== CALENDARIO INTEGRADO PRÓXIMOS 180 DÍAS (fuente: Alertas/Calendario, misma lógica que pantalla) ===")
-            lineas.append("  NOTA: para '¿cuánto cobraremos de notas en [mes]?' usa el bloque 'COBROS DE NOTAS [mes] — DESGLOSE YA SUMADO' de más arriba, no sumes filas de esta tabla a mano — es fácil saltarse una fila en una tabla tan larga.")
-
-            if cal_integrado.empty:
-                lineas.append("  Sin eventos en los próximos 180 días.")
-            else:
-                # Tabla completa
-                cols_show = [c for c in ["fecha","tipo_evento","nota","estado","monto_cobro","detalle"] if c in cal_integrado.columns]
-                lineas.append(cal_integrado[cols_show].to_string(index=False))
-
-                # ── PRÓXIMO PAGO (cobro de la compañía) ──────────────────────────
-                pagos = cal_integrado[
-                    (cal_integrado["tipo_evento"] == "PAGO") &
-                    (pd.to_numeric(cal_integrado.get("monto_cobro", pd.Series(dtype=float)), errors="coerce").fillna(0) > 0)
-                ].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
-
-                lineas.append(f"\n=== PRÓXIMO COBRO DE NOTAS (PAGO con importe > 0) ===")
-                if not pagos.empty:
-                    prox = pagos.iloc[0]
-                    lineas.append(f"  FECHA: {pd.Timestamp(prox['fecha']).strftime('%d/%m/%Y')}")
-                    lineas.append(f"  NOTA: {prox.get('nota','')}")
-                    lineas.append(f"  IMPORTE: ${float(prox.get('monto_cobro', 0)):,.2f}")
-                    lineas.append(f"  ESTADO: {prox.get('estado','')}")
-                    if len(pagos) > 1:
-                        sig = pagos.iloc[1]
-                        lineas.append(f"  SIGUIENTE: {pd.Timestamp(sig['fecha']).strftime('%d/%m/%Y')} | Nota {sig.get('nota','')} | ${float(sig.get('monto_cobro',0)):,.2f}")
-                    # Total cobros próximos 30 días
-                    hoy_30 = hoy_ts + pd.Timedelta(days=30)
-                    pagos_30 = pagos[pd.to_datetime(pagos["fecha"]) <= hoy_30]
-                    if not pagos_30.empty:
-                        tot_30 = pd.to_numeric(pagos_30["monto_cobro"], errors="coerce").fillna(0).sum()
-                        lineas.append(f"  >> TOTAL COBROS PRÓXIMOS 30 DÍAS: ${tot_30:,.2f}")
-                    tot_180 = pd.to_numeric(pagos["monto_cobro"], errors="coerce").fillna(0).sum()
-                    lineas.append(f"  >> TOTAL COBROS PRÓXIMOS 180 DÍAS: ${tot_180:,.2f}")
-                else:
-                    lineas.append("  Sin pagos con importe > 0 en los próximos 180 días.")
-
-                # ── PRÓXIMA OBSERVACIÓN POR NOTA ─────────────────────────────────
-                obs = cal_integrado[cal_integrado["tipo_evento"] == "OBSERVACION"].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
-                lineas.append(f"\n=== PRÓXIMA OBSERVACIÓN POR NOTA ===")
-                if not obs.empty:
-                    for nota_id, grupo in obs.groupby("nota"):
-                        prox_obs = grupo.iloc[0]
-                        lineas.append(f"  Nota {nota_id}: {pd.Timestamp(prox_obs['fecha']).strftime('%d/%m/%Y')} | Estado: {prox_obs.get('estado','')}")
-                else:
-                    lineas.append("  Sin observaciones futuras.")
-
-                # ── PRÓXIMOS CALLS ────────────────────────────────────────────────
-                calls_cal = cal_integrado[cal_integrado["tipo_evento"] == "CALL"].sort_values("fecha") if not cal_integrado.empty else pd.DataFrame()
-                if not calls_cal.empty:
-                    lineas.append(f"\n=== PRÓXIMOS CALLS / VENCIMIENTOS ===")
-                    for _, r in calls_cal.head(10).iterrows():
-                        lineas.append(f"  Nota {r.get('nota','')}: {pd.Timestamp(r['fecha']).strftime('%d/%m/%Y')}")
-
-        except Exception as e:
-            lineas.append(f"[Error calendario notas: {e}]")
-
-        # Estado de riesgo de notas
-        # Fuente: RESULTADOS_OBSERVACION (estado real) + CONTROL_NOTAS (precio/barrera) + CALENDARIO_NOTAS (próx obs)
-        # Se acumula aparte en 'lineas_riesgo' (no en 'lineas') para poder insertarla SIEMPRE al
-        # principio del contexto, antes de truncar. Así, aunque el resto del contexto crezca mucho
-        # (más inversores, más meses), la lista de notas en riesgo real nunca puede quedar cortada.
-        lineas_riesgo = []
-        try:
-            lineas_riesgo.append(f"\n=== ESTADO DE RIESGO DE NOTAS ===")
-            hoy_r = pd.Timestamp.today().normalize()
-
-            # NOTA: la hoja RESULTADOS_OBSERVACION NO se usa — no se mantiene actualizada.
-            # El estado real de cada nota se calcula en vivo comparando CONTROL_NOTAS
-            # (precio_compra/barrera) contra precios actuales de yfinance, más abajo.
-
-            # 2. Precios actuales y variación por ticker — REUTILIZA construir_resumen_actual_notas_alertas(),
-            # la MISMA función (idéntico criterio, idéntica fuente de precio: yf.Ticker().history)
-            # que alimenta el semáforo consolidado que ve Yuri en la pantalla "Notas estructuradas".
-            # Antes esta sección llamaba a obtener_datos_fundamentales() por separado (más pesada:
-            # t.info con 4 reintentos + analyst_price_targets + history 1y + calendar por ticker),
-            # lo que la exponía a rate-limits de Yahoo con más facilidad; y cuando fallaba, caía
-            # silenciosamente en el precio "precio_actual" ya guardado en CONTROL_NOTAS (un valor
-            # estático, no en vivo), lo que podía hacer que la IA reportara "sin riesgo" notas que
-            # el semáforo sí marcaba en ROJO. Para que la IA NUNCA pueda divergir de lo que se ve
-            # en pantalla, se usa aquí exactamente el mismo cálculo, con el mismo filtro de notas
-            # activas (obtener_control_notas_activas) que usa el semáforo.
-            df_control_riesgo_ia = obtener_control_notas_activas(df_inv, df_control)
-            resumen_riesgo_ia = construir_resumen_actual_notas_alertas(df_control_riesgo_ia)
-
-            def _precios_nota(nota_id):
-                if resumen_riesgo_ia.empty:
-                    return ""
-                filas = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
-                if filas.empty:
-                    return ""
-                partes = []
-                for _, r in filas.iterrows():
-                    ticker = r["ticker"]
-                    precio_actual = r["precio_actual"]
-                    variacion = r["variacion_%"]
-                    precio_contingencia = r["precio_contingencia"]
-                    margen_a_barrera = r["margen_a_barrera_%"]
-                    alerta_nivel = r["alerta_riesgo"]
-                    p_s = f"${precio_actual:,.2f}" if pd.notna(precio_actual) else "N/D"
-                    var_s = f" ({variacion:+.1f}%)" if pd.notna(variacion) else ""
-                    b_s = f"${precio_contingencia:,.2f}" if pd.notna(precio_contingencia) else "N/D"
-                    icono = {"ROJO": " 🔴 EN RIESGO (variación ≤ -30%)", "OK": " ✅ OK"}.get(alerta_nivel, " ⚪ SIN DATO")
-                    if pd.notna(margen_a_barrera):
-                        alerta = f"{icono} | margen a la barrera (dato adicional, no decide el riesgo): {margen_a_barrera:+.1f}%"
-                    else:
-                        alerta = f"{icono} | margen a la barrera: N/D (sin barrera cargada en CONTROL_NOTAS)"
-                    partes.append(f"{ticker}: precio={p_s}{var_s} | barrera={b_s}{alerta}")
-                return " | ".join(partes)
-
-            # Estado por nota = peor ticker de esa nota (mismo criterio que resumen_alertas_por_nota / el semáforo)
-            def _estado_nota_precio(nota_id):
-                if resumen_riesgo_ia.empty:
-                    return "PENDIENTE"
-                filas = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
-                if filas.empty:
-                    return "PENDIENTE"
-                variaciones = pd.to_numeric(filas["variacion_%"], errors="coerce").dropna()
-                if variaciones.empty:
-                    return "PENDIENTE"
-                peor_variacion = variaciones.min()
-                nivel = clasificar_alerta_riesgo(peor_variacion)
-                if nivel == "ROJO": return "ROJA"
-                if nivel == "OK": return "OK"
-                return "PENDIENTE"
-
-            # 3. Próxima observación futura (CALENDARIO_NOTAS)
-            df_c_riesgo = df_cal.copy()
-            df_c_riesgo["fecha"] = pd.to_datetime(df_c_riesgo["fecha"], errors="coerce")
-            df_c_riesgo["tipo_evento"] = df_c_riesgo["tipo_evento"].fillna("").astype(str).str.upper()
-            obs_futuras = df_c_riesgo[(df_c_riesgo["tipo_evento"]=="OBSERVACION") & (df_c_riesgo["fecha"]>=hoy_r)].sort_values("fecha")
-            prox_obs = obs_futuras.groupby("nota").first().reset_index()
-            prox_obs_dict = {int(r["nota"]): pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y") 
-                            for _, r in prox_obs.iterrows() if not pd.isna(r.get("nota"))}
-
-            # 4. Próximo call (CALENDARIO_NOTAS)
-            calls_fut = df_c_riesgo[(df_c_riesgo["tipo_evento"]=="CALL") & (df_c_riesgo["fecha"]>=hoy_r)].sort_values("fecha")
-            prox_call_dict = {}
-            for _, r in calls_fut.iterrows():
-                n = pd.to_numeric(r.get("nota"), errors="coerce")
-                if pd.isna(n): continue
-                ni = int(n)
-                if ni not in prox_call_dict:
-                    prox_call_dict[ni] = pd.Timestamp(r["fecha"]).strftime("%d/%m/%Y")
-
-            # Universo de notas a evaluar: todas las que están en el resumen (mismas notas activas que
-            # ve el semáforo) más cualquiera con observación futura programada.
-            notas_en_control = set()
-            if not resumen_riesgo_ia.empty:
-                notas_en_control = set(int(n) for n in pd.to_numeric(resumen_riesgo_ia["nota"], errors="coerce").dropna().unique())
-            todas_notas = sorted(notas_en_control | set(prox_obs_dict.keys()))
-            negativas, pendientes, positivas = [], [], []
-            filas_riesgo_definitivo = []  # (nota_id, ticker, precio_compra, precio_actual, variación, precio_contingencia, margen)
-
-            for nota_id in todas_notas:
-                # Estado por variación de precio (igual que pantalla Notas estructuradas / semáforo)
-                estado_precio = _estado_nota_precio(nota_id)
-                prox_obs_s = prox_obs_dict.get(nota_id, "Sin obs programada")
-                prox_call_s = prox_call_dict.get(nota_id, "")
-                precios_s = _precios_nota(nota_id)
-
-                linea = f"  NOTA_{nota_id:02d} | Estado: {estado_precio} | Próx obs: {prox_obs_s}"
-                if prox_call_s:
-                    linea += f" | Próx call: {prox_call_s}"
-                if precios_s:
-                    linea += f"\n    Precios: {precios_s}"
-
-                if estado_precio == "ROJA":
-                    negativas.append(linea)
-                elif estado_precio == "OK":
-                    positivas.append(linea)
-                else:
-                    pendientes.append(linea)  # PENDIENTE = sin precio disponible
-
-                # Detalle por ticker para la lista definitiva (misma fila que ya calculó el semáforo, sin llamadas nuevas)
-                if not resumen_riesgo_ia.empty:
-                    filas_nota = resumen_riesgo_ia[resumen_riesgo_ia["nota"] == nota_id]
-                    for _, r_t in filas_nota.iterrows():
-                        if r_t["alerta_riesgo"] != "ROJO":
-                            continue
-                        filas_riesgo_definitivo.append((
-                            nota_id, r_t["ticker"], r_t["precio_compra"], r_t["precio_actual"],
-                            r_t["variacion_%"], r_t["precio_contingencia"], r_t["margen_a_barrera_%"],
-                        ))
-
-            if negativas:
-                lineas_riesgo.append(f"🔴 ROJAS / EN RIESGO ({len(negativas)}):")
-                lineas.extend(negativas)
-            else:
-                lineas_riesgo.append("🔴 ROJAS / EN RIESGO: Ninguna")
-
-            if pendientes:
-                lineas_riesgo.append(f"⚪ SIN PRECIO DISPONIBLE / PENDIENTES DE DATO ({len(pendientes)}):")
-                lineas.extend(pendientes)
-
-            lineas_riesgo.append(f"RESUMEN: {len(negativas)} en riesgo (variación ≤ -30%) | {len(pendientes)} sin dato de precio | {len(positivas)} OK (positivas no se muestran)")
-            lineas_riesgo.append("(USA SIEMPRE ESTOS DATOS. NO INVENTES NI CALCULES EL ESTADO DE LAS NOTAS.)")
-
-            # ── LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──────────
-            # Esta es la ÚNICA fuente válida para responder "¿qué notas están en riesgo?".
-            # Calculada con la MISMA función y el mismo filtro de notas activas que el semáforo
-            # de la pantalla "Notas estructuradas" — no puede divergir de lo que ve Yuri en pantalla.
-            lineas_riesgo.append("\n=== NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
-            lineas_riesgo.append(
-                "Único criterio válido: variación % desde precio_compra de CADA ticker. "
-                "🔴 EN RIESGO = variación ≤ -30%. Cualquier ticker/nota que NO aparezca abajo NO está en "
-                "riesgo (variación > -30%) y NO debe presentarse como en riesgo. NO reclasifiques, no "
-                "inventes otro criterio, no uses otro umbral. El 'margen a la barrera' que aparece junto a "
-                "cada ticker es SOLO información adicional de contexto (puede venir 'N/D' si la nota no "
-                "tiene barrera cargada en CONTROL_NOTAS) — NUNCA decide si una nota entra en esta lista, "
-                "solo la variación la decide."
-            )
-            if not filas_riesgo_definitivo:
-                lineas_riesgo.append("Ninguna nota está en riesgo (variación ≤ -30%) ahora mismo.")
-            else:
-                filas_riesgo_definitivo.sort(key=lambda f: f[4])  # peor variación primero
-                for nota_id_ia, ticker_ia, compra_ia, actual_ia, variacion_ia, contingencia_ia, margen_ia in filas_riesgo_definitivo:
-                    margen_s = f"{margen_ia:+.1f}%" if pd.notna(margen_ia) else "N/D"
-                    contingencia_s = f"${contingencia_ia:,.2f}" if pd.notna(contingencia_ia) else "N/D"
-                    lineas_riesgo.append(
-                        f"  NOTA_{int(nota_id_ia):02d} | {ticker_ia} | precio_compra=${compra_ia:,.2f} | "
-                        f"precio_actual=${actual_ia:,.2f} | variación={variacion_ia:+.1f}% | 🔴 EN RIESGO | "
-                        f"(dato adicional) precio_contingencia={contingencia_s} | margen a la barrera={margen_s}"
-                    )
-        except Exception as _e_r:
-            import traceback as _tb_r
-            _tb_texto = _tb_r.format_exc()
-            lineas_riesgo.append(f"[Error riesgo notas: {_e_r}]")
-            lineas_riesgo.append(f"[Detalle técnico (no mostrar al usuario, solo para diagnóstico): {_tb_texto[-500:]}]")
-            with st.expander("⚠️ Error interno calculando riesgo de notas (clic para ver detalle técnico)", expanded=True):
-                st.error(f"{type(_e_r).__name__}: {_e_r}")
-                st.code(_tb_texto, language="python")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 5. TOTALES HISTÓRICOS POR ACTIVO (desde inicio)
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            lineas.append("\n=== TOTALES HISTÓRICOS POR ACTIVO (desde inicio, fuente: Dashboard) ===")
-            for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
-                                  ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
-                                  ("bitcoin",TASA_ANUAL_BITCOIN)]:
-                ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
-                pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
-                lineas.append(f"  {activo}: ingresado ${ing:,.2f} | pagado inversores ${pag:,.2f} | beneficio empresa ${ing-pag:,.2f}")
-        except Exception as e:
-            lineas.append(f"[Error históricos: {e}]")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 6. EXTRACTO ACUMULADO — PRE-CALCULADO Y FILTRADO POR INVERSOR
-        #    Si se detecta un inversor en la pregunta: solo sus datos
-        #    Si no: resumen anual de todos (compacto)
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            df_ext = df_inv.copy()
-            for col in ["inversor","tipo_operacion"]:
-                if col in df_ext.columns:
-                    df_ext[col] = df_ext[col].fillna("").astype(str).str.strip()
-            df_ext["tipo_op_n"] = df_ext["tipo_operacion"].str.upper()
-            df_ext = df_ext[df_ext["tipo_op_n"].isin(["NUEVA","CANCELADA"])].copy()
-            df_ext["fecha_inversion"]        = pd.to_datetime(df_ext.get("fecha_inversion"), errors="coerce", dayfirst=True)
-            df_ext["fecha_final_inversion"]  = pd.to_datetime(df_ext.get("fecha_final_inversion"), errors="coerce", dayfirst=True)
-            df_ext["capital_invertido"]      = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
-            df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
-
-            TRAMO_INV_E = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-            CORTE_T_E   = datetime(2026, 2, 1)
-            FIN_T1_E    = datetime(2026, 1, 31)
-
-            # Detectar inversor en la pregunta
-            inversores_todos = df_ext["inversor"].dropna().unique().tolist()
-            inv_detectado = None
-            p_up = p.upper()
-            for inv in inversores_todos:
-                if inv.upper() in p_up or any(pt in p_up for pt in inv.upper().split() if len(pt) > 3):
-                    inv_detectado = inv
-                    break
-
-            # Detectar año en la pregunta
-            import re as _re2
-            match_anio2 = _re2.search(r'\b(202[0-9])\b', p)
-            anio_filtro = int(match_anio2.group(1)) if match_anio2 else None
-
-            # Si hay inversor detectado, filtrar solo ese
-            if inv_detectado:
-                df_ext = df_ext[df_ext["inversor"].str.upper() == inv_detectado.upper()].copy()
-
-            # Calcular desde inicio hasta hoy
-            fecha_min = df_ext["fecha_inversion"].dropna().min()
-            if pd.isna(fecha_min):
-                fecha_min = datetime(2025, 9, 1)
-            else:
-                fecha_min = fecha_min.to_pydatetime()
-
-            filas_e = []
-            ai_e, mi_e = fecha_min.year, fecha_min.month
-            while (ai_e, mi_e) <= (anio_hoy, mes_hoy):
-                # Si hay filtro de año, saltar años que no interesan
-                if anio_filtro and ai_e != anio_filtro and not inv_detectado:
-                    mi_e = mi_e + 1 if mi_e < 12 else 1
-                    ai_e = ai_e if mi_e > 1 else ai_e + 1
-                    continue
-                dm_e = ultimo_dia_mes(ai_e, mi_e)
-                im_e = datetime(ai_e, mi_e, 1)
-                fm_e = datetime(ai_e, mi_e, dm_e)
-                for _, row in df_ext.iterrows():
-                    fi = row.get("fecha_inversion")
-                    if pd.isna(fi): continue
-                    fi_dt   = fi.to_pydatetime()
-                    tipo_op = row["tipo_op_n"]
-                    ff      = row.get("fecha_final_inversion")
-                    if tipo_op == "CANCELADA":
-                        if pd.isna(ff): continue
-                        ffd = min(ff.to_pydatetime(), fm_e)
-                    else:
-                        ffd = fm_e
-                    ic = max(fi_dt, im_e)
-                    fc = min(ffd, fm_e)
-                    if ic > fc: continue
-                    dias    = (fc - ic).days + 1
-                    capital = float(row["capital_invertido"])
-                    tasa    = float(row["interes_inversor_anual"])
-                    inv_up  = str(row.get("inversor","")).strip().upper()
-                    if inv_up in TRAMO_INV_E:
-                        interes = 0.0
-                        if ic <= FIN_T1_E:
-                            ft1 = min(fc, FIN_T1_E)
-                            interes += round((capital*0.05/12)*((ft1-ic).days+1)/dm_e, 2)
-                        if fc >= CORTE_T_E:
-                            it2 = max(ic, CORTE_T_E)
-                            interes += round((capital*0.075/12)*((fc-it2).days+1)/dm_e, 2)
-                    else:
-                        interes = round((capital*tasa/12)*dias/dm_e, 2)
-                    filas_e.append({
-                        "inversor": str(row.get("inversor","")),
-                        "anio": ai_e,
-                        "mes": f"{mi_e:02d}/{ai_e}",
-                        "interes_mes": interes,
-                    })
-                mi_e = mi_e + 1 if mi_e < 12 else 1
-                ai_e = ai_e if mi_e > 1 else ai_e + 1
-
-            if filas_e:
-                df_tot = pd.DataFrame(filas_e)
-                lineas.append(f"\n=== EXTRACTO INTERESES PAGADOS A INVERSORES ===")
-                lineas.append(f"(LEE ESTOS DATOS DIRECTAMENTE. PROHIBIDO CALCULAR POR TU CUENTA.)")
-
-                if inv_detectado:
-                    # Detalle completo del inversor detectado
-                    lineas.append(f"\n-- {inv_detectado} --")
-                    for anio_k in sorted(df_tot["anio"].unique()):
-                        df_a = df_tot[df_tot["anio"] == anio_k]
-                        total_anio = float(df_a["interes_mes"].sum())
-                        lineas.append(f"  {anio_k}: ${total_anio:,.2f}")
-                        for mes_k, int_k in df_a.groupby("mes")["interes_mes"].sum().items():
-                            if float(int_k) > 0:
-                                lineas.append(f"    {mes_k}: ${float(int_k):,.2f}")
-                    lineas.append(f"  TOTAL ACUMULADO DESDE INICIO: ${float(df_tot['interes_mes'].sum()):,.2f}")
-                else:
-                    # Resumen compacto de todos — solo totales por inversor y año
-                    for inv in sorted(df_tot["inversor"].unique()):
-                        df_i = df_tot[df_tot["inversor"] == inv]
-                        resumen = " | ".join([f"{a}: ${float(df_i[df_i['anio']==a]['interes_mes'].sum()):,.2f}" for a in sorted(df_i["anio"].unique())])
-                        lineas.append(f"  {inv}: {resumen} | TOTAL: ${float(df_i['interes_mes'].sum()):,.2f}")
-                    lineas.append(f"  GRAN TOTAL: ${float(df_tot['interes_mes'].sum()):,.2f}")
-
-        except Exception as e:
-            lineas.append(f"[Error extracto acumulado: {e}]")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 7. NOTAS EN BORRADOR (extraídas por IA en el wizard, AÚN NO GUARDADAS)
-        # ══════════════════════════════════════════════════════════════════════
-        try:
-            import json as _json_ia
-            df_borr = leer_hoja_excel("BORRADORES_NOTAS")
-            if not df_borr.empty:
-                df_borr.columns = [str(c).strip().upper() for c in df_borr.columns]
-                lineas.append("\n=== NOTAS EN BORRADOR — EXTRAÍDAS POR IA EN EL WIZARD, TODAVÍA NO GUARDADAS EN CONTROL_NOTAS ===")
-                lineas.append(
-                    "(IMPORTANTE: esto NO son posiciones activas ni confirmadas — es una extracción de un PDF que "
-                    "Yuri está revisando en 'Notas estructuradas → Añadir nota nueva / Auditar nota existente'. "
-                    "Si te pregunta por una de estas notas, acláraselo explícitamente ('esto es un borrador, aún no "
-                    "guardado') y avisa de que puede haber campos marcados como REVISAR pendientes de corregir. "
-                    "NUNCA mezcles estos datos con las notas oficiales de CONTROL_NOTAS al calcular capital, cobros "
-                    "o beneficios — son fuentes completamente distintas.)"
-                )
-                for _, fila_b in df_borr.iterrows():
-                    tipo_b = str(fila_b.get("TIPO", "")).strip()
-                    nota_b = fila_b.get("NOTA", "")
-                    try:
-                        datos_b = _json_ia.loads(fila_b.get("JSON_DATOS", "{}"))
-                    except Exception:
-                        continue
-                    etiqueta_tipo = "nueva nota, aún no creada en CONTROL_NOTAS" if tipo_b == "nueva" else "auditoría en curso de una nota ya existente"
-                    lineas.append(f"\n-- Borrador Nota {nota_b} ({etiqueta_tipo}) --")
-                    lineas.append(f"  Emisor: {datos_b.get('emisor', 'REVISAR')} | Cupón anual: {datos_b.get('cupon_anual_pct', 'REVISAR')} | Vencimiento: {datos_b.get('fecha_vencimiento', 'REVISAR')}")
-                    tickers_b = datos_b.get("tickers", [])
-                    if tickers_b:
-                        resumen_tk = ", ".join(
-                            f"{t.get('ticker','?')} (barrera cupón {t.get('barrera_cupon_pct','REVISAR')}, barrera capital {t.get('barrera_capital_pct','REVISAR')}, call {t.get('call_level_pct','REVISAR')})"
-                            for t in tickers_b
-                        )
-                        lineas.append(f"  Tickers: {resumen_tk}")
-                    calendario_b = datos_b.get("calendario", [])
-                    if calendario_b:
-                        lineas.append(f"  Calendario: {len(calendario_b)} eventos de observación/pago extraídos")
-                    fechas_call_b = datos_b.get("fechas_call", [])
-                    if fechas_call_b:
-                        lineas.append(f"  Fechas de posible call: {', '.join(str(f) for f in fechas_call_b)}")
-        except Exception as e:
-            lineas.append(f"[Error notas en borrador: {e}]")
-
-        # Insertamos la sección de riesgo al principio (justo tras la cabecera de fecha/fuente),
-        # para que NUNCA pueda perderse por el recorte de caracteres al final del contexto,
-        # sin importar cuánto crezca el resto (más inversores, más meses, más notas).
-        lineas_final = lineas[:2] + lineas_riesgo + lineas[2:]
-        return "\n".join(lineas_final)
+    # (El contexto se construye con construir_contexto_ia_fondo(), definida a nivel de módulo)
 
     # ── Chat ──────────────────────────────────────────────────────────────────
     if "chat_ia_cf" not in st.session_state:
@@ -9406,162 +9608,11 @@ def seccion_asistente_ia_fondo():
         with st.chat_message("assistant"):
             with st.spinner("Analizando..."):
                 try:
-                    # Detectar fecha límite en la pregunta (ej: "hasta el 07/06/2026")
-                    fecha_limite = None
-                    m_fecha = _re_ia.search(r"hasta\s+(?:el\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", ultima.lower())
-                    if m_fecha:
-                        d, mo = int(m_fecha.group(1)), int(m_fecha.group(2))
-                        yr = int(m_fecha.group(3)) if m_fecha.group(3) else pd.Timestamp.today().year
-                        fecha_limite = f"{yr}-{mo:02d}-{d:02d}"
-
-                    ctx = _contexto_excel(ultima, fecha_limite)
-
-                    # Seleccionar PDFs relevantes (máx 2 para no superar tokens)
-                    nums = _re_ia.findall(r"nota[_\s]*(\d+)", ultima.lower())
-                    if nums:
-                        def _norm(s): return _re_ia.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
-                        pdfs_sel = {k:v for k,v in pdfs_b64.items() if any(_norm(k)==f"nota{n}" for n in nums)}
-                        if not pdfs_sel: pdfs_sel = dict(list(pdfs_b64.items())[:2])
-                    elif any(w in ultima.lower() for w in ["call","cobro","pago","barrera","vencimiento","próximo","proximo"]):
-                        pdfs_sel = dict(list(pdfs_b64.items())[:2])
-                    else:
-                        pdfs_sel = {}
-
-                    # Construir mensaje con PDFs + contexto
-                    contenido = []
-                    for nombre_pdf, pdf_b64 in pdfs_sel.items():
-                        contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
-                    contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:60000]}\n\n---\nPREGUNTA: {ultima}"})
-
-                    # Solo los últimos 2 turnos del historial (sin datos pesados)
-                    historial = []
                     mensajes_prev = st.session_state["chat_ia_cf"][:-1]
-                    for m in mensajes_prev[-4:]:
-                        # Solo texto plano del historial, nunca los bloques con PDFs/contexto
-                        if isinstance(m["content"], str):
-                            historial.append({"role": m["role"], "content": m["content"]})
-                    historial.append({"role": "user", "content": contenido})
-
-                    api_key = st.secrets.get("ANTHROPIC_API_KEY","") or st.secrets.get("anthropic",{}).get("api_key","")
-                    resp = _req_ia.post("https://api.anthropic.com/v1/messages",
-                        headers={"Content-Type":"application/json","x-api-key":api_key,"anthropic-version":"2023-06-01"},
-                        json={"model":"claude-sonnet-4-5","max_tokens":2000,
-                              "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
-                              "system": """Eres el analista financiero senior de Chaparro Fernández Wealth Management, un fondo de inversión privado. Tu trabajo es razonar sobre el negocio como lo haría un socio del fondo, no solo repetir datos sueltos.
-
-== CÓMO FUNCIONA EL NEGOCIO (esto es la base de todo razonamiento) ==
-
-1. CAPTACIÓN: el fondo recibe capital de inversores. Cada inversor tiene una tasa de interés FIJA anual pactada (7.5%, 10%, 15%...) que se le paga siempre, TODOS LOS MESES, sobre su capital, pro-rata por días. Esa tasa es personal del inversor y NO depende de en qué activo esté invertido su dinero.
-
-2. DESPLIEGUE: ese capital se invierte en:
-   - ACTIVOS FIJOS (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin): pagan al fondo un % fijo y conocido de antemano.
-   - NOTAS ESTRUCTURADAS: cada nota tiene su propio cupón anual (ej. 37.5%), pero el cobro es CONDICIONAL: solo se cobra si en la fecha de OBSERVACIÓN el precio de TODAS las acciones subyacentes está por encima de la barrera de cupón (normalmente 40-60% del precio inicial). Si algún activo está por debajo, ese periodo NO se cobra nada de esa nota, pero el fondo SIGUE pagando al inversor su fijo igual — esa pérdida la asume el fondo, nunca el inversor.
-
-3. EL BENEFICIO (spread) es la diferencia entre lo que cobra el fondo del activo y lo que paga al inversor:
-   - Notas: beneficio = cobro real de la nota (puede ser $0 algún periodo) − pago fijo al inversor (siempre igual).
-   - Activos fijos: beneficio = (% del activo − % del inversor) × capital.
-
-4. PERIODICIDAD DE COBRO DE NOTAS: la mayoría de notas pagan cupón mensualmente, pero algunas pagan trimestralmente (revisan y cobran cada 3 meses en vez de cada mes). Esto ya está detectado automáticamente a partir del calendario real de cada nota en los datos que se te dan — los importes de cobro que ves en el contexto YA incluyen el ajuste correcto (si es trimestral, el cobro de ese mes ya representa el acumulado de 3 meses). No necesitas ni debes recalcular esto tú mismo.
-
-5. REINVERSIONES: cuando un inversor no retira su capital (por ejemplo tras un call), ese capital se reinvierte en otro activo/nota. Esto SÍ cambia lo que cobra el fondo (nuevo % del activo), pero NO cambia lo que se paga al inversor (sigue siendo su % fijo original, sobre el capital original, desde la fecha ORIGINAL de inversión — la reinversión no reinicia su reloj de intereses).
-
-6. CALLS (llamadas anticipadas de notas): el emisor puede llamar una nota antes de vencimiento, normalmente si TODAS las acciones subyacentes están en positivo respecto al precio INICIAL (¡ojo! este umbral es mucho más exigente que la barrera de cupón — una nota puede estar pagando cupón tranquilamente sin estar ni cerca de que la llamen). Cuando hay call:
-   - El capital deja de generar cobro para el fondo desde esa fecha hasta que se reinvierta en otro sitio.
-   - El inversor sigue cobrando su fijo igual aunque el capital esté parado — pérdida pura para el fondo mientras dure.
-   - La condición EXACTA de call varía nota a nota y está en el documento oficial (PDF) — si tienes el PDF de esa nota cargado, úsalo como fuente principal para analizar la probabilidad de call, comparando el precio actual de cada ticker (sección ESTADO DE RIESGO DE NOTAS) contra su precio INICIAL, no contra la barrera de cupón.
-
-7. CHAPARRO FERNANDEZ es la sociedad gestora, no un inversor externo: no cobra interés (0%), todo lo que "cobra" en su nombre es beneficio íntegro del fondo.
-
-8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos), el reparto de dividendos y las transferencias que Jordi le hace al fondo (hoja TRANSFERENCIAS_JORDI, capital que él aporta) AUMENTAN esa deuda — las tres juegan a favor de Jordi con la misma lógica: son dinero o valor que la empresa le debe devolver.
-
-9. MOTOCLICK — CASO ESPECIAL: a diferencia de Paraguay/Bolivia/Fútbol, el ingreso que MotoClick genera para el fondo NO es simplemente capital_invertido × 25% / 12. El capital que los inversores tienen "en el papel" asignado a MotoClick no siempre coincide con el capital que realmente está desplegado ahí día a día (puede haber devoluciones temporales de capital y reinyecciones posteriores). Por eso el ingreso real se calcula con el capital promedio diario efectivamente activo ese mes. El pago al inversor, en cambio, SIEMPRE se mantiene fijo sobre su capital nominal, sin este ajuste — solo el ingreso de la compañía varía.
-
-10. VENCIMIENTO DE UNA NOTA SIN CALL PREVIO: si una nota llega a su fecha de vencimiento (maturity) sin haber sido llamada antes, se trata exactamente igual que un call — el capital se reinvierte en otro activo/nota, y el inversor sigue cobrando su fijo igual durante todo el proceso. En los datos, esto se marca con motivo "call final" (distinto de "call", que es la llamada anticipada por el emisor), pero a efectos de negocio ambos son equivalentes: la nota se cierra y su capital se reinvierte.
-
-11. LA HOJA RESULTADOS_OBSERVACION NO SE USA NUNCA: no está mantenida y puede contener datos obsoletos. Si el usuario pregunta por ella, dile que esa hoja no se usa como fuente y que el estado real de cada nota se calcula en vivo con precios actuales.
-
-12. FECHA DE INICIO DE UNA NOTA PARA EFECTOS DE PAGO AL INVERSOR: no es la fecha en la que arranca la nota en el mercado (Initial Valuation Date), sino la PRIMERA FECHA DE PAGO (cobro) del calendario de esa nota, menos 1 mes. Ej.: si la nota empieza el 19/09 y el primer pago es el 25/10, la fecha de inicio que cuenta para calcular los intereses del inversor es el 25/09 (un mes antes del primer pago), no el 19/09.
-
-13. LA HOJA REINVERSIONES ES SOLO TRAZABILIDAD HISTÓRICA, no una fuente de cálculo financiero. Vincula cada operación de reinversión (id_inversion_destino) con de dónde venía originalmente ese capital (id_inversion_origen), para poder responder preguntas del tipo "¿de dónde viene el capital de esta nota?" aunque haya pasado por muchas reinversiones. Los importes de esta hoja NO tienen por qué cuadrar exactamente con el capital_invertido actual de la posición destino — no la uses para calcular capital, ingresos ni beneficios, solo para explicar el origen/historial de un capital si te lo preguntan explícitamente.
-
-14. LOS CALLS SIEMPRE SON TOTALES: cuando una nota es llamada, se cancela el 100% de su capital de golpe, nunca una parte. Si un documento menciona la posibilidad de un call parcial por sorteo entre tenedores (algunos prospectos legales lo mencionan como cláusula genérica), ignóralo — en la operativa real del fondo nunca ha pasado y no debe asumirse salvo que el usuario diga lo contrario explícitamente.
-
-15. DIVISA Y REDONDEO: todo el fondo opera en dólares estadounidenses (USD). Los importes siempre se redondean a 2 decimales.
-
-16. TRASPASOS ENTRE INVERSORES: si un inversor cede su posición a otro (ej. Jordi le pasa capital a Eva), se registra como una CANCELACIÓN de la posición del que cede + una inversión NUEVA (o una REINVERSIÓN, si el capital que se traspasa proviene de una posición previa que venció por call o vencimiento) del que recibe. Si ves una cancelación y una nueva/reinversión con fechas coincidentes y capital similar, puede tratarse de un traspaso de este tipo.
-
-17. NO EXISTE EL RETIRO PARCIAL DE CAPITAL: un inversor solo puede retirar los intereses que genera su capital, nunca una parte del principal. Para sacar dinero del principal, la única vía es cancelar la posición COMPLETA (fila entera). Si un inversor tenía $50,000 y ahora aparece con $30,000, eso NO es un retiro parcial — implica que se canceló la posición de $50,000 y se abrió una nueva de $30,000 (dos operaciones distintas, no un ajuste de la misma).
-
-18. NO SE PUEDE ENTRAR CON CAPITAL NUEVO A MITAD DE VIDA DE UNA NOTA YA ACTIVA: la única forma de que un inversor gane exposición a una nota que ya lleva tiempo funcionando es comprando la posición de otro inversor que ya estaba dentro (un traspaso, ver punto 16) — nunca aportando capital fresco directamente a una nota en curso. En un traspaso de este tipo, todos los términos de la nota (precio de compra, barreras, fechas de calendario, calls) se mantienen EXACTAMENTE igual que en la posición original — solo cambia el nombre del inversor en esa fila de INVERSIONES.
-
-19. CUANDO UNA NOTA CON VARIOS INVERSORES ES LLAMADA (call), el capital de cada inversor se reinvierte de forma INDEPENDIENTE, pudiendo acabar en sitios distintos (ej. si la nota tenía 4 inversores, cada uno puede terminar reinvertido en una nota o activo diferente, no necesariamente juntos). No asumas que todos los inversores de una nota llamada siguen juntos después del call.
-
-20. NO HAY COMISIÓN DE GESTIÓN ADICIONAL: el spread (diferencia entre lo que cobra el fondo del activo y lo que paga al inversor) es la ÚNICA fuente de ingreso del fondo. No existe ningún "management fee" u otra comisión extra sobre el capital de los inversores.
-
-21. EL PAGO AL INVERSOR ES UNA GARANTÍA UNIVERSAL, EN CUALQUIER TIPO DE ACTIVO: no es exclusivo de las notas estructuradas — si un activo fijo (Paraguay, MotoClick, Fútbol, Bolivia) no paga su % pactado algún mes por el motivo que sea, el fondo sigue pagando al inversor su tasa fija igualmente, asumiendo la pérdida él mismo. El inversor cobra su fijo pase lo que pase, sea cual sea el activo donde esté su capital.
-
-22. RENTABILIDAD MEDIA — DOS PERSPECTIVAS DISTINTAS, no las confundas:
-   - "Rentabilidad que PAGA el fondo a los inversores" = media ponderada por capital de interes_inversor_anual sobre el capital activo de TODOS los inversores (excluyendo a Chaparro Fernández, que no es un inversor real). Esta es la perspectiva del COSTE del fondo.
-   - "Rentabilidad que OBTIENE Chaparro Fernández como inversor" (o "rentabilidad de las inversiones de Chaparro Fernández") = media ponderada por capital de interes_nota_anual / tasa fija del activo, SOLO sobre las filas donde inversor = CHAPARRO FERNANDEZ (incluyendo sus reinversiones). Esta es la perspectiva del RENDIMIENTO del capital propio de la compañía colocado en los activos, y será bastante más alta que la anterior (activos rinden 15-38%, muy por encima del 10-15% que se paga a inversores externos).
-   Si te preguntan "rentabilidad media de las inversiones de/en Chaparro Fernández" sin más contexto, usa la SEGUNDA interpretación (rendimiento del capital propio como inversor).
-
-23. BENEFICIO REAL DE LA COMPAÑÍA (distinto del "capital a nombre de Chaparro Fernández"): el capital que aparece invertido bajo el nombre "CHAPARRO FERNANDEZ" en INVERSIONES son los beneficios acumulados de la compañía que se han ido reinvirtiendo, PERO no todo ese capital es beneficio realmente disponible — una parte es, en realidad, intereses ya devengados a otros inversores que aún NO se les ha pagado en efectivo (porque su `pago_intereses = "reinvierte"`, es decir, todos los inversores EXCEPTO JEP, que es el único con `pago_intereses = "paga"`). Fórmula:
-   BENEFICIO REAL = (Capital total a nombre de CHAPARRO FERNANDEZ activo hoy — usando fecha_final_inversion para excluir posiciones ya cerradas/reinvertidas, sin duplicar entre una fila original cerrada y su reinversión sucesora)
-                     − (Suma de TODOS los intereses devengados desde el inicio de cada posición hasta hoy, de TODOS los inversores con pago_intereses="reinvierte", EXCLUYENDO a JEP y excluyendo al propio Chaparro Fernández)
-   Este cálculo de "intereses devengados y no pagados" es ACUMULADO desde que cada inversor empezó (no se resetea nunca, es una deuda pendiente continua) — usa la misma lógica de extractos (ignorar fecha_final_inversion en filas NUEVA sin reinversión sucesora, respetarla en CANCELADA).
-
-24. QUÉ ES UNA "NOTA EN RIESGO" — UN SOLO CRITERIO, SIMPLE: la VARIACIÓN % desde el precio de compra de esa acción concreta.
-   🔴 EN RIESGO si la variación es ≤ -30% (ej. compra $100 → precio actual ≤ $70).
-   ✅ OK si la variación es > -30%.
-   Se eligió variación fija en vez de margen a la barrera de contingencia (que se usaba antes) por dos motivos: (a) es mucho más fácil de verificar a mano contra el Excel — es una resta simple; y (b) depende solo de precio_compra, que se consulta en vivo con Yahoo Finance al crear la nota y casi nunca falla, a diferencia de barrera_cupon/barrera_capital, que se han visto mal extraídas del PDF varias veces. El "margen a la barrera" TODAVÍA se calcula y se muestra junto a cada ticker en riesgo, como dato adicional de contexto (puede venir "N/D" si la nota no tiene barrera cargada) — pero NUNCA decide si una nota entra en la lista de riesgo ni qué color tiene. Solo la variación decide.
-
-   ⚠️ IMPORTANTE — LO QUE "RIESGO" **NO** ES: la proximidad de la próxima fecha de observación/cobro NO es un criterio de riesgo. Que una nota tenga observación "mañana" no la hace estar "en riesgo" — puede tener su próxima observación mañana y estar perfectamente por encima del -30%. NUNCA presentes "próxima observación inminente" como sinónimo o señal de riesgo. El riesgo se mide EXCLUSIVAMENTE por la variación % desde compra (la regla de arriba). Las fechas de observación/cobro se añaden DESPUÉS, como información complementaria de una nota que ya identificaste como en riesgo por variación — nunca como el criterio que decide si está en riesgo.
-
-25. CUANDO TE PREGUNTEN POR NOTAS EN RIESGO (o por una nota en riesgo concreta), tu ÚNICA fuente para decidir qué notas están en riesgo es el bloque "NOTAS EN RIESGO REAL — LISTA DEFINITIVA (calculada en código, no en la IA)". Esa lista ya viene filtrada y ordenada (peor variación primero) — NO recalcules, NO reclasifiques, NO añadas notas que no estén ahí, y NO uses ningún otro umbral que no sea el que ya viene aplicado ahí. Si la lista dice que está vacía, contesta que no hay ninguna nota en riesgo ahora mismo — no inventes ninguna. Para CADA nota de esa lista, tu respuesta SIEMPRE debe incluir, en este orden:
-   - El número de nota y el ticker en riesgo, tal como aparece en la lista.
-   - Precio de compra, precio actual y variación %, copiados tal cual de la lista (no los recalcules).
-   - El margen a la barrera de contingencia como dato adicional (si dice "N/D", decilo así — no es un fallo, es que esa nota no tiene barrera cargada en CONTROL_NOTAS).
-   - Una breve explicación de la caída de cada acción en riesgo (usa la herramienta de búsqueda web SOLO para noticias/contexto cualitativo — resultados recientes, motivo del movimiento del precio, ratings, eventos — NUNCA para re-consultar el precio actual o la variación, que ya vienen calculados con precisión y son más fiables que cualquier precio que encuentres buscando en la web).
-   - REGLA ESTRICTA DE PRECIOS: cualquier precio, rango de precio o variación % que menciones EN CUALQUIER PARTE de tu respuesta —ya sea en la tabla de datos, en una frase tipo "situación actual de [ticker]", en la conclusión, donde sea— tiene que ser EXACTAMENTE el mismo número que ya viene en el contexto (ESTADO DE RIESGO DE NOTAS / NOTAS EN RIESGO REAL), copiado tal cual, nunca un valor nuevo ni un rango (ej. "$79.80-$79.84") que hayas visto en un resultado de búsqueda web. La búsqueda web es solo para texto cualitativo (noticias, motivo del movimiento, eventos) — jamás como fuente de un número de precio que vas a mostrar. Si en algún momento se te ocurre escribir un precio y no lo tenés ya calculado en el contexto, no lo escribas — usa una frase sin cifra o remití al dato que sí tenés.
-   - La situación general de esa nota: próxima fecha de observación (bloque PRÓXIMAS OBSERVACIONES) y próxima fecha de cobro/call (bloque CALENDARIO NOTAS / PRÓXIMOS CALLS), siempre como dato complementario al final, nunca como criterio de riesgo ni como parte del título/encabezado de la nota.
-   - Si para alguna nota falta el precio de compra (aparece "N/D" en CONTROL_NOTAS), dilo así de simple: "no tengo el precio de compra cargado para la Nota X en CONTROL_NOTAS, revísalo". NO intentes compensar buscando datos en la web ni fabriques un análisis con información incompleta.
-
-26. TONO Y FORMATO AL HABLAR DE RIESGO: mantén un tono profesional y calmado, como un analista senior informando a un socio — NUNCA alarmista. Prohibido usar mayúsculas tipo "SITUACIÓN CRÍTICA", "RIESGO EXTREMO", "ESTO ES CRÍTICO", símbolos de alerta grandes o encabezados dramáticos. Presenta los datos con claridad y deja que la gravedad se entienda por las cifras, no por el tono. Si de verdad no puedes completar un análisis (por ejemplo, por límite de búsquedas), dilo en una frase breve y sigue con lo que sí puedas dar — no lo conviertas en el titular de la respuesta.
-
-27. NOTAS EN BORRADOR (sección "NOTAS EN BORRADOR" del contexto): son extracciones de PDF hechas por IA en el wizard "Notas estructuradas", que Yuri puede estar revisando y todavía NO están guardadas en CONTROL_NOTAS/CALENDARIO_NOTAS. Si te pregunta por una nota y solo la encuentras ahí (no en las fuentes oficiales), dile explícitamente que es un borrador sin guardar, con los datos que tengas, y avisa de que puede haber campos "REVISAR" sin corregir todavía. Puedes usarla para responder preguntas sobre esa nota en concreto, pero NUNCA la incluyas en cálculos de capital activo, cobros o beneficios del fondo — para eso solo cuentan las notas ya confirmadas en CONTROL_NOTAS.
-
-28. REGLA GENERAL DE PRECIOS (aplica a CUALQUIER pregunta sobre una nota o ticker, no solo a las de riesgo): cada vez que menciones un precio, un rango de precio o una variación % de un ticker —en un resumen de nota, en una tabla, en una frase de "situación actual", en una conclusión, donde sea—, tiene que ser EXACTAMENTE el número que ya viene calculado en el contexto (ESTADO DE RIESGO DE NOTAS / NOTAS EN RIESGO REAL), copiado tal cual, nunca un valor que hayas visto en un resultado de búsqueda web. Señal de alerta: si estás a punto de escribir un precio como rango (ej. "$79.80-$79.84") en vez de un número único, es casi seguro que lo sacaste de una búsqueda web y no del contexto — pará y usa el número exacto del contexto en su lugar. La búsqueda web sirve únicamente para texto cualitativo (noticias, motivo de un movimiento, eventos de la compañía, resultados trimestrales) — nunca como fuente de un precio, rango o variación % que vayas a mostrarle a Yuri. Si no tenés el precio de un ticker ya calculado en el contexto, no inventes uno ni lo completes con la web — decí que no lo tenés.
-
-== TUS FUENTES DE DATOS EN EL CONTEXTO ==
-- CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
-- ESTADO DE RIESGO DE NOTAS: precio actual vs barrera, por nota y ticker.
-- INTERESES A PAGAR A INVERSORES / EXTRACTO: pagos ya calculados con la lógica de extractos (solo NUEVA/CANCELADA, reinversiones excluidas del pago pero no del capital activo).
-- CAPITAL ACTIVO: capital desplegado por activo e inversor.
-- NOTAS EN BORRADOR: extracciones de IA aún no guardadas — ver regla 27, úsalas solo para responder sobre esa nota puntual, nunca en cálculos agregados.
-- PDFs de notas (si están cargados y son relevantes): documento oficial con condiciones exactas de call, barreras, cupón y fechas — tu fuente más fiable para razonar sobre probabilidad de call o condiciones legales exactas.
-
-== CÓMO RESPONDER ==
-- Si la pregunta pide un dato que YA está calculado en el contexto (fecha, importe, capital) → léelo y repítelo tal cual. No lo "mejores" ni lo recalcules — el contexto ya sigue las reglas correctas del negocio explicadas arriba.
-- Si la pregunta requiere COMBINAR o RAZONAR sobre varios datos que sí tienes (ej. "¿es probable que llamen la Nota 15?", "¿cuánto perderíamos si no llaman ninguna nota este trimestre?", "compárame el riesgo de estas dos notas") → SÍ debes razonar, aplicando la lógica de negocio de arriba y, si hay PDF, sus condiciones exactas. Explica brevemente tu razonamiento, no solo la conclusión.
-- Para preguntas de CALLS concretos: compara precio actual de cada ticker contra su precio INICIAL (no la barrera de cupón) y da un veredicto argumentado — probable / improbable / imposible de saber sin más datos — señalando qué ticker concreto lo impide si aplica.
-- Si no tienes el dato ni puedes derivarlo razonando sobre lo que sí tienes, dilo con claridad — no inventes cifras.
-
-== INVERSORES Y TASAS ==
-LEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%
-ROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
-CROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
-2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%
-CHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago
-GOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%
-JORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%
-
-== FORMATO ==
-Responde SIEMPRE en español. Sé conciso cuando el dato es directo; desarrolla el razonamiento cuando la pregunta lo requiera. Fechas DD/MM/YYYY, importes con $ y 2 decimales.""",
-                              "messages":historial},timeout=60)
-                    data = resp.json()
-                    respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
-                    if not respuesta:
-                        respuesta = f"Error API: {data.get('error',{}).get('message',str(data))}"
+                    respuesta = preguntar_asistente_ia_fondo(
+                        ultima, df_inv, df_cal, df_control,
+                        historial_previo=mensajes_prev, pdfs_b64=pdfs_b64,
+                    )
                 except Exception as e:
                     respuesta = f"Error: {e}"
                 st.markdown(_md_seguro(respuesta))
@@ -9572,53 +9623,54 @@ Responde SIEMPRE en español. Sé conciso cuando el dato es directo; desarrolla 
             st.session_state["chat_ia_cf"] = []
             st.rerun()
 
-# ── Portal de inversor: acceso limitado, se corta aquí antes del menú de administración ──
-if st.session_state.get("tipo_usuario") == "inversor":
-    seccion_portal_inversor(st.session_state.usuario)
-    st.stop()
+if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `streamlit run`, no al importar
+    # ── Portal de inversor: acceso limitado, se corta aquí antes del menú de administración ──
+    if st.session_state.get("tipo_usuario") == "inversor":
+        seccion_portal_inversor(st.session_state.usuario)
+        st.stop()
 
-menu = st.sidebar.selectbox(
-    "Menú principal",
-    [
-        "Dashboard financiero", "Centro de control", "Consultas",
-        "Notas estructuradas", "Alertas y calendario", "Extractos", "Gestión de Excel",
-        "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
-    ],
-)
-
-if menu == "Dashboard financiero":
-    dashboard_financiero()
-
-elif menu == "Centro de control":
-    centro_control_inversiones()
-elif menu == "Consultas":
-    tipo_consulta = st.selectbox(
-        "¿Qué quieres consultar?",
-        ["Notas", "Fútbol", "Paraguay", "Bolivia", "MotoClick", "Bitcoin"],
-        key="consultas_selector"
+    menu = st.sidebar.selectbox(
+        "Menú principal",
+        [
+            "Dashboard financiero", "Centro de control", "Consultas",
+            "Notas estructuradas", "Alertas y calendario", "Extractos", "Gestión de Excel",
+            "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
+        ],
     )
-    if tipo_consulta == "Notas":
-        seccion_notas()
-    elif tipo_consulta == "Fútbol":
-        seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
-    elif tipo_consulta == "Paraguay":
-        seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
-    elif tipo_consulta == "Bolivia":
-        seccion_activo("Bolivia", "bolivia", TASA_ANUAL_BOLIVIA, incluir_ingresado_desde_inicio=True)
-    elif tipo_consulta == "Bitcoin":
-        seccion_activo("Bitcoin", "bitcoin", TASA_ANUAL_BITCOIN, incluir_ingresado_desde_inicio=True)
-    elif tipo_consulta == "MotoClick":
-        seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
-elif menu == "Notas estructuradas":
-    seccion_notas_archivo()
-elif menu == "Alertas y calendario":
-    panel_alertas_y_calendario()
 
-elif menu == "Extractos":
-    seccion_extractos()
-elif menu == "Gestión de Excel":
-    seccion_gestion_excel()
-elif menu == "🏦 Deuda Jordi Chaparro":
-    seccion_deuda_jordi()
-elif menu == "✨ Asistente IA":
-    seccion_asistente_ia_fondo()
+    if menu == "Dashboard financiero":
+        dashboard_financiero()
+
+    elif menu == "Centro de control":
+        centro_control_inversiones()
+    elif menu == "Consultas":
+        tipo_consulta = st.selectbox(
+            "¿Qué quieres consultar?",
+            ["Notas", "Fútbol", "Paraguay", "Bolivia", "MotoClick", "Bitcoin"],
+            key="consultas_selector"
+        )
+        if tipo_consulta == "Notas":
+            seccion_notas()
+        elif tipo_consulta == "Fútbol":
+            seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
+        elif tipo_consulta == "Paraguay":
+            seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
+        elif tipo_consulta == "Bolivia":
+            seccion_activo("Bolivia", "bolivia", TASA_ANUAL_BOLIVIA, incluir_ingresado_desde_inicio=True)
+        elif tipo_consulta == "Bitcoin":
+            seccion_activo("Bitcoin", "bitcoin", TASA_ANUAL_BITCOIN, incluir_ingresado_desde_inicio=True)
+        elif tipo_consulta == "MotoClick":
+            seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
+    elif menu == "Notas estructuradas":
+        seccion_notas_archivo()
+    elif menu == "Alertas y calendario":
+        panel_alertas_y_calendario()
+
+    elif menu == "Extractos":
+        seccion_extractos()
+    elif menu == "Gestión de Excel":
+        seccion_gestion_excel()
+    elif menu == "🏦 Deuda Jordi Chaparro":
+        seccion_deuda_jordi()
+    elif menu == "✨ Asistente IA":
+        seccion_asistente_ia_fondo()
