@@ -1637,8 +1637,9 @@ def columna_barrera_control(df_control: pd.DataFrame, preferida="contingency"):
 def obtener_datos_fundamentales(ticker: str) -> dict:
     """
     Precio actual, objetivo de precio de consenso de analistas, volatilidad histórica
-    anualizada, próxima fecha de resultados y datos generales de la compañía.
-    Todo dato real de mercado (yfinance) — nada inventado ni "previsto" por IA.
+    anualizada, próxima fecha de resultados, salto histórico medio en earnings y
+    datos generales de la compañía. Todo dato real de mercado (yfinance) — nada
+    inventado ni "previsto" por IA.
 
     NOTA DE FIABILIDAD: el endpoint de "info" de Yahoo Finance (de donde sale el precio
     objetivo de analistas) es conocido por ser inestable, especialmente desde servidores
@@ -1650,7 +1651,10 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
         "ticker": ticker, "precio_actual": None, "sector": None, "industria": None, "nombre": None,
         "market_cap": None, "target_medio": None, "target_alto": None, "target_bajo": None,
         "n_analistas": None, "recomendacion": None, "volatilidad_anual_pct": None,
-        "proxima_fecha_resultados": None, "variacion_1m_pct": None, "variacion_ytd_pct": None,
+        "proxima_fecha_resultados": None, "proxima_fecha_resultados_dt": None,
+        "salto_medio_earnings_pct": None, "n_earnings_medidos": 0,
+        "retorno_implicito_analistas_pct": None,
+        "variacion_1m_pct": None, "variacion_ytd_pct": None,
         "error": None, "aviso_analistas": None,
     }
     if yf is None:
@@ -1707,7 +1711,7 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
         hist = None
         for intento in range(2):
             try:
-                hist = t.history(period="1y")
+                hist = t.history(period="2y")  # 2 años: 1 para volatilidad, más margen para earnings pasados
                 if hist is not None and not hist.empty:
                     break
             except Exception:
@@ -1716,7 +1720,8 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
                 time.sleep(1.0)
 
         if hist is not None and not hist.empty:
-            cierres = hist["Close"].dropna()
+            cierres_todo = hist["Close"].dropna()
+            cierres = cierres_todo.tail(253)  # ~1 año para la volatilidad "normal" (sin contar los saltos de earnings aparte)
             resultado["precio_actual"] = float(cierres.iloc[-1])
             retornos = np.log(cierres / cierres.shift(1)).dropna()
             resultado["volatilidad_anual_pct"] = float(retornos.std() * np.sqrt(252) * 100)
@@ -1725,16 +1730,52 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
             primer_dia_anio = cierres[cierres.index.year == cierres.index[-1].year]
             if len(primer_dia_anio) > 1:
                 resultado["variacion_ytd_pct"] = float((cierres.iloc[-1] / primer_dia_anio.iloc[0] - 1) * 100)
+
+            # Salto histórico medio el día después de resultados — así el riesgo de earnings se mide
+            # con el movimiento REAL de esta acción en sus últimos informes, no con la vol. media anual.
+            try:
+                earn = t.get_earnings_dates(limit=8)
+                if earn is not None and not earn.empty:
+                    idx_naive = cierres_todo.index.tz_localize(None) if cierres_todo.index.tz is not None else cierres_todo.index
+                    idx_naive = idx_naive.normalize()
+                    saltos = []
+                    for fecha_earn in earn.index:
+                        fe = pd.Timestamp(fecha_earn)
+                        if fe.tz is not None:
+                            fe = fe.tz_localize(None)
+                        fe = fe.normalize()
+                        mask_despues = idx_naive > fe
+                        mask_antes = idx_naive <= fe
+                        if not mask_despues.any() or not mask_antes.any():
+                            continue
+                        precio_antes = float(cierres_todo.iloc[np.where(mask_antes)[0][-1]])
+                        precio_despues = float(cierres_todo.iloc[np.where(mask_despues)[0][0]])
+                        saltos.append(abs(precio_despues / precio_antes - 1))
+                    if saltos:
+                        resultado["salto_medio_earnings_pct"] = float(np.mean(saltos) * 100)
+                        resultado["n_earnings_medidos"] = len(saltos)
+            except Exception:
+                pass  # si yfinance no da earnings_dates para este ticker, seguimos sin ese dato (no rompe el resto)
         else:
             resultado["error"] = "No se pudo obtener el histórico de precios (fallo de conexión con Yahoo Finance, prueba de nuevo)."
 
+        # Retorno implícito del consenso de analistas, asumiendo el horizonte habitual de ~12 meses
+        if resultado.get("target_medio") and resultado.get("precio_actual"):
+            resultado["retorno_implicito_analistas_pct"] = float(
+                (resultado["target_medio"] / resultado["precio_actual"] - 1) * 100
+            )
+
         try:
             cal = t.calendar
+            fecha_dt = None
             if isinstance(cal, dict) and cal.get("Earnings Date"):
                 fechas = cal["Earnings Date"]
-                resultado["proxima_fecha_resultados"] = str(fechas[0]) if isinstance(fechas, list) else str(fechas)
+                fecha_dt = fechas[0] if isinstance(fechas, list) else fechas
             elif hasattr(cal, "empty") and not cal.empty and "Earnings Date" in cal.index:
-                resultado["proxima_fecha_resultados"] = str(cal.loc["Earnings Date"].iloc[0])
+                fecha_dt = cal.loc["Earnings Date"].iloc[0]
+            if fecha_dt is not None:
+                resultado["proxima_fecha_resultados"] = str(fecha_dt)
+                resultado["proxima_fecha_resultados_dt"] = pd.Timestamp(fecha_dt)
         except Exception:
             pass
     except Exception as e:
@@ -1745,10 +1786,21 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
 def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_simulaciones: int = 5000,
                              tipo_proteccion: str = "barrera") -> dict:
     """
-    Simulación Monte Carlo (movimiento browniano geométrico, sin drift — supuesto neutral)
-    para una nota worst-of con uno o varios tickers subyacentes.
+    Simulación Monte Carlo (movimiento browniano geométrico con deriva configurable + shocks de
+    earnings) para una nota worst-of con uno o varios tickers subyacentes.
 
-    tickers_datos: lista de dicts {precio_actual, precio_inicial, volatilidad_anual_pct, barrera_cupon_pct, call_level_pct, barrera_capital_pct}
+    tickers_datos: lista de dicts con, por ticker:
+        - precio_actual, precio_inicial, volatilidad_anual_pct, barrera_cupon_pct, call_level_pct, barrera_capital_pct
+        - drift_anual_pct (opcional, default 0): deriva anual asumida en la simulación. 0 = paseo
+          aleatorio puro (más conservador, no asume ni sube ni baja). Puede venir del consenso de
+          analistas o de una convicción manual — NUNCA se inventa sola, la decide quien usa el comparador.
+        - dias_earnings (opcional, lista de int): días desde hoy en los que cae un informe de
+          resultados dentro del horizonte de la nota (el próximo conocido + proyecciones trimestrales).
+        - salto_earnings_pct (opcional, float): magnitud media histórica del movimiento del día
+          después de resultados de ESTE ticker (dato real, de obtener_datos_fundamentales). Si se
+          da, esos días concretos llevan una sacudida extra de esa magnitud, en vez de repartir el
+          riesgo de earnings uniformemente a lo largo de todo el año (que es lo que hace un GBM puro
+          y por eso subestima el riesgo real alrededor de esas fechas concretas).
     dias_hasta_eventos: lista de dicts {dias, tipo} ordenada cronológicamente, tipo="cupon" o "call" o "vencimiento"
     tipo_proteccion: "barrera" (europea) o "buffer".
         - "barrera": si el peor activo rompe su nivel de protección al vencimiento, el fondo recibe
@@ -1765,14 +1817,24 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
     n_tickers = len(tickers_datos)
     max_dias = max(e["dias"] for e in dias_hasta_eventos) if dias_hasta_eventos else 1
 
-    # Simular trayectorias diarias para cada ticker (GBM, drift=0 -> supuesto neutral al riesgo)
+    # Simular trayectorias diarias para cada ticker (GBM con deriva configurable + shocks de earnings)
     precios_simulados = {}
     for td in tickers_datos:
         s0 = td["precio_actual"]
         sigma = td["volatilidad_anual_pct"] / 100
+        mu = td.get("drift_anual_pct", 0.0) / 100
         dt = 1 / 252
         pasos = max(max_dias, 1)
-        incrementos = np.random.normal((-0.5 * sigma**2) * dt, sigma * np.sqrt(dt), size=(n_simulaciones, pasos))
+        incrementos = np.random.normal((mu - 0.5 * sigma**2) * dt, sigma * np.sqrt(dt), size=(n_simulaciones, pasos))
+        # Shock de earnings: en vez de repartir ese riesgo uniformemente en el año (lo que hace un
+        # GBM puro), lo concentramos en los días concretos donde cae un informe de resultados,
+        # con la magnitud REAL que esta acción se ha movido en sus últimos informes.
+        dias_earnings = td.get("dias_earnings") or []
+        salto_pct = td.get("salto_earnings_pct")
+        if salto_pct and dias_earnings:
+            for de in dias_earnings:
+                idx = min(max(int(de), 1), pasos) - 1
+                incrementos[:, idx] += np.random.normal(0, salto_pct / 100, size=n_simulaciones)
         log_precios = np.log(s0) + np.cumsum(incrementos, axis=1)
         precios_simulados[td["ticker"]] = np.exp(log_precios)  # shape (n_sim, pasos)
 
@@ -5274,6 +5336,33 @@ def obtener_resumen_noticias_ia(ticker: str, nombre_compania: str) -> str:
         return f"⚠️ No se pudieron obtener noticias (error de conexión): {e}"
 
 
+def _proyectar_dias_earnings(proxima_fecha_dt, meses_horizonte: int) -> list:
+    """A partir de la próxima fecha de resultados CONOCIDA (dato real de Yahoo Finance), proyecta
+    las siguientes citas trimestrales dentro del horizonte de la nota (~91 días entre informes).
+    Solo la primera fecha es un dato real confirmado — las siguientes son una proyección razonable
+    asumiendo periodicidad trimestral, que es como reportan la inmensa mayoría de las acciones US."""
+    if proxima_fecha_dt is None:
+        return []
+    try:
+        hoy = pd.Timestamp.now().normalize()
+        primera = pd.Timestamp(proxima_fecha_dt)
+        if primera.tz is not None:
+            primera = primera.tz_localize(None)
+        primera = primera.normalize()
+        dias_primera = (primera - hoy).days
+        if dias_primera < 0:
+            dias_primera += 91  # si la fecha ya venció (dato desactualizado), salta a la siguiente proyectada
+        dias = []
+        d = dias_primera
+        while d <= meses_horizonte * 30.44:
+            if d > 0:
+                dias.append(int(d))
+            d += 91
+        return dias
+    except Exception:
+        return []
+
+
 def _generar_horario_eventos(meses_vencimiento: int, periodicidad: int, frecuencia_call: int | None = None) -> list:
     """Genera un calendario sintético de eventos cupón + call + vencimiento, en días desde hoy.
 
@@ -5358,31 +5447,107 @@ def generar_memo_directorio_notas_pptx(
     Arma un memo de directorio (.pptx) a partir de lo que YA calculó el comparador de notas
     (resultados_notas, con Monte Carlo + score) y la recomendación de reparto de Claude.
     No recalcula nada — solo formatea lo que ya existe en resultados_notas.
+
+    OJO DE DISEÑO: python-pptx crea tablas y gráficos con el tema azul por defecto de Office
+    (bandas de color, bordes de rejilla) que no coincide con nuestra paleta navy — hay que
+    despojarlas de ese estilo explícitamente (_strip_table_style) y poner bordes/colores a mano,
+    o el resultado se ve "genérico" en vez de a medida.
     """
     from pptx import Presentation
     from pptx.util import Inches, Pt, Emu
     from pptx.dml.color import RGBColor
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
     from pptx.chart.data import CategoryChartData
-    from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_LABEL_POSITION, XL_TICK_LABEL_POSITION
     from pptx.enum.shapes import MSO_SHAPE
+    from pptx.oxml.ns import qn
     import re as _re
 
     NAVY = RGBColor(0x1E, 0x27, 0x61)
+    NAVY_2 = RGBColor(0x2A, 0x34, 0x70)
     ICE = RGBColor(0xCA, 0xDC, 0xFC)
     WHITE = RGBColor(0xFF, 0xFF, 0xFF)
     RED = RGBColor(0xC0, 0x39, 0x2B)
     GREEN = RGBColor(0x2E, 0x7D, 0x32)
     AMBER = RGBColor(0xD6, 0x89, 0x10)
     GREY = RGBColor(0x5A, 0x5A, 0x5A)
+    GREY_LIGHT = RGBColor(0x99, 0x99, 0x99)
+    TEXT = RGBColor(0x22, 0x22, 0x22)
     LIGHT_BG = RGBColor(0xF7, 0xF8, 0xFC)
-    BORDER = RGBColor(0xE0, 0xE0, 0xE0)
+    BORDER = RGBColor(0xE3, 0xE5, 0xEF)
 
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
     BLANK = prs.slide_layouts[6]
     W, H = 13.333, 7.5
+
+    # ---------- Helpers de bajo nivel: sin estos, python-pptx se ve "de fábrica" ----------
+    def _strip_table_style(table):
+        """Quita el estilo de tabla azul por defecto de Office (bandas + bordes de rejilla).
+        Sin esto, cualquier fill que pongamos por celda queda tapado o mezclado con el tema."""
+        tbl = table._tbl
+        tblPr = tbl.find(qn("a:tblPr"))
+        if tblPr is not None:
+            tblPr.set("firstRow", "0")
+            tblPr.set("bandRow", "0")
+            style_id = tblPr.find(qn("a:tableStyleId"))
+            if style_id is not None:
+                tblPr.remove(style_id)
+
+    def _cell_border(cell, edges=("bottom",), color=BORDER, width_pt=0.75):
+        """Pone SOLO los bordes que le pidamos (por defecto ninguno) — así las tablas quedan
+        con líneas horizontales finas tipo editorial, sin rejilla vertical."""
+        tag_map = {"left": "a:lnL", "right": "a:lnR", "top": "a:lnT", "bottom": "a:lnB"}
+        order = ["a:lnL", "a:lnR", "a:lnT", "a:lnB"]
+        tc = cell._tc
+        tcPr = tc.get_or_add_tcPr()
+        hexcolor = f"{color[0]:02X}{color[1]:02X}{color[2]:02X}" if isinstance(color, tuple) else str(color)
+        for edge in ("left", "right", "top", "bottom"):
+            tag = tag_map[edge]
+            existing = tcPr.find(qn(tag))
+            if existing is not None:
+                tcPr.remove(existing)
+            ln = tcPr.makeelement(qn(tag), {"w": str(int(width_pt * 12700)), "cap": "flat", "cmpd": "sng"})
+            if edge in edges:
+                fill = ln.makeelement(qn("a:solidFill"), {})
+                clr = fill.makeelement(qn("a:srgbClr"), {"val": hexcolor})
+                fill.append(clr)
+                ln.append(fill)
+            else:
+                ln.append(ln.makeelement(qn("a:noFill"), {}))
+            insert_idx = 0
+            for i, child in enumerate(tcPr):
+                if child.tag.split("}")[-1] in [t.split(":")[-1] for t in order]:
+                    insert_idx = i + 1
+                else:
+                    break
+            tcPr.insert(insert_idx, ln)
+
+    def _style_chart_axes(chart, label_color=GREY, grid_color=RGBColor(0xEE, 0xEE, 0xF2)):
+        try:
+            cat = chart.category_axis
+            cat.format.line.color.rgb = RGBColor(0xCC, 0xCC, 0xD6)
+            cat.format.line.width = Pt(0.75)
+            cat.tick_labels.font.size = Pt(10)
+            cat.tick_labels.font.color.rgb = label_color
+            cat.tick_labels.font.name = "Calibri"
+            cat.has_major_gridlines = False
+            cat.major_tick_mark = 0
+        except Exception:
+            pass
+        try:
+            val = chart.value_axis
+            val.format.line.fill.background()
+            val.has_major_gridlines = True
+            val.major_gridlines.format.line.color.rgb = grid_color
+            val.major_gridlines.format.line.width = Pt(0.75)
+            val.tick_labels.font.size = Pt(9)
+            val.tick_labels.font.color.rgb = label_color
+            val.tick_labels.font.name = "Calibri"
+            val.major_tick_mark = 0
+        except Exception:
+            pass
 
     def add_slide(bg=WHITE):
         s = prs.slides.add_slide(BLANK)
@@ -5394,11 +5559,12 @@ def generar_memo_directorio_notas_pptx(
         s.shapes._spTree.insert(2, rect._element)
         return s
 
-    def add_text(s, x, y, w, h, text, size=12, bold=False, italic=False, color=RGBColor(0x22, 0x22, 0x22),
-                 align=PP_ALIGN.LEFT, font="Calibri", anchor=None, line_spacing=1.0):
+    def add_text(s, x, y, w, h, text, size=12, bold=False, italic=False, color=TEXT,
+                 align=PP_ALIGN.LEFT, font="Calibri", anchor=None, line_spacing=1.0, letter_spacing=None):
         box = s.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
         tf = box.text_frame
         tf.word_wrap = True
+        tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
         if anchor:
             tf.vertical_anchor = anchor
         p = tf.paragraphs[0]
@@ -5411,148 +5577,197 @@ def generar_memo_directorio_notas_pptx(
         r.font.italic = italic
         r.font.color.rgb = color
         r.font.name = font
+        if letter_spacing is not None:
+            rPr = r._r.get_or_add_rPr()
+            rPr.set("spc", str(int(letter_spacing * 100)))
         return box
 
-    def add_card(s, x, y, w, h, value, label, value_color=NAVY, bg=LIGHT_BG):
+    def add_eyebrow(s, x, y, text, color=NAVY, w=8):
+        """Etiqueta pequeña en mayúsculas + barrita de acento debajo — ancla visual que usa
+        el memo de referencia para separar secciones, en vez de un simple texto suelto."""
+        add_text(s, x, y, w, 0.28, text, size=11.5, bold=True, color=color, letter_spacing=1.5)
+        bar = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(y + 0.32), Inches(0.45), Pt(2.6))
+        bar.fill.solid(); bar.fill.fore_color.rgb = color
+        bar.line.fill.background(); bar.shadow.inherit = False
+
+    def add_card(s, x, y, w, h, value, label, value_color=NAVY, bg=LIGHT_BG, accent=None):
         box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+        box.adjustments[0] = 0.06
         box.fill.solid(); box.fill.fore_color.rgb = bg
         box.line.color.rgb = BORDER; box.line.width = Pt(0.75)
         box.shadow.inherit = False
-        add_text(s, x, y + 0.12, w, 0.65, value, size=24, bold=True, color=value_color,
+        if accent:
+            top = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x + 0.15), Inches(y), Inches(w - 0.3), Pt(3))
+            top.fill.solid(); top.fill.fore_color.rgb = accent
+            top.line.fill.background(); top.shadow.inherit = False
+        add_text(s, x, y + 0.18, w, 0.65, value, size=25, bold=True, color=value_color,
                   align=PP_ALIGN.CENTER, font="Cambria")
-        add_text(s, x, y + h - 0.5, w, 0.4, label, size=10.5, color=GREY, align=PP_ALIGN.CENTER)
+        add_text(s, x + 0.15, y + h - 0.48, w - 0.3, 0.4, label, size=10, color=GREY, align=PP_ALIGN.CENTER, line_spacing=1.05)
+
+    def add_table(s, x, y, w, headers, rows, col_widths=None, red_col=None, bold_col=None, row_h=0.4, red_rows=None):
+        """red_rows: set/list de índices de fila (0-based, sin contar cabecera) cuya celda en
+        red_col se pinta de rojo — evita meter marcadores dentro del texto de la celda."""
+        red_rows = set(red_rows or [])
+        n_rows, n_cols = len(rows) + 1, len(headers)
+        tbl_shape = s.shapes.add_table(n_rows, n_cols, Inches(x), Inches(y), Inches(w), Inches(row_h * n_rows))
+        tbl = tbl_shape.table
+        _strip_table_style(tbl)
+        tbl.first_row = False
+        tbl.horz_banding = False
+        if col_widths:
+            total = sum(col_widths)
+            for c, cw in zip(tbl.columns, col_widths):
+                c.width = Inches(w * cw / total)
+        for r_ in tbl.rows:
+            r_.height = Inches(row_h)
+        for j, htxt in enumerate(headers):
+            cell = tbl.cell(0, j)
+            cell.text = htxt
+            cell.margin_left = cell.margin_right = Inches(0.08)
+            cell.margin_top = cell.margin_bottom = Inches(0.04)
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            cell.fill.solid(); cell.fill.fore_color.rgb = NAVY
+            _cell_border(cell, edges=(), color=NAVY)
+            for p in cell.text_frame.paragraphs:
+                p.font.size = Pt(10.5); p.font.bold = True; p.font.color.rgb = WHITE; p.font.name = "Calibri"
+        for i, fila in enumerate(rows):
+            es_ultima = (i == len(rows) - 1)
+            for j, val in enumerate(fila):
+                cell = tbl.cell(i + 1, j)
+                cell.text = str(val)
+                cell.margin_left = cell.margin_right = Inches(0.08)
+                cell.margin_top = cell.margin_bottom = Inches(0.04)
+                cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+                cell.fill.solid(); cell.fill.fore_color.rgb = LIGHT_BG if i % 2 == 0 else WHITE
+                _cell_border(cell, edges=() if es_ultima else ("bottom",), color=BORDER, width_pt=0.75)
+                for p in cell.text_frame.paragraphs:
+                    p.font.size = Pt(10.5); p.font.name = "Calibri"
+                    p.font.bold = (bold_col is not None and j == bold_col)
+                    p.font.color.rgb = RED if (red_col is not None and j == red_col and i in red_rows) else TEXT
+        return tbl
 
     def footer(s, n):
-        add_text(s, 0.4, H - 0.4, 6, 0.3, "Chaparro Fernández Wealth · Confidencial", size=9, color=RGBColor(0x99, 0x99, 0x99))
-        add_text(s, W - 1.2, H - 0.4, 0.8, 0.3, f"{n:02d}", size=9, color=RGBColor(0x99, 0x99, 0x99), align=PP_ALIGN.RIGHT)
+        add_text(s, 0.4, H - 0.38, 6, 0.3, "Chaparro Fernández Wealth · Confidencial", size=8.5, color=GREY_LIGHT)
+        add_text(s, W - 1.2, H - 0.38, 0.8, 0.3, f"{n:02d}", size=8.5, color=GREY_LIGHT, align=PP_ALIGN.RIGHT)
 
     def veredicto_color(p_perdida):
         return RED if p_perdida > 0.35 else (AMBER if p_perdida > 0.2 else GREEN)
 
     ganador = resultados_notas[0]  # ya viene ordenado por score desc
+    pago_map = {1: "Mensual", 3: "Trimestral", 6: "Semestral"}
 
     # ---------- Slide 1: Portada ----------
     s = add_slide(NAVY)
-    add_text(s, 0.7, 0.6, 10, 0.4, "MESA DE PRODUCTOS ESTRUCTURADOS", size=13, bold=True, color=ICE)
-    add_text(s, 0.7, 1.0, 10, 0.5, "Comparador de Notas — Memo de Directorio", size=16, color=WHITE)
-    add_text(s, 0.7, 1.55, 11.5, 1.0, f"{len(resultados_notas)} nota(s) candidata(s)", size=38, bold=True, color=WHITE, font="Cambria")
-    add_text(s, 0.7, 2.5, 11.5, 0.5,
+    linea = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, Inches(H - 0.06), prs.slide_width, Pt(4.5))
+    linea.fill.solid(); linea.fill.fore_color.rgb = RGBColor(0x4A, 0x56, 0xB8)
+    linea.line.fill.background(); linea.shadow.inherit = False
+    add_text(s, 0.7, 0.55, 10, 0.32, "MESA DE PRODUCTOS ESTRUCTURADOS", size=12.5, bold=True, color=ICE, letter_spacing=2)
+    add_text(s, 0.7, 0.95, 10, 0.4, "Comparador de Notas — Memo de Directorio", size=16, color=WHITE)
+    add_text(s, 0.7, 1.5, 11.5, 1.0, f"{len(resultados_notas)} nota(s) candidata(s)", size=40, bold=True, color=WHITE, font="Cambria")
+    add_text(s, 0.7, 2.45, 11.5, 0.4,
              f"Capital a repartir: ${capital_disponible:,.0f}   ·   Tasa pagada al inversor: {tasa_inversor_pct*100:.1f}% anual",
-             size=14, color=ICE)
+             size=13.5, color=ICE)
 
-    cw, gap, x0 = 3.75, 0.3, 0.7
+    cw, gap, x0 = 3.77, 0.28, 0.7
     for i, r in enumerate(resultados_notas[:3]):
         x = x0 + i * (cw + gap)
-        card = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(3.2), Inches(cw), Inches(1.5))
-        card.fill.solid(); card.fill.fore_color.rgb = RGBColor(0x2A, 0x34, 0x70)
-        card.line.fill.background(); card.shadow.inherit = False
-        add_text(s, x, 3.3, cw, 0.4, f"#{i+1}  {r['nombre']}", size=13, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-        add_text(s, x, 3.7, cw, 0.6, f"{r['score']:.0f}/100", size=30, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font="Cambria")
-        add_text(s, x, 4.35, cw, 0.3, ", ".join(r["tickers"]), size=10.5, color=ICE, align=PP_ALIGN.CENTER)
+        card = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(3.15), Inches(cw), Inches(1.5))
+        card.adjustments[0] = 0.05
+        card.fill.solid(); card.fill.fore_color.rgb = NAVY_2
+        card.line.color.rgb = RGBColor(0x3D, 0x48, 0x8F); card.line.width = Pt(0.75)
+        card.shadow.inherit = False
+        add_text(s, x + 0.18, 3.28, cw - 0.36, 0.35, f"#{i+1}   {r['nombre']}", size=12.5, bold=True, color=ICE)
+        add_text(s, x, 3.62, cw, 0.65, f"{r['score']:.0f}", size=34, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font="Cambria")
+        add_text(s, x, 4.28, cw, 0.3, f"/100  ·  {', '.join(r['tickers'])}", size=10.5, color=ICE, align=PP_ALIGN.CENTER)
 
-    banda = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.7), Inches(5.15), Inches(11.93), Inches(1.15))
+    banda = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.7), Inches(5.15), Inches(11.93), Inches(1.15))
+    banda.adjustments[0] = 0.06
     banda.fill.solid(); banda.fill.fore_color.rgb = veredicto_color(ganador["prob_perdida_capital"])
     banda.line.fill.background(); banda.shadow.inherit = False
-    add_text(s, 1.0, 5.25, 8, 0.3, "MEJOR CANDIDATA (SCORE)", size=11, bold=True, color=WHITE)
-    add_text(s, 1.0, 5.55, 11, 0.6, f"{ganador['nombre']} — score {ganador['score']:.0f}/100", size=20, bold=True, color=WHITE, font="Cambria")
-    add_text(s, 0.7, H - 0.5, 10, 0.3, f"Chaparro Fernández Wealth · Confidencial · {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}",
-             size=9, color=RGBColor(0x88, 0x92, 0xC9))
+    add_text(s, 1.0, 5.28, 8, 0.28, "MEJOR CANDIDATA POR SCORE", size=10.5, bold=True, color=WHITE, letter_spacing=1.5)
+    add_text(s, 1.0, 5.58, 11, 0.6, f"{ganador['nombre']} — {ganador['score']:.0f}/100", size=21, bold=True, color=WHITE, font="Cambria")
+    add_text(s, 0.7, H - 0.55, 10, 0.3, f"Chaparro Fernández Wealth · Confidencial · {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}",
+             size=9, color=RGBColor(0x93, 0x9C, 0xD6))
 
     # ---------- Slide 2: Tabla comparativa + gráfico de score ----------
     s = add_slide()
-    add_text(s, 0.5, 0.35, 10, 0.3, "COMPARATIVA", size=12, bold=True, color=NAVY)
-    add_text(s, 0.5, 0.65, 11.5, 0.5, "Las candidatas, lado a lado", size=22, bold=True, font="Cambria")
+    add_eyebrow(s, 0.5, 0.35, "COMPARATIVA")
+    add_text(s, 0.5, 0.78, 11.5, 0.5, "Las candidatas, lado a lado", size=22, bold=True, font="Cambria")
 
-    headers = ["Nota", "Tickers", "Cupón anual", "Pago", "Protección", "Prob. cupón/periodo", "Prob. pérdida capital", "Rent. neta esperada", "Score"]
-    tbl_shape = s.shapes.add_table(len(resultados_notas) + 1, len(headers), Inches(0.5), Inches(1.4), Inches(12.3), Inches(0.4 * (len(resultados_notas) + 1)))
-    tbl = tbl_shape.table
-    for j, htxt in enumerate(headers):
-        cell = tbl.cell(0, j)
-        cell.text = htxt
-        cell.fill.solid(); cell.fill.fore_color.rgb = NAVY
-        for p in cell.text_frame.paragraphs:
-            p.font.size = Pt(10); p.font.bold = True; p.font.color.rgb = WHITE
-    pago_map = {1: "Mensual", 3: "Trimestral", 6: "Semestral"}
-    for i, r in enumerate(resultados_notas):
-        fila = [
-            r["nombre"], ", ".join(r["tickers"]), f"{r['cupon_anual']*100:.1f}%",
-            pago_map.get(r.get("periodicidad"), "—"),
-            "Buffer" if r.get("tipo_proteccion") == "buffer" else "Barrera",
-            f"{r['prob_cupon_media']*100:.1f}%",
-            f"{r['prob_perdida_capital']*100:.1f}%", f"{r['rentabilidad_esperada_neta']*100:.2f}%",
-            f"{r['score']:.0f}/100",
-        ]
-        for j, val in enumerate(fila):
-            cell = tbl.cell(i + 1, j)
-            cell.text = val
-            cell.fill.solid(); cell.fill.fore_color.rgb = LIGHT_BG if i % 2 == 0 else WHITE
-            for p in cell.text_frame.paragraphs:
-                p.font.size = Pt(10.5)
-                p.font.bold = (j == 8)
-                p.font.color.rgb = RED if (j == 6 and r["prob_perdida_capital"] > 0.3) else RGBColor(0x33, 0x33, 0x33)
+    headers = ["Nota", "Tickers", "Cupón anual", "Pago", "Protección", "Prob. cupón/periodo", "Prob. pérdida capital", "Rent. neta esp.", "Score"]
+    rows = [[
+        r["nombre"], ", ".join(r["tickers"]), f"{r['cupon_anual']*100:.1f}%",
+        pago_map.get(r.get("periodicidad"), "—"),
+        "Buffer" if r.get("tipo_proteccion") == "buffer" else "Barrera",
+        f"{r['prob_cupon_media']*100:.1f}%",
+        f"{r['prob_perdida_capital']*100:.1f}%",
+        f"{r['rentabilidad_esperada_neta']*100:.2f}%", f"{r['score']:.0f}/100",
+    ] for r in resultados_notas]
+    filas_riesgo_alto = {i for i, r in enumerate(resultados_notas) if r["prob_perdida_capital"] > 0.3}
+    add_table(s, 0.5, 1.55, 12.3, headers, rows, col_widths=[1.1, 1.2, 0.9, 0.9, 0.9, 1.3, 1.3, 1.1, 0.8],
+              red_col=6, bold_col=8, row_h=0.42, red_rows=filas_riesgo_alto)
 
-    y_chart = 1.5 + 0.4 * (len(resultados_notas) + 1) + 0.3
+    y_chart = 1.65 + 0.42 * (len(resultados_notas) + 1) + 0.35
     chart_data = CategoryChartData()
     chart_data.categories = [r["nombre"] for r in resultados_notas]
-    chart_data.add_series("Score", [r["score"] for r in resultados_notas])
+    chart_data.add_series("Score", [round(r["score"], 1) for r in resultados_notas])
     gframe = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5), Inches(y_chart), Inches(12.3), Inches(H - y_chart - 0.5), chart_data)
     chart = gframe.chart
     chart.has_legend = False
     chart.has_title = False
     plot = chart.plots[0]
+    plot.gap_width = 55
     plot.series[0].format.fill.solid()
     plot.series[0].format.fill.fore_color.rgb = NAVY
+    plot.series[0].format.line.fill.background()
+    plot.has_data_labels = True
+    plot.data_labels.number_format = "0"
+    plot.data_labels.number_format_is_linked = False
+    plot.data_labels.font.size = Pt(11)
+    plot.data_labels.font.bold = True
+    plot.data_labels.font.color.rgb = NAVY
+    plot.data_labels.position = XL_LABEL_POSITION.OUTSIDE_END
+    _style_chart_axes(chart)
     footer(s, 2)
 
     # ---------- Slides 3..N: una por nota ----------
     for idx, r in enumerate(resultados_notas):
         s = add_slide()
-        add_text(s, 0.5, 0.35, 10, 0.3, f"NOTA {idx+1} DE {len(resultados_notas)}", size=12, bold=True, color=NAVY)
-        add_text(s, 0.5, 0.65, 11.5, 0.5, r["nombre"], size=24, bold=True, font="Cambria")
-        pago_map2 = {1: "mensual", 3: "trimestral", 6: "semestral"}
+        add_eyebrow(s, 0.5, 0.35, f"NOTA {idx+1} DE {len(resultados_notas)}")
+        add_text(s, 0.5, 0.78, 11.5, 0.5, r["nombre"], size=24, bold=True, font="Cambria")
         subtitulo = (
             f"{', '.join(r['tickers'])}  ·  {r['meses_venc']} meses hasta vencimiento  ·  "
-            f"pago {pago_map2.get(r.get('periodicidad'), '—')}  ·  call cada {r.get('frecuencia_call', '—')} meses  ·  "
+            f"pago {pago_map.get(r.get('periodicidad'), '—').lower()}  ·  call cada {r.get('frecuencia_call', '—')} meses  ·  "
             f"protección {'buffer' if r.get('tipo_proteccion') == 'buffer' else 'barrera'}"
         )
-        add_text(s, 0.5, 1.15, 11.5, 0.4, subtitulo, size=12, color=GREY)
+        add_text(s, 0.5, 1.28, 11.5, 0.4, subtitulo, size=12, color=GREY)
 
-        add_card(s, 0.5, 1.7, 2.85, 1.3, f"{r['score']:.0f}", "score /100", NAVY)
-        add_card(s, 3.5, 1.7, 2.85, 1.3, f"{r['prob_cupon_media']*100:.0f}%", "prob. media cupón", NAVY)
-        add_card(s, 6.5, 1.7, 2.85, 1.3, f"{r['prob_perdida_capital']*100:.0f}%", "prob. pérdida capital",
-                  RED if r["prob_perdida_capital"] > 0.3 else NAVY)
-        add_card(s, 9.5, 1.7, 3.33, 1.3, f"{r['rentabilidad_esperada_neta']*100:.1f}%", "rentabilidad neta esp.", NAVY)
+        cw2, gap2 = 2.87, 0.24
+        add_card(s, 0.5, 1.85, cw2, 1.3, f"{r['score']:.0f}", "score /100", NAVY, accent=NAVY)
+        add_card(s, 0.5 + (cw2 + gap2), 1.85, cw2, 1.3, f"{r['prob_cupon_media']*100:.0f}%", "prob. media cupón", NAVY, accent=NAVY)
+        color_perdida = RED if r["prob_perdida_capital"] > 0.3 else NAVY
+        add_card(s, 0.5 + 2 * (cw2 + gap2), 1.85, cw2, 1.3, f"{r['prob_perdida_capital']*100:.0f}%", "prob. pérdida capital", color_perdida, accent=color_perdida)
+        add_card(s, 0.5 + 3 * (cw2 + gap2), 1.85, cw2, 1.3, f"{r['rentabilidad_esperada_neta']*100:.1f}%", "rentabilidad neta esp.", NAVY, accent=NAVY)
 
-        add_text(s, 0.5, 3.25, 12.3, 0.4, "Detalle por ticker (worst-of)", size=13, bold=True, color=NAVY)
+        add_eyebrow(s, 0.5, 3.4, "DETALLE POR TICKER (WORST-OF)", color=GREY)
         headers_t = ["Ticker", "Precio actual", "Barrera cupón", "Barrera capital", "Nivel call", "Colchón capital"]
-        tbl_shape2 = s.shapes.add_table(len(r["tickers_full"]) + 1, len(headers_t), Inches(0.5), Inches(3.7), Inches(12.3), Inches(0.4 * (len(r["tickers_full"]) + 1)))
-        tbl2 = tbl_shape2.table
-        for j, htxt in enumerate(headers_t):
-            cell = tbl2.cell(0, j)
-            cell.text = htxt
-            cell.fill.solid(); cell.fill.fore_color.rgb = NAVY
-            for p in cell.text_frame.paragraphs:
-                p.font.size = Pt(10.5); p.font.bold = True; p.font.color.rgb = WHITE
-        for i, (tk, tf_) in enumerate(zip(r["tickers"], r["tickers_full"])):
+        rows_t = []
+        for tk, tf_ in zip(r["tickers"], r["tickers_full"]):
             fund = next((f for f in r["fundamentales"] if f.get("ticker") == tk), {})
             precio = fund.get("precio_actual")
             colchon = (1 - tf_["barrera_capital_pct"]) * 100
-            fila = [
+            rows_t.append([
                 tk, f"${precio:,.2f}" if precio else "—",
                 f"{tf_['barrera_cupon_pct']*100:.0f}%", f"{tf_['barrera_capital_pct']*100:.0f}%",
                 f"{tf_['call_level_pct']*100:.0f}%", f"{colchon:.1f}%",
-            ]
-            for j, val in enumerate(fila):
-                cell = tbl2.cell(i + 1, j)
-                cell.text = val
-                cell.fill.solid(); cell.fill.fore_color.rgb = LIGHT_BG if i % 2 == 0 else WHITE
-                for p in cell.text_frame.paragraphs:
-                    p.font.size = Pt(10.5); p.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+            ])
+        add_table(s, 0.5, 3.85, 12.3, headers_t, rows_t, row_h=0.4)
 
-        margen = (r["cupon_anual"] - tasa_inversor_pct) * 100
+        margen = r.get("margen_sobre_inversor", r["cupon_anual"] - tasa_inversor_pct) * 100
+        y_nota = 3.85 + 0.4 * (len(rows_t) + 1) + 0.3
         add_text(
-            s, 0.5, 3.7 + 0.4 * (len(r["tickers_full"]) + 1) + 0.25, 12.3, 0.6,
-            f"Margen bruto teórico sobre la tasa pagada al inversor: {margen:.2f} pts. "
+            s, 0.5, y_nota, 12.3, 0.6,
+            f"Margen bruto teórico sobre la tasa pagada al inversor: {margen:.2f} pts.   ·   "
             f"Pérdida media si incumple: {r['perdida_pct_promedio']:.1f}%.",
             size=11.5, italic=True, color=GREY,
         )
@@ -5560,51 +5775,52 @@ def generar_memo_directorio_notas_pptx(
 
     # ---------- Slide: Recomendación ----------
     s = add_slide(NAVY)
-    add_text(s, 0.7, 0.6, 10, 0.4, "RECOMENDACIÓN DE REPARTO", size=13, bold=True, color=ICE)
-    add_text(s, 0.7, 1.05, 11.5, 0.6, f"Cómo repartir ${capital_disponible:,.0f}", size=26, bold=True, color=WHITE, font="Cambria")
+    add_text(s, 0.7, 0.6, 10, 0.32, "RECOMENDACIÓN DE REPARTO", size=12.5, bold=True, color=ICE, letter_spacing=2)
+    add_text(s, 0.7, 1.05, 11.5, 0.6, f"Cómo repartir ${capital_disponible:,.0f}", size=27, bold=True, color=WHITE, font="Cambria")
 
     texto_limpio = _re.sub(r"\*\*(.+?)\*\*", r"\1", texto_recomendacion or "No se pudo generar una recomendación.")
-    box = s.shapes.add_textbox(Inches(0.7), Inches(1.9), Inches(11.9), Inches(5.0))
+    box = s.shapes.add_textbox(Inches(0.7), Inches(1.95), Inches(11.9), Inches(4.9))
     tf = box.text_frame
     tf.word_wrap = True
     primero = True
-    for linea in texto_limpio.split("\n"):
-        linea = linea.strip()
-        if not linea:
+    for linea_txt in texto_limpio.split("\n"):
+        linea_txt = linea_txt.strip()
+        if not linea_txt:
             continue
         p = tf.paragraphs[0] if primero else tf.add_paragraph()
         primero = False
-        p.line_spacing = 1.25
-        p.space_after = Pt(8)
+        p.line_spacing = 1.22
+        p.space_after = Pt(7)
         r_ = p.add_run()
-        r_.text = ("• " + linea[2:]) if linea.startswith(("- ", "* ")) else linea
-        r_.font.size = Pt(13)
-        r_.font.color.rgb = WHITE if not linea.startswith(("#", "###")) else ICE
-        r_.font.bold = linea.startswith("#")
+        r_.text = ("•  " + linea_txt[2:]) if linea_txt.startswith(("- ", "* ")) else linea_txt
+        r_.font.size = Pt(12.5)
+        r_.font.color.rgb = ICE if linea_txt.startswith("#") else WHITE
+        r_.font.bold = linea_txt.startswith("#")
         r_.font.name = "Calibri"
     add_text(s, 0.7, H - 0.5, 11, 0.3,
              "Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.",
-             size=9, color=RGBColor(0x88, 0x92, 0xC9))
+             size=8.5, color=RGBColor(0x93, 0x9C, 0xD6))
 
     # ---------- Slide final: supuestos ----------
     s = add_slide()
-    add_text(s, 0.5, 0.35, 10, 0.3, "APÉNDICE", size=12, bold=True, color=NAVY)
-    add_text(s, 0.5, 0.65, 11.5, 0.5, "Metodología y supuestos", size=22, bold=True, font="Cambria")
+    add_eyebrow(s, 0.5, 0.35, "APÉNDICE")
+    add_text(s, 0.5, 0.78, 11.5, 0.5, "Metodología y supuestos", size=22, bold=True, font="Cambria")
     bloques = [
         ("Modelo", "Monte Carlo real-world worst-of (simular_montecarlo_nota), 5.000 trayectorias por nota, GBM sin drift."),
         ("Volatilidad", "Histórica realizada de 12 meses, vía yfinance. No incluye skew de opciones."),
         ("Correlación", "No modelada — se asume independencia entre tickers de una misma nota (supuesto simplificado)."),
-        ("Score", "0-100 = 45% prob. de cobrar cupón + 30% (1 − prob. pérdida capital) + 25% rentabilidad neta normalizada entre candidatas."),
+        ("Barrera / buffer", "Barrera = pérdida total del peor activo si rompe. Buffer = solo se pierde el exceso sobre el colchón. El Monte Carlo ya calcula la pérdida distinto según el tipo elegido por nota."),
+        ("Score", "35% prob. cupón + 20% margen sobre tasa inversor + 20% (1 − prob. pérdida capital) + 10% periodicidad + 10% cercanía de call a 3m + 5% tipo de protección."),
         ("Recomendación", "Generada por Claude a partir de las métricas ya calculadas — no recalcula ni inventa números."),
     ]
-    y = 1.6
+    y = 1.65
     for k, v in bloques:
         add_text(s, 0.5, y, 2.3, 0.6, k, size=12, bold=True, color=NAVY)
-        add_text(s, 2.9, y, 9.9, 0.65, v, size=11.5, color=RGBColor(0x33, 0x33, 0x33))
+        add_text(s, 2.9, y, 9.9, 0.65, v, size=11, color=TEXT, line_spacing=1.15)
         y += 0.75
-    add_text(s, 0.5, 6.7, 12.3, 0.4,
+    add_text(s, 0.5, 6.85, 12.3, 0.4,
              "Memo generado automáticamente desde el Comparador de Notas. No sustituye la verificación manual contra el Excel.",
-             size=9.5, italic=True, color=RGBColor(0x99, 0x99, 0x99))
+             size=9, italic=True, color=GREY_LIGHT)
 
     output = BytesIO()
     prs.save(output)
@@ -5711,8 +5927,9 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
         "Se simula cada una con Monte Carlo (usando la volatilidad histórica real de cada ticker) "
         "para estimar probabilidades de cupón, call y pérdida de capital, y se calcula una "
         "propuesta de reparto de capital razonada.\n\n"
-        "⚠️ **Esto es una estimación probabilística con supuestos simplificados** (volatilidad histórica, "
-        "sin correlación entre tickers, sin deriva de precio) — no una predicción ni garantía de resultado."
+        "⚠️ **Esto es una estimación probabilística con supuestos simplificados** — no una predicción "
+        "ni garantía de resultado. Por defecto asume que la acción no tiene tendencia (ni sube ni baja); "
+        "si tenés convicción propia (o el consenso de analistas la tiene), podés metérsela abajo."
     )
 
     n_notas = st.radio("¿Cuántas notas quieres comparar?", [1, 2, 3], horizontal=True, index=1)
@@ -5755,9 +5972,44 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     "solo se pierde el exceso. A igualdad de nivel nominal, el buffer siempre es menos arriesgado."
                 ),
             )
+            st.markdown("_Supuestos de la simulación_")
+            modo_deriva = st.selectbox(
+                "Deriva de precio (tendencia asumida)",
+                ["neutral", "analistas", "manual"],
+                format_func=lambda x: {
+                    "neutral": "Neutral — sin deriva (más conservador)",
+                    "analistas": "Consenso de analistas (precio objetivo, ~12 meses)",
+                    "manual": "Manual — mi propia convicción",
+                }[x],
+                key=f"comp_mododeriva_{i}",
+                help=(
+                    "Por defecto (neutral) el modelo NO asume que la acción vaya a subir ni a bajar — solo "
+                    "mide cuánto se mueve. Eso hace que acciones muy volátiles salgan mal aunque el consenso "
+                    "las vea subiendo, porque con 30+ observaciones mensuales hasta un camino alcista puede "
+                    "tocar la barrera por el camino. Si tenés una visión fundamentada (propia o de analistas), "
+                    "metela aquí para que la simulación la refleje."
+                ),
+            )
+            deriva_manual_pct = None
+            if modo_deriva == "manual":
+                deriva_manual_pct = st.number_input(
+                    "Retorno anual esperado (%)", min_value=-50.0, max_value=100.0, value=15.0, step=1.0,
+                    key=f"comp_derivamanual_{i}",
+                    help="Tu convicción propia, informada por lo que leas en la ficha de noticias/analistas de cada compañía.",
+                )
+            modelar_earnings = st.checkbox(
+                "Modelar shock de earnings", value=True, key=f"comp_earnings_{i}",
+                help=(
+                    "En vez de repartir el riesgo de resultados trimestrales uniformemente en el año (lo que "
+                    "hace que se diluya), concentra una sacudida extra justo en las fechas de earnings, con la "
+                    "magnitud REAL que esta acción se ha movido en sus últimos informes — así el modelo distingue "
+                    "un mes cualquiera de un mes con resultados."
+                ),
+            )
             notas_input.append({
                 "nombre": nombre, "tickers": tickers_nota, "cupon_anual": cupon_anual, "meses_venc": meses_venc,
                 "periodicidad": periodicidad, "frecuencia_call": frecuencia_call, "tipo_proteccion": tipo_proteccion,
+                "modo_deriva": modo_deriva, "deriva_manual_pct": deriva_manual_pct, "modelar_earnings": modelar_earnings,
             })
 
     col_cap, col_tasa = st.columns(2)
@@ -5785,10 +6037,26 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     st.error(f"No se pudo obtener precio/volatilidad de {t['ticker']} — se omite {nota['nombre']}.")
                     tickers_datos = None
                     break
+
+                # Deriva de precio: 0 (neutral), consenso de analistas (dato real), o convicción manual.
+                if nota["modo_deriva"] == "analistas":
+                    drift_pct = fd.get("retorno_implicito_analistas_pct") or 0.0
+                elif nota["modo_deriva"] == "manual":
+                    drift_pct = nota["deriva_manual_pct"] or 0.0
+                else:
+                    drift_pct = 0.0
+
+                # Shock de earnings: fechas proyectadas + magnitud histórica real de esta acción.
+                dias_earnings, salto_pct = [], None
+                if nota["modelar_earnings"]:
+                    dias_earnings = _proyectar_dias_earnings(fd.get("proxima_fecha_resultados_dt"), nota["meses_venc"])
+                    salto_pct = fd.get("salto_medio_earnings_pct")
+
                 tickers_datos.append({
                     "ticker": t["ticker"], "precio_actual": fd["precio_actual"], "precio_inicial": fd["precio_actual"],
                     "volatilidad_anual_pct": fd["volatilidad_anual_pct"],
                     "barrera_cupon_pct": t["barrera_cupon_pct"], "barrera_capital_pct": t["barrera_capital_pct"], "call_level_pct": t["call_level_pct"],
+                    "drift_anual_pct": drift_pct, "dias_earnings": dias_earnings, "salto_earnings_pct": salto_pct,
                 })
                 fundamentales_nota.append(fd)
             if not tickers_datos:
@@ -5811,6 +6079,8 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 "cupon_anual": nota["cupon_anual"], "meses_venc": nota["meses_venc"],
                 "periodicidad": nota["periodicidad"], "frecuencia_call": nota["frecuencia_call"],
                 "tipo_proteccion": nota["tipo_proteccion"],
+                "modo_deriva": nota["modo_deriva"], "modelar_earnings": nota["modelar_earnings"],
+                "tickers_datos_sim": tickers_datos,  # incluye drift_anual_pct/salto_earnings_pct usados, para el informe
                 "prob_cupon_media": prob_cupon_media, "prob_call_total": sim["probabilidad_call_total"],
                 "prob_perdida_capital": sim["probabilidad_perdida_capital"], "perdida_pct_promedio": sim["perdida_pct_promedio_si_incumple"],
                 "rentabilidad_esperada_neta": rentabilidad_neta_esperada, "margen_sobre_inversor": margen_sobre_inversor,
@@ -5893,19 +6163,28 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     st.markdown("---")
     st.markdown("### 🏢 Compañías subyacentes de cada nota")
     bloques_informe = [f"# Informe de comparación de notas — {pd.Timestamp.now().strftime('%d/%m/%Y')}"]
+    deriva_txt_map = {
+        "neutral": "neutral (sin deriva)",
+        "analistas": "consenso de analistas (por ticker)",
+        "manual": "convicción manual",
+    }
     for r in resultados_notas:
         st.markdown(f"#### {r['nombre']}  ·  Score {r['score']:.0f}/100")
         margen_vs_inversor = r["margen_sobre_inversor"]
         pago_txt = {1: "mensual", 3: "trimestral", 6: "semestral"}[r["periodicidad"]]
         proteccion_txt = "buffer (protege el %, pérdida solo del exceso)" if r["tipo_proteccion"] == "buffer" else "barrera (pérdida total si rompe)"
+        deriva_txt = deriva_txt_map.get(r.get("modo_deriva"), "neutral (sin deriva)")
+        earnings_txt = "sí" if r.get("modelar_earnings") else "no"
         st.caption(
             f"Cupón nota: {r['cupon_anual']*100:.2f}% anual, pago {pago_txt} · Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual · "
-            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}% · Call cada {r['frecuencia_call']} meses · Protección de capital: {proteccion_txt}"
+            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}% · Call cada {r['frecuencia_call']} meses · Protección de capital: {proteccion_txt} · "
+            f"Deriva simulación: {deriva_txt} · Shock de earnings: {earnings_txt}"
         )
         bloques_informe.append(f"### {r['nombre']} (score {r['score']:.0f}/100)")
         bloques_informe.append(
             f"Cupón nota: {r['cupon_anual']*100:.2f}% anual, pago {pago_txt}. Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual. "
-            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}%. Call cada {r['frecuencia_call']} meses. Protección de capital: {proteccion_txt}."
+            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}%. Call cada {r['frecuencia_call']} meses. Protección de capital: {proteccion_txt}. "
+            f"Deriva usada en la simulación: {deriva_txt}. Shock de earnings modelado: {earnings_txt}."
         )
         colchones_nota = []
         colchones_cupon_nota = []
@@ -5936,6 +6215,22 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     st.caption(f"Rango de analistas: ${fd.get('target_bajo', 0):,.2f} — ${fd.get('target_alto', 0):,.2f}  |  {fd.get('n_analistas', '?')} analistas  |  Recomendación consenso: {fd.get('recomendacion', 'N/D')}")
                 if fd.get("aviso_analistas"):
                     st.info(f"ℹ️ {fd['aviso_analistas']}")
+                c5, c6 = st.columns(2)
+                with c5:
+                    if fd.get("salto_medio_earnings_pct"):
+                        tarjeta_kpi(
+                            "Salto medio el día de earnings",
+                            f"±{fd['salto_medio_earnings_pct']:.1f}%",
+                            f"Medido sobre sus últimos {fd.get('n_earnings_medidos', '?')} informes trimestrales",
+                            "normal",
+                        )
+                    else:
+                        tarjeta_kpi("Salto medio el día de earnings", "N/D", "Sin datos históricos de earnings suficientes", "normal")
+                with c6:
+                    if fd.get("proxima_fecha_resultados"):
+                        tarjeta_kpi("Próximos resultados", str(fd["proxima_fecha_resultados"])[:10], "Fecha estimada por Yahoo Finance", "normal")
+                    else:
+                        tarjeta_kpi("Próximos resultados", "N/D", "Sin fecha confirmada", "normal")
                 with st.spinner(f"Buscando información y noticias de {ticker}..."):
                     ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker, barrera_capital_pct, colchon_pct, barrera_cupon_pct, colchon_cupon_pct)
                 st.markdown(_md_seguro(ficha_texto))
@@ -5954,6 +6249,8 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             f"- {r['nombre']} ({', '.join(r['tickers'])}): cupón {r['cupon_anual']*100:.1f}% anual, "
             f"pago {'mensual' if r['periodicidad']==1 else ('trimestral' if r['periodicidad']==3 else 'semestral')}, "
             f"call cada {r['frecuencia_call']} meses, protección de capital tipo {r['tipo_proteccion']}, "
+            f"deriva de precio usada en la simulación: {deriva_txt_map.get(r.get('modo_deriva'), 'neutral')}, "
+            f"shock de earnings modelado: {'sí' if r.get('modelar_earnings') else 'no'}, "
             f"score compuesto {r['score']:.0f}/100, "
             f"prob. media de cobro de cupón por periodo {r['prob_cupon_media']*100:.1f}%, prob. call total {r['prob_call_total']*100:.1f}%, "
             f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%, "
@@ -5977,9 +6274,14 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                         "spread entre lo que cobra la nota y lo que paga al inversor. Se te dan métricas YA CALCULADAS "
                         "(probabilidades de Monte Carlo, score compuesto, rentabilidad esperada, margen bruto teórico "
                         f"sobre la tasa del inversor —que es {tasa_inversor_pct*100:.2f}% anual—, periodicidad de pago, "
-                        "frecuencia de call, tipo de protección de capital y el colchón hasta la barrera de capital y "
+                        "frecuencia de call, tipo de protección de capital, la deriva de precio usada en la simulación "
+                        "(neutral / consenso de analistas / convicción manual) y si se modeló un shock de earnings, "
+                        "y el colchón hasta la barrera de capital y "
                         "hasta la barrera de cupón de cada ticker) de varias notas candidatas — NO recalcules ni "
-                        "inventes ningún número, solo razona sobre los que se te dan. Aplica ESTAS reglas de decisión, "
+                        "inventes ningún número, solo razona sobre los que se te dan. IMPORTANTE: las probabilidades "
+                        "de cobro y de pérdida YA incorporan la deriva y el shock de earnings si se indicaron — no las "
+                        "corrijas mentalmente asumiendo que son 'sin dirección', solo dilo si la nota usó deriva "
+                        "neutral. Aplica ESTAS reglas de decisión, "
                         "en este orden de importancia:\n\n"
                         "1) LO MÁS IMPORTANTE es la probabilidad de cobrar el cupón, porque es el evento recurrente "
                         "que genera el spread mes a mes. Esa probabilidad ya viene calculada evaluando la barrera de "
