@@ -1742,13 +1742,20 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
     return resultado
 
 
-def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_simulaciones: int = 5000) -> dict:
+def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_simulaciones: int = 5000,
+                             tipo_proteccion: str = "barrera") -> dict:
     """
     Simulación Monte Carlo (movimiento browniano geométrico, sin drift — supuesto neutral)
     para una nota worst-of con uno o varios tickers subyacentes.
 
     tickers_datos: lista de dicts {precio_actual, precio_inicial, volatilidad_anual_pct, barrera_cupon_pct, call_level_pct, barrera_capital_pct}
     dias_hasta_eventos: lista de dicts {dias, tipo} ordenada cronológicamente, tipo="cupon" o "call" o "vencimiento"
+    tipo_proteccion: "barrera" (europea) o "buffer".
+        - "barrera": si el peor activo rompe su nivel de protección al vencimiento, el fondo recibe
+          EXACTAMENTE la performance del peor activo (pérdida total desde el nivel inicial, sin suelo).
+        - "buffer": el fondo está protegido hasta el tamaño del buffer (1 - barrera_capital_pct); si
+          la caída del peor activo supera ese buffer, solo se pierde el EXCESO sobre el buffer.
+          Para la misma barrera nominal, un buffer siempre pierde menos (o igual) que una barrera.
 
     LIMITACIÓN HONESTA: asume independencia entre los distintos tickers (no modela correlación
     real entre acciones) y usa volatilidad histórica (no implícita de opciones, más precisa pero
@@ -1795,15 +1802,25 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
             no_llamadas = ~ya_llamada
             incumple = ~cumple_todas_capital & no_llamadas
             prob_perdida = float(np.mean(incumple))
-            # Pérdida media (%) en los escenarios que sí incumplen, usando el peor ticker (worst-of)
+            # Pérdida media (%) en los escenarios que sí incumplen, usando el peor ticker (worst-of).
+            # Con barrera: pérdida = caída completa del peor activo. Con buffer: solo el exceso sobre
+            # el tamaño del buffer (1 - barrera_capital_pct) del PEOR activo en cada escenario.
             perdida_pct_promedio = 0.0
             if incumple.sum() > 0:
                 peor_performance = np.ones(n_simulaciones)
+                peor_buffer_size = np.zeros(n_simulaciones)  # buffer del ticker que resulta ser el peor en cada escenario
                 for td in tickers_datos:
                     precio_final = precios_simulados[td["ticker"]][:, idx_dia]
                     performance = precio_final / td["precio_inicial"]
+                    es_nuevo_peor = performance < peor_performance
+                    peor_buffer_size = np.where(es_nuevo_peor, 1 - td["barrera_capital_pct"], peor_buffer_size)
                     peor_performance = np.minimum(peor_performance, performance)
-                perdida_pct_promedio = float(np.mean(1 - peor_performance[incumple]) * 100)
+                caida = 1 - peor_performance
+                if tipo_proteccion == "buffer":
+                    perdida_fraccion = np.maximum(0.0, caida - peor_buffer_size)
+                else:  # "barrera": pérdida total desde el nivel inicial, sin suelo
+                    perdida_fraccion = caida
+                perdida_pct_promedio = float(np.mean(perdida_fraccion[incumple]) * 100)
             resultados_eventos.append({"tipo": "vencimiento_perdida_capital", "dias": evento["dias"], "probabilidad": prob_perdida, "perdida_pct_promedio": perdida_pct_promedio})
 
     prob_call_total = sum(e["probabilidad"] for e in resultados_eventos if e["tipo"] == "call")
@@ -1817,6 +1834,7 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
         "probabilidad_perdida_capital": prob_perdida_capital,
         "perdida_pct_promedio_si_incumple": perdida_pct_promedio,
         "n_simulaciones": n_simulaciones,
+        "tipo_proteccion": tipo_proteccion,
     }
 
 
@@ -5256,21 +5274,34 @@ def obtener_resumen_noticias_ia(ticker: str, nombre_compania: str) -> str:
         return f"⚠️ No se pudieron obtener noticias (error de conexión): {e}"
 
 
-def _generar_horario_eventos(meses_vencimiento: int, periodicidad: int) -> list:
-    """Genera un calendario sintético de eventos (cupón + call, excluyendo primera y última fecha
-    de call como es habitual) + vencimiento, en días desde hoy, según la periodicidad de la nota."""
+def _generar_horario_eventos(meses_vencimiento: int, periodicidad: int, frecuencia_call: int | None = None) -> list:
+    """Genera un calendario sintético de eventos cupón + call + vencimiento, en días desde hoy.
+
+    El cupón se paga cada `periodicidad` meses. El call es una ventana DISTINTA del emisor
+    (`frecuencia_call` meses, por defecto igual a la periodicidad si no se especifica) —
+    en la práctica muchas notas pagan cupón mensual pero solo son callables cada 3 meses.
+    Se excluye la primera y la última ventana de call, como es habitual en el mercado.
+    """
+    if frecuencia_call is None:
+        frecuencia_call = periodicidad
     eventos = []
     mes = periodicidad
-    n_periodo = 0
     while mes <= meses_vencimiento:
-        n_periodo += 1
         dias = int(mes * 30.44)
         eventos.append({"dias": max(dias, 1), "tipo": "cupon"})
-        es_primera = (n_periodo == 1)
-        es_ultima = (mes + periodicidad > meses_vencimiento)
-        if not es_primera and not es_ultima:
-            eventos.append({"dias": max(dias, 1), "tipo": "call"})
         mes += periodicidad
+
+    fechas_call = []
+    mes = frecuencia_call
+    while mes <= meses_vencimiento:
+        fechas_call.append(mes)
+        mes += frecuencia_call
+    for idx, mes_call in enumerate(fechas_call):
+        es_primera = (idx == 0)
+        es_ultima = (idx == len(fechas_call) - 1)
+        if not es_primera and not es_ultima:
+            eventos.append({"dias": max(int(mes_call * 30.44), 1), "tipo": "call"})
+
     eventos.append({"dias": int(meses_vencimiento * 30.44), "tipo": "vencimiento"})
     return eventos
 
@@ -5316,6 +5347,267 @@ def _informe_ia_a_pdf(titulo: str, texto_markdown: str) -> bytes:
             story.append(Paragraph(_linea_a_html(linea_limpia), style_normal))
 
     doc.build(story)
+    return output.getvalue()
+
+
+def generar_memo_directorio_notas_pptx(
+    resultados_notas: list, texto_recomendacion: str,
+    capital_disponible: float, tasa_inversor_pct: float,
+) -> bytes:
+    """
+    Arma un memo de directorio (.pptx) a partir de lo que YA calculó el comparador de notas
+    (resultados_notas, con Monte Carlo + score) y la recomendación de reparto de Claude.
+    No recalcula nada — solo formatea lo que ya existe en resultados_notas.
+    """
+    from pptx import Presentation
+    from pptx.util import Inches, Pt, Emu
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+    from pptx.enum.shapes import MSO_SHAPE
+    import re as _re
+
+    NAVY = RGBColor(0x1E, 0x27, 0x61)
+    ICE = RGBColor(0xCA, 0xDC, 0xFC)
+    WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+    RED = RGBColor(0xC0, 0x39, 0x2B)
+    GREEN = RGBColor(0x2E, 0x7D, 0x32)
+    AMBER = RGBColor(0xD6, 0x89, 0x10)
+    GREY = RGBColor(0x5A, 0x5A, 0x5A)
+    LIGHT_BG = RGBColor(0xF7, 0xF8, 0xFC)
+    BORDER = RGBColor(0xE0, 0xE0, 0xE0)
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    BLANK = prs.slide_layouts[6]
+    W, H = 13.333, 7.5
+
+    def add_slide(bg=WHITE):
+        s = prs.slides.add_slide(BLANK)
+        rect = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+        rect.fill.solid(); rect.fill.fore_color.rgb = bg
+        rect.line.fill.background()
+        rect.shadow.inherit = False
+        s.shapes._spTree.remove(rect._element)
+        s.shapes._spTree.insert(2, rect._element)
+        return s
+
+    def add_text(s, x, y, w, h, text, size=12, bold=False, italic=False, color=RGBColor(0x22, 0x22, 0x22),
+                 align=PP_ALIGN.LEFT, font="Calibri", anchor=None, line_spacing=1.0):
+        box = s.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+        tf = box.text_frame
+        tf.word_wrap = True
+        if anchor:
+            tf.vertical_anchor = anchor
+        p = tf.paragraphs[0]
+        p.alignment = align
+        p.line_spacing = line_spacing
+        r = p.add_run()
+        r.text = text
+        r.font.size = Pt(size)
+        r.font.bold = bold
+        r.font.italic = italic
+        r.font.color.rgb = color
+        r.font.name = font
+        return box
+
+    def add_card(s, x, y, w, h, value, label, value_color=NAVY, bg=LIGHT_BG):
+        box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+        box.fill.solid(); box.fill.fore_color.rgb = bg
+        box.line.color.rgb = BORDER; box.line.width = Pt(0.75)
+        box.shadow.inherit = False
+        add_text(s, x, y + 0.12, w, 0.65, value, size=24, bold=True, color=value_color,
+                  align=PP_ALIGN.CENTER, font="Cambria")
+        add_text(s, x, y + h - 0.5, w, 0.4, label, size=10.5, color=GREY, align=PP_ALIGN.CENTER)
+
+    def footer(s, n):
+        add_text(s, 0.4, H - 0.4, 6, 0.3, "Chaparro Fernández Wealth · Confidencial", size=9, color=RGBColor(0x99, 0x99, 0x99))
+        add_text(s, W - 1.2, H - 0.4, 0.8, 0.3, f"{n:02d}", size=9, color=RGBColor(0x99, 0x99, 0x99), align=PP_ALIGN.RIGHT)
+
+    def veredicto_color(p_perdida):
+        return RED if p_perdida > 0.35 else (AMBER if p_perdida > 0.2 else GREEN)
+
+    ganador = resultados_notas[0]  # ya viene ordenado por score desc
+
+    # ---------- Slide 1: Portada ----------
+    s = add_slide(NAVY)
+    add_text(s, 0.7, 0.6, 10, 0.4, "MESA DE PRODUCTOS ESTRUCTURADOS", size=13, bold=True, color=ICE)
+    add_text(s, 0.7, 1.0, 10, 0.5, "Comparador de Notas — Memo de Directorio", size=16, color=WHITE)
+    add_text(s, 0.7, 1.55, 11.5, 1.0, f"{len(resultados_notas)} nota(s) candidata(s)", size=38, bold=True, color=WHITE, font="Cambria")
+    add_text(s, 0.7, 2.5, 11.5, 0.5,
+             f"Capital a repartir: ${capital_disponible:,.0f}   ·   Tasa pagada al inversor: {tasa_inversor_pct*100:.1f}% anual",
+             size=14, color=ICE)
+
+    cw, gap, x0 = 3.75, 0.3, 0.7
+    for i, r in enumerate(resultados_notas[:3]):
+        x = x0 + i * (cw + gap)
+        card = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(3.2), Inches(cw), Inches(1.5))
+        card.fill.solid(); card.fill.fore_color.rgb = RGBColor(0x2A, 0x34, 0x70)
+        card.line.fill.background(); card.shadow.inherit = False
+        add_text(s, x, 3.3, cw, 0.4, f"#{i+1}  {r['nombre']}", size=13, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+        add_text(s, x, 3.7, cw, 0.6, f"{r['score']:.0f}/100", size=30, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font="Cambria")
+        add_text(s, x, 4.35, cw, 0.3, ", ".join(r["tickers"]), size=10.5, color=ICE, align=PP_ALIGN.CENTER)
+
+    banda = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.7), Inches(5.15), Inches(11.93), Inches(1.15))
+    banda.fill.solid(); banda.fill.fore_color.rgb = veredicto_color(ganador["prob_perdida_capital"])
+    banda.line.fill.background(); banda.shadow.inherit = False
+    add_text(s, 1.0, 5.25, 8, 0.3, "MEJOR CANDIDATA (SCORE)", size=11, bold=True, color=WHITE)
+    add_text(s, 1.0, 5.55, 11, 0.6, f"{ganador['nombre']} — score {ganador['score']:.0f}/100", size=20, bold=True, color=WHITE, font="Cambria")
+    add_text(s, 0.7, H - 0.5, 10, 0.3, f"Chaparro Fernández Wealth · Confidencial · {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}",
+             size=9, color=RGBColor(0x88, 0x92, 0xC9))
+
+    # ---------- Slide 2: Tabla comparativa + gráfico de score ----------
+    s = add_slide()
+    add_text(s, 0.5, 0.35, 10, 0.3, "COMPARATIVA", size=12, bold=True, color=NAVY)
+    add_text(s, 0.5, 0.65, 11.5, 0.5, "Las candidatas, lado a lado", size=22, bold=True, font="Cambria")
+
+    headers = ["Nota", "Tickers", "Cupón anual", "Pago", "Protección", "Prob. cupón/periodo", "Prob. pérdida capital", "Rent. neta esperada", "Score"]
+    tbl_shape = s.shapes.add_table(len(resultados_notas) + 1, len(headers), Inches(0.5), Inches(1.4), Inches(12.3), Inches(0.4 * (len(resultados_notas) + 1)))
+    tbl = tbl_shape.table
+    for j, htxt in enumerate(headers):
+        cell = tbl.cell(0, j)
+        cell.text = htxt
+        cell.fill.solid(); cell.fill.fore_color.rgb = NAVY
+        for p in cell.text_frame.paragraphs:
+            p.font.size = Pt(10); p.font.bold = True; p.font.color.rgb = WHITE
+    pago_map = {1: "Mensual", 3: "Trimestral", 6: "Semestral"}
+    for i, r in enumerate(resultados_notas):
+        fila = [
+            r["nombre"], ", ".join(r["tickers"]), f"{r['cupon_anual']*100:.1f}%",
+            pago_map.get(r.get("periodicidad"), "—"),
+            "Buffer" if r.get("tipo_proteccion") == "buffer" else "Barrera",
+            f"{r['prob_cupon_media']*100:.1f}%",
+            f"{r['prob_perdida_capital']*100:.1f}%", f"{r['rentabilidad_esperada_neta']*100:.2f}%",
+            f"{r['score']:.0f}/100",
+        ]
+        for j, val in enumerate(fila):
+            cell = tbl.cell(i + 1, j)
+            cell.text = val
+            cell.fill.solid(); cell.fill.fore_color.rgb = LIGHT_BG if i % 2 == 0 else WHITE
+            for p in cell.text_frame.paragraphs:
+                p.font.size = Pt(10.5)
+                p.font.bold = (j == 8)
+                p.font.color.rgb = RED if (j == 6 and r["prob_perdida_capital"] > 0.3) else RGBColor(0x33, 0x33, 0x33)
+
+    y_chart = 1.5 + 0.4 * (len(resultados_notas) + 1) + 0.3
+    chart_data = CategoryChartData()
+    chart_data.categories = [r["nombre"] for r in resultados_notas]
+    chart_data.add_series("Score", [r["score"] for r in resultados_notas])
+    gframe = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(0.5), Inches(y_chart), Inches(12.3), Inches(H - y_chart - 0.5), chart_data)
+    chart = gframe.chart
+    chart.has_legend = False
+    chart.has_title = False
+    plot = chart.plots[0]
+    plot.series[0].format.fill.solid()
+    plot.series[0].format.fill.fore_color.rgb = NAVY
+    footer(s, 2)
+
+    # ---------- Slides 3..N: una por nota ----------
+    for idx, r in enumerate(resultados_notas):
+        s = add_slide()
+        add_text(s, 0.5, 0.35, 10, 0.3, f"NOTA {idx+1} DE {len(resultados_notas)}", size=12, bold=True, color=NAVY)
+        add_text(s, 0.5, 0.65, 11.5, 0.5, r["nombre"], size=24, bold=True, font="Cambria")
+        pago_map2 = {1: "mensual", 3: "trimestral", 6: "semestral"}
+        subtitulo = (
+            f"{', '.join(r['tickers'])}  ·  {r['meses_venc']} meses hasta vencimiento  ·  "
+            f"pago {pago_map2.get(r.get('periodicidad'), '—')}  ·  call cada {r.get('frecuencia_call', '—')} meses  ·  "
+            f"protección {'buffer' if r.get('tipo_proteccion') == 'buffer' else 'barrera'}"
+        )
+        add_text(s, 0.5, 1.15, 11.5, 0.4, subtitulo, size=12, color=GREY)
+
+        add_card(s, 0.5, 1.7, 2.85, 1.3, f"{r['score']:.0f}", "score /100", NAVY)
+        add_card(s, 3.5, 1.7, 2.85, 1.3, f"{r['prob_cupon_media']*100:.0f}%", "prob. media cupón", NAVY)
+        add_card(s, 6.5, 1.7, 2.85, 1.3, f"{r['prob_perdida_capital']*100:.0f}%", "prob. pérdida capital",
+                  RED if r["prob_perdida_capital"] > 0.3 else NAVY)
+        add_card(s, 9.5, 1.7, 3.33, 1.3, f"{r['rentabilidad_esperada_neta']*100:.1f}%", "rentabilidad neta esp.", NAVY)
+
+        add_text(s, 0.5, 3.25, 12.3, 0.4, "Detalle por ticker (worst-of)", size=13, bold=True, color=NAVY)
+        headers_t = ["Ticker", "Precio actual", "Barrera cupón", "Barrera capital", "Nivel call", "Colchón capital"]
+        tbl_shape2 = s.shapes.add_table(len(r["tickers_full"]) + 1, len(headers_t), Inches(0.5), Inches(3.7), Inches(12.3), Inches(0.4 * (len(r["tickers_full"]) + 1)))
+        tbl2 = tbl_shape2.table
+        for j, htxt in enumerate(headers_t):
+            cell = tbl2.cell(0, j)
+            cell.text = htxt
+            cell.fill.solid(); cell.fill.fore_color.rgb = NAVY
+            for p in cell.text_frame.paragraphs:
+                p.font.size = Pt(10.5); p.font.bold = True; p.font.color.rgb = WHITE
+        for i, (tk, tf_) in enumerate(zip(r["tickers"], r["tickers_full"])):
+            fund = next((f for f in r["fundamentales"] if f.get("ticker") == tk), {})
+            precio = fund.get("precio_actual")
+            colchon = (1 - tf_["barrera_capital_pct"]) * 100
+            fila = [
+                tk, f"${precio:,.2f}" if precio else "—",
+                f"{tf_['barrera_cupon_pct']*100:.0f}%", f"{tf_['barrera_capital_pct']*100:.0f}%",
+                f"{tf_['call_level_pct']*100:.0f}%", f"{colchon:.1f}%",
+            ]
+            for j, val in enumerate(fila):
+                cell = tbl2.cell(i + 1, j)
+                cell.text = val
+                cell.fill.solid(); cell.fill.fore_color.rgb = LIGHT_BG if i % 2 == 0 else WHITE
+                for p in cell.text_frame.paragraphs:
+                    p.font.size = Pt(10.5); p.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+
+        margen = (r["cupon_anual"] - tasa_inversor_pct) * 100
+        add_text(
+            s, 0.5, 3.7 + 0.4 * (len(r["tickers_full"]) + 1) + 0.25, 12.3, 0.6,
+            f"Margen bruto teórico sobre la tasa pagada al inversor: {margen:.2f} pts. "
+            f"Pérdida media si incumple: {r['perdida_pct_promedio']:.1f}%.",
+            size=11.5, italic=True, color=GREY,
+        )
+        footer(s, 3 + idx)
+
+    # ---------- Slide: Recomendación ----------
+    s = add_slide(NAVY)
+    add_text(s, 0.7, 0.6, 10, 0.4, "RECOMENDACIÓN DE REPARTO", size=13, bold=True, color=ICE)
+    add_text(s, 0.7, 1.05, 11.5, 0.6, f"Cómo repartir ${capital_disponible:,.0f}", size=26, bold=True, color=WHITE, font="Cambria")
+
+    texto_limpio = _re.sub(r"\*\*(.+?)\*\*", r"\1", texto_recomendacion or "No se pudo generar una recomendación.")
+    box = s.shapes.add_textbox(Inches(0.7), Inches(1.9), Inches(11.9), Inches(5.0))
+    tf = box.text_frame
+    tf.word_wrap = True
+    primero = True
+    for linea in texto_limpio.split("\n"):
+        linea = linea.strip()
+        if not linea:
+            continue
+        p = tf.paragraphs[0] if primero else tf.add_paragraph()
+        primero = False
+        p.line_spacing = 1.25
+        p.space_after = Pt(8)
+        r_ = p.add_run()
+        r_.text = ("• " + linea[2:]) if linea.startswith(("- ", "* ")) else linea
+        r_.font.size = Pt(13)
+        r_.font.color.rgb = WHITE if not linea.startswith(("#", "###")) else ICE
+        r_.font.bold = linea.startswith("#")
+        r_.font.name = "Calibri"
+    add_text(s, 0.7, H - 0.5, 11, 0.3,
+             "Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.",
+             size=9, color=RGBColor(0x88, 0x92, 0xC9))
+
+    # ---------- Slide final: supuestos ----------
+    s = add_slide()
+    add_text(s, 0.5, 0.35, 10, 0.3, "APÉNDICE", size=12, bold=True, color=NAVY)
+    add_text(s, 0.5, 0.65, 11.5, 0.5, "Metodología y supuestos", size=22, bold=True, font="Cambria")
+    bloques = [
+        ("Modelo", "Monte Carlo real-world worst-of (simular_montecarlo_nota), 5.000 trayectorias por nota, GBM sin drift."),
+        ("Volatilidad", "Histórica realizada de 12 meses, vía yfinance. No incluye skew de opciones."),
+        ("Correlación", "No modelada — se asume independencia entre tickers de una misma nota (supuesto simplificado)."),
+        ("Score", "0-100 = 45% prob. de cobrar cupón + 30% (1 − prob. pérdida capital) + 25% rentabilidad neta normalizada entre candidatas."),
+        ("Recomendación", "Generada por Claude a partir de las métricas ya calculadas — no recalcula ni inventa números."),
+    ]
+    y = 1.6
+    for k, v in bloques:
+        add_text(s, 0.5, y, 2.3, 0.6, k, size=12, bold=True, color=NAVY)
+        add_text(s, 2.9, y, 9.9, 0.65, v, size=11.5, color=RGBColor(0x33, 0x33, 0x33))
+        y += 0.75
+    add_text(s, 0.5, 6.7, 12.3, 0.4,
+             "Memo generado automáticamente desde el Comparador de Notas. No sustituye la verificación manual contra el Excel.",
+             size=9.5, italic=True, color=RGBColor(0x99, 0x99, 0x99))
+
+    output = BytesIO()
+    prs.save(output)
     return output.getvalue()
 
 
@@ -5437,14 +5729,36 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 st.markdown(f"_Ticker {j+1}_")
                 tk = st.text_input(f"Símbolo", key=f"comp_tk_{i}_{j}").strip().upper()
                 bc = st.number_input(f"Barrera cupón (%)", min_value=1, max_value=100, value=60, key=f"comp_bc_{i}_{j}") / 100
-                bcap = st.number_input(f"Barrera capital (%)", min_value=1, max_value=100, value=60, key=f"comp_bcap_{i}_{j}") / 100
+                bcap = st.number_input(f"Barrera/buffer capital (%)", min_value=1, max_value=100, value=60, key=f"comp_bcap_{i}_{j}") / 100
                 cl = st.number_input(f"Nivel de call (%)", min_value=50, max_value=200, value=100, key=f"comp_cl_{i}_{j}") / 100
                 if tk:
                     tickers_nota.append({"ticker": tk, "barrera_cupon_pct": bc, "barrera_capital_pct": bcap, "call_level_pct": cl})
             cupon_anual = st.number_input(f"Cupón anual (%)", min_value=0.0, max_value=100.0, value=25.0, key=f"comp_cupon_{i}") / 100
             meses_venc = st.number_input(f"Meses hasta vencimiento", min_value=1, max_value=60, value=36, key=f"comp_meses_{i}")
-            periodicidad = st.selectbox(f"Periodicidad", [1, 3], format_func=lambda x: "Mensual" if x == 1 else "Trimestral", key=f"comp_period_{i}")
-            notas_input.append({"nombre": nombre, "tickers": tickers_nota, "cupon_anual": cupon_anual, "meses_venc": meses_venc, "periodicidad": periodicidad})
+            periodicidad = st.selectbox(
+                f"Periodicidad de pago del cupón", [1, 3, 6],
+                format_func=lambda x: {1: "Mensual", 3: "Trimestral", 6: "Semestral"}[x],
+                key=f"comp_period_{i}",
+                help="Mensual es preferible: capital rota más rápido y el riesgo de cada evento individual es menor.",
+            )
+            frecuencia_call = st.selectbox(
+                f"Frecuencia de call (meses)", [1, 3, 6, 12], index=1, key=f"comp_callfreq_{i}",
+                help="Cada cuánto puede el emisor cancelar la nota. 3 meses suele ser lo preferible — no es el factor más importante.",
+            )
+            tipo_proteccion = st.selectbox(
+                f"Tipo de protección de capital", ["barrera", "buffer"],
+                format_func=lambda x: "Barrera (pérdida total si rompe)" if x == "barrera" else "Buffer (protege el % indicado, solo se pierde el exceso)",
+                key=f"comp_tipoprot_{i}",
+                help=(
+                    "Barrera europea: si el peor activo rompe el nivel al vencimiento, el fondo asume la caída COMPLETA "
+                    "del activo desde el nivel inicial. Buffer: el fondo está protegido hasta ese %; si la caída es mayor, "
+                    "solo se pierde el exceso. A igualdad de nivel nominal, el buffer siempre es menos arriesgado."
+                ),
+            )
+            notas_input.append({
+                "nombre": nombre, "tickers": tickers_nota, "cupon_anual": cupon_anual, "meses_venc": meses_venc,
+                "periodicidad": periodicidad, "frecuencia_call": frecuencia_call, "tipo_proteccion": tipo_proteccion,
+            })
 
     col_cap, col_tasa = st.columns(2)
     with col_cap:
@@ -5480,24 +5794,27 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             if not tickers_datos:
                 continue
 
-            eventos = _generar_horario_eventos(nota["meses_venc"], nota["periodicidad"])
-            sim = simular_montecarlo_nota(tickers_datos, eventos)
+            eventos = _generar_horario_eventos(nota["meses_venc"], nota["periodicidad"], nota["frecuencia_call"])
+            sim = simular_montecarlo_nota(tickers_datos, eventos, tipo_proteccion=nota["tipo_proteccion"])
 
             eventos_cupon = [e for e in sim["eventos"] if e["tipo"] == "cupon"]
             prob_cupon_media = float(np.mean([e["probabilidad"] for e in eventos_cupon])) if eventos_cupon else 0.0
             cupon_periodo = nota["cupon_anual"] / (12 / nota["periodicidad"])
-            n_periodos = len(eventos_cupon)
             rentabilidad_esperada_cupones = sum(e["probabilidad"] * cupon_periodo for e in eventos_cupon) * (12 / nota["periodicidad"]) / (nota["meses_venc"] / 12)
             perdida_esperada_anualizada = sim["probabilidad_perdida_capital"] * sim["perdida_pct_promedio_si_incumple"] / 100 / (nota["meses_venc"] / 12)
             rentabilidad_neta_esperada = rentabilidad_esperada_cupones - perdida_esperada_anualizada
+            margen_sobre_inversor = nota["cupon_anual"] - tasa_inversor_pct
 
             resultados_notas.append({
                 "nombre": nota["nombre"], "tickers": [t["ticker"] for t in nota["tickers"]],
                 "tickers_full": nota["tickers"],
                 "cupon_anual": nota["cupon_anual"], "meses_venc": nota["meses_venc"],
+                "periodicidad": nota["periodicidad"], "frecuencia_call": nota["frecuencia_call"],
+                "tipo_proteccion": nota["tipo_proteccion"],
                 "prob_cupon_media": prob_cupon_media, "prob_call_total": sim["probabilidad_call_total"],
                 "prob_perdida_capital": sim["probabilidad_perdida_capital"], "perdida_pct_promedio": sim["perdida_pct_promedio_si_incumple"],
-                "rentabilidad_esperada_neta": rentabilidad_neta_esperada, "fundamentales": fundamentales_nota,
+                "rentabilidad_esperada_neta": rentabilidad_neta_esperada, "margen_sobre_inversor": margen_sobre_inversor,
+                "fundamentales": fundamentales_nota,
             })
 
     if not resultados_notas:
@@ -5505,25 +5822,67 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
         return
 
     # --- Score compuesto 0-100 para rankear las candidatas de un vistazo ---
-    # 45% prob. de cobrar el cupón, 30% (1 - prob. de pérdida de capital), 25% rentabilidad neta
-    # esperada normalizada entre las candidatas comparadas (min-max, no es un valor absoluto).
+    #
+    # Pesos y su porqué (así se decidió con el fondo, no son arbitrarios):
+    #  35% Probabilidad de cobrar el cupón (worst-of, por periodo)  -> lo MÁS importante: es el evento
+    #      recurrente que paga el spread mes a mes. Esta probabilidad YA viene de Monte Carlo evaluando
+    #      la barrera de cupón concreta de cada ticker — si el estudio dice que casi nunca la rompe,
+    #      esta nota puntúa alto AUNQUE la acción sea muy volátil o pueda caer mucho en términos
+    #      absolutos. No se juzga por volatilidad genérica, se juzga por si la barrera se rompe o no.
+    #  20% Margen sobre la tasa pagada al inversor, normalizado entre candidatas. Un cupón que apenas
+    #      supera lo que pagamos al inversor no compensa el riesgo — el fondo absorbe toda la pérdida
+    #      si la nota falla, así que un 10% de margen no justifica arriesgar mucho capital.
+    #  20% (1 - probabilidad de pérdida de capital), YA AJUSTADA por si la protección es barrera o
+    #      buffer (el Monte Carlo calcula la pérdida esperada distinto en cada caso: con buffer solo
+    #      se pierde el exceso sobre el colchón, con barrera se pierde la caída completa).
+    #  10% Periodicidad de pago: mensual puntúa más que trimestral, que puntúa más que semestral
+    #      (mismo capital rotando y cobrando más veces reduce el riesgo de cada evento individual).
+    #  10% Frecuencia de call cercana a 3 meses (preferible, pero es el factor menos importante).
+    #   5% Tipo de protección de capital: buffer puntúa algo mejor que barrera a igualdad de nivel
+    #      nominal, porque amortigua la cola de pérdida en vez de transferirla completa.
     rentas = [r["rentabilidad_esperada_neta"] for r in resultados_notas]
     renta_min, renta_max = min(rentas), max(rentas)
+    margenes = [r["margen_sobre_inversor"] for r in resultados_notas]
+    margen_min, margen_max = min(margenes), max(margenes)
+
+    def _score_periodicidad(periodicidad):
+        return {1: 1.0, 3: 0.6, 6: 0.3}.get(periodicidad, 0.5)
+
+    def _score_call(frecuencia_call):
+        # 3 meses = óptimo; cuanto más se aleja (en cualquier dirección), menos puntúa.
+        return max(0.0, 1 - abs(frecuencia_call - 3) / 12)
+
     for r in resultados_notas:
-        renta_norm = 0.5 if renta_max == renta_min else (r["rentabilidad_esperada_neta"] - renta_min) / (renta_max - renta_min)
-        score = 100 * (0.45 * r["prob_cupon_media"] + 0.30 * (1 - r["prob_perdida_capital"]) + 0.25 * renta_norm)
+        margen_norm = 0.5 if margen_max == margen_min else (r["margen_sobre_inversor"] - margen_min) / (margen_max - margen_min)
+        # Si el margen es negativo o casi nulo, penaliza fuerte independientemente de la normalización relativa
+        penalizacion_margen_bajo = 1.0 if r["margen_sobre_inversor"] > 0.05 else max(0.0, r["margen_sobre_inversor"] / 0.05)
+        score = 100 * (
+            0.35 * r["prob_cupon_media"]
+            + 0.20 * margen_norm * penalizacion_margen_bajo
+            + 0.20 * (1 - r["prob_perdida_capital"])
+            + 0.10 * _score_periodicidad(r["periodicidad"])
+            + 0.10 * _score_call(r["frecuencia_call"])
+            + 0.05 * (1.0 if r["tipo_proteccion"] == "buffer" else 0.6)
+        )
         r["score"] = max(0.0, min(100.0, score))
     resultados_notas.sort(key=lambda r: r["score"], reverse=True)
 
     st.markdown("---")
     st.markdown("### 📊 Resultados de la simulación")
     st.caption(
-        "**Score** (0-100): combina 45% probabilidad de cobrar cupón, 30% probabilidad de NO perder capital, "
-        "25% rentabilidad neta esperada relativa entre las candidatas comparadas. Ordenado de mejor a peor. "
-        "Es una ayuda para rankear rápido, no sustituye leer el detalle de cada nota."
+        "**Score** (0-100): 35% probabilidad de cobrar el cupón (lo más importante — se juzga por si "
+        "rompe SU barrera, no por volatilidad general), 20% margen sobre la tasa que pagamos al "
+        "inversor, 20% probabilidad de NO perder capital (ajustada por barrera/buffer), 10% "
+        "periodicidad de pago (mensual > trimestral > semestral), 10% cercanía del call a 3 meses, "
+        "5% tipo de protección (buffer > barrera). Ordenado de mejor a peor — ayuda a rankear rápido, "
+        "no sustituye leer el detalle de cada nota."
     )
     df_resumen = pd.DataFrame([{
         "🏆 Score": f"{r['score']:.0f}/100", "Nota": r["nombre"], "Tickers": ", ".join(r["tickers"]), "Cupón anual": f"{r['cupon_anual']*100:.1f}%",
+        "Margen vs. inversor": f"{r['margen_sobre_inversor']*100:.2f}%",
+        "Pago": {1: "Mensual", 3: "Trimestral", 6: "Semestral"}[r["periodicidad"]],
+        "Call cada": f"{r['frecuencia_call']} m",
+        "Protección": "Buffer" if r["tipo_proteccion"] == "buffer" else "Barrera",
         "Prob. media cupón/periodo": f"{r['prob_cupon_media']*100:.1f}%", "Prob. call (total)": f"{r['prob_call_total']*100:.1f}%",
         "Prob. pérdida capital": f"{r['prob_perdida_capital']*100:.1f}%", "Pérdida media si incumple": f"{r['perdida_pct_promedio']:.1f}%",
         "Rentabilidad neta esperada (anual)": f"{r['rentabilidad_esperada_neta']*100:.2f}%",
@@ -5535,16 +5894,18 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     st.markdown("### 🏢 Compañías subyacentes de cada nota")
     bloques_informe = [f"# Informe de comparación de notas — {pd.Timestamp.now().strftime('%d/%m/%Y')}"]
     for r in resultados_notas:
-        st.markdown(f"#### {r['nombre']}")
-        margen_vs_inversor = r["cupon_anual"] - tasa_inversor_pct
+        st.markdown(f"#### {r['nombre']}  ·  Score {r['score']:.0f}/100")
+        margen_vs_inversor = r["margen_sobre_inversor"]
+        pago_txt = {1: "mensual", 3: "trimestral", 6: "semestral"}[r["periodicidad"]]
+        proteccion_txt = "buffer (protege el %, pérdida solo del exceso)" if r["tipo_proteccion"] == "buffer" else "barrera (pérdida total si rompe)"
         st.caption(
-            f"Cupón nota: {r['cupon_anual']*100:.2f}% anual · Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual · "
-            f"Margen bruto teórico (antes de aplicar probabilidades de cobro): {margen_vs_inversor*100:.2f}%"
+            f"Cupón nota: {r['cupon_anual']*100:.2f}% anual, pago {pago_txt} · Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual · "
+            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}% · Call cada {r['frecuencia_call']} meses · Protección de capital: {proteccion_txt}"
         )
-        bloques_informe.append(f"### {r['nombre']}")
+        bloques_informe.append(f"### {r['nombre']} (score {r['score']:.0f}/100)")
         bloques_informe.append(
-            f"Cupón nota: {r['cupon_anual']*100:.2f}% anual. Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual. "
-            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}%."
+            f"Cupón nota: {r['cupon_anual']*100:.2f}% anual, pago {pago_txt}. Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual. "
+            f"Margen bruto teórico: {margen_vs_inversor*100:.2f}%. Call cada {r['frecuencia_call']} meses. Protección de capital: {proteccion_txt}."
         )
         colchones_nota = []
         colchones_cupon_nota = []
@@ -5591,10 +5952,14 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     with st.spinner("Generando recomendación..."):
         resumen_texto = "\n".join(
             f"- {r['nombre']} ({', '.join(r['tickers'])}): cupón {r['cupon_anual']*100:.1f}% anual, "
-            f"prob. media de cobro por periodo {r['prob_cupon_media']*100:.1f}%, prob. call total {r['prob_call_total']*100:.1f}%, "
-            f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%), "
+            f"pago {'mensual' if r['periodicidad']==1 else ('trimestral' if r['periodicidad']==3 else 'semestral')}, "
+            f"call cada {r['frecuencia_call']} meses, protección de capital tipo {r['tipo_proteccion']}, "
+            f"score compuesto {r['score']:.0f}/100, "
+            f"prob. media de cobro de cupón por periodo {r['prob_cupon_media']*100:.1f}%, prob. call total {r['prob_call_total']*100:.1f}%, "
+            f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%, "
+            f"ya calculada según si la protección es barrera o buffer), "
             f"rentabilidad neta esperada anualizada {r['rentabilidad_esperada_neta']*100:.2f}%, "
-            f"margen bruto teórico sobre lo que pagamos al inversor: {(r['cupon_anual'] - tasa_inversor_pct)*100:.2f}%, "
+            f"margen bruto teórico sobre lo que pagamos al inversor: {r['margen_sobre_inversor']*100:.2f}%, "
             f"colchón hasta la barrera de capital por ticker: {', '.join(f'{tk}={(1 - t['barrera_capital_pct'])*100:.1f}%' for tk, t in zip(r['tickers'], r['tickers_full']))}, "
             f"colchón hasta la barrera de cupón por ticker: {', '.join(f'{tk}={(1 - t['barrera_cupon_pct'])*100:.1f}%' for tk, t in zip(r['tickers'], r['tickers_full']))}"
             for r in resultados_notas
@@ -5605,33 +5970,46 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 "https://api.anthropic.com/v1/messages",
                 headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                 json={
-                    "model": "claude-sonnet-4-5", "max_tokens": 1200,
+                    "model": "claude-sonnet-4-5", "max_tokens": 1400,
                     "system": (
                         "Eres un analista de notas estructuradas para un fondo que se financia captando capital de "
                         "inversores a una tasa fija y desplegándolo en estas notas — el beneficio del fondo es el "
                         "spread entre lo que cobra la nota y lo que paga al inversor. Se te dan métricas YA CALCULADAS "
-                        "(probabilidades de Monte Carlo, rentabilidad esperada, margen bruto teórico sobre la tasa del "
-                        f"inversor —que es {tasa_inversor_pct*100:.2f}% anual— y el colchón hasta la barrera de capital "
-                        "y hasta la barrera de cupón de cada ticker) de varias notas candidatas — NO recalcules ni "
-                        "inventes ningún número, solo razona sobre los que se te dan. El criterio de decisión es: "
-                        "maximizar rentabilidad, pero minimizando riesgo salvo que el riesgo adicional sea MODERADO y "
-                        "claramente compensado por la rentabilidad. Ten en cuenta explícitamente tres cosas: (1) el "
-                        "margen sobre la tasa del inversor tiene que ser sustancial para que compense el riesgo "
-                        "asumido por el fondo — un cupón que apenas supere la tasa del inversor no es atractivo aunque "
-                        "la probabilidad de cobro sea alta, porque el fondo absorbe toda la pérdida si la nota falla; "
-                        "(2) hay DOS barreras distintas y hay que juzgarlas por separado — la barrera de CUPÓN decide "
-                        "si se cobra el interés cada mes/trimestre (evento recurrente, normalmente más exigente, un "
-                        "colchón ajustado aquí significa perder cupones puntuales aunque el capital esté a salvo) y la "
-                        "barrera de CAPITAL solo se juzga una vez al vencimiento (normalmente más laxa); (3) el "
-                        "criterio correcto de riesgo en ambos casos NO es la volatilidad genérica de la acción ni si "
-                        "tiene noticias negativas — es si una caída realista y plausible se queda por encima de cada "
-                        "barrera. Si el colchón hasta una barrera es amplio frente a las caídas que manejan los "
-                        "analistas, esa nota es atractiva en ese frente pese al ruido de corto plazo, porque el cupón "
-                        "ya compensa ese riesgo puntual. Puede recomendar repartir entre varias notas o poner todo el "
-                        f"capital en una sola si está claramente justificado. Capital disponible total: ${capital_disponible:,.2f}. "
-                        "Da una recomendación de reparto de capital en dólares para cada nota, con el razonamiento "
-                        "concreto (qué compensa qué, incluyendo el margen sobre la tasa del inversor y los colchones "
-                        "hasta ambas barreras por separado), en español, conciso pero completo."
+                        "(probabilidades de Monte Carlo, score compuesto, rentabilidad esperada, margen bruto teórico "
+                        f"sobre la tasa del inversor —que es {tasa_inversor_pct*100:.2f}% anual—, periodicidad de pago, "
+                        "frecuencia de call, tipo de protección de capital y el colchón hasta la barrera de capital y "
+                        "hasta la barrera de cupón de cada ticker) de varias notas candidatas — NO recalcules ni "
+                        "inventes ningún número, solo razona sobre los que se te dan. Aplica ESTAS reglas de decisión, "
+                        "en este orden de importancia:\n\n"
+                        "1) LO MÁS IMPORTANTE es la probabilidad de cobrar el cupón, porque es el evento recurrente "
+                        "que genera el spread mes a mes. Esa probabilidad ya viene calculada evaluando la barrera de "
+                        "CUPÓN concreta de cada ticker. El criterio correcto NUNCA es 'esta acción es muy volátil' o "
+                        "'esta acción puede caer mucho' en abstracto — es si, según el estudio, una caída realista y "
+                        "plausible se queda por encima de SU barrera de cupón. Si el colchón es amplio frente a lo que "
+                        "manejan los analistas y la probabilidad de cobro es alta, esa nota es atractiva en ese frente "
+                        "aunque otro ticker de otra nota parezca 'menos volátil' en términos generales — NO compares "
+                        "acciones por cuánto pueden bajar en abstracto, compara por si rompen SU barrera concreta.\n\n"
+                        "2) El margen sobre la tasa del inversor tiene que ser SUSTANCIAL para justificar el riesgo — "
+                        "un cupón que apenas supera lo que pagamos al inversor (ej. margen de 10 puntos) NO es "
+                        "atractivo aunque la probabilidad de cobro sea alta, porque el fondo absorbe TODA la pérdida "
+                        "de capital si la nota falla, mientras que al inversor se le sigue pagando igual. No arriesgues "
+                        "capital del fondo por un margen pequeño.\n\n"
+                        "3) Hay DOS barreras distintas y hay que juzgarlas por separado — la de CUPÓN (recurrente, "
+                        "normalmente más exigente) y la de CAPITAL (una sola vez, al vencimiento, normalmente más "
+                        "laxa). Dentro de la barrera de capital, distingue explícitamente BARRERA (si rompe, el fondo "
+                        "asume la caída completa del peor activo, sin suelo) de BUFFER (el fondo está protegido hasta "
+                        "el % indicado y solo pierde el exceso) — a igualdad de nivel nominal, el buffer es "
+                        "estructuralmente menos arriesgado y debe valorarse mejor, y la pérdida media si incumple que "
+                        "se te da YA refleja esa diferencia.\n\n"
+                        "4) La periodicidad de pago importa: mensual es preferible a trimestral, que es preferible a "
+                        "semestral (capital rotando más rápido, menor riesgo por evento individual) — factor "
+                        "secundario, no decisivo por sí solo.\n\n"
+                        "5) La frecuencia de call cercana a 3 meses es preferible — factor MENOR, casi un desempate, "
+                        "no debe pesar más que el cupón, el margen o el riesgo de capital.\n\n"
+                        "Puede recomendar repartir entre varias notas o poner todo el capital en una sola si está "
+                        f"claramente justificado. Capital disponible total: ${capital_disponible:,.2f}. Da una "
+                        "recomendación de reparto de capital en dólares para cada nota, con el razonamiento concreto "
+                        "siguiendo el orden de prioridad anterior, en español, conciso pero completo."
                     ),
                     "messages": [{"role": "user", "content": f"Notas candidatas:\n{resumen_texto}\n\nRecomienda cómo repartir el capital disponible."}],
                 },
@@ -5649,16 +6027,32 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     bloques_informe.append("### 🎯 Recomendación de reparto")
     bloques_informe.append(texto_recomendacion or "No se pudo generar una recomendación.")
 
-    # --- Descarga del informe completo en PDF ---
+    # --- Descarga del informe completo: PDF y memo de directorio (PPTX) ---
     st.markdown("---")
-    with st.spinner("Preparando PDF..."):
-        pdf_bytes = _informe_ia_a_pdf("Comparador de notas — Informe", "\n\n".join(bloques_informe))
-    st.download_button(
-        "⬇️ Descargar este informe en PDF",
-        data=pdf_bytes,
-        file_name=f"comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf",
-        mime="application/pdf",
-    )
+    col_pdf, col_pptx = st.columns(2)
+    with col_pdf:
+        with st.spinner("Preparando PDF..."):
+            pdf_bytes = _informe_ia_a_pdf("Comparador de notas — Informe", "\n\n".join(bloques_informe))
+        st.download_button(
+            "⬇️ Descargar este informe en PDF",
+            data=pdf_bytes,
+            file_name=f"comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf",
+            mime="application/pdf",
+        )
+    with col_pptx:
+        with st.spinner("Preparando memo de directorio (PowerPoint)..."):
+            try:
+                pptx_bytes = generar_memo_directorio_notas_pptx(
+                    resultados_notas, texto_recomendacion, capital_disponible, tasa_inversor_pct,
+                )
+                st.download_button(
+                    "📊 Descargar memo de directorio (PowerPoint)",
+                    data=pptx_bytes,
+                    file_name=f"memo_directorio_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+            except Exception as e:
+                st.error(f"No se pudo generar el PowerPoint: {e}")
 
 
 
