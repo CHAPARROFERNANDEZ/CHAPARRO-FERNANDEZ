@@ -1784,7 +1784,7 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
 
 
 def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_simulaciones: int = 5000,
-                             tipo_proteccion: str = "barrera") -> dict:
+                             tipo_proteccion: str = "barrera", tiene_memoria: bool = False) -> dict:
     """
     Simulación Monte Carlo (movimiento browniano geométrico con deriva configurable + shocks de
     earnings) para una nota worst-of con uno o varios tickers subyacentes.
@@ -1808,6 +1808,11 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
         - "buffer": el fondo está protegido hasta el tamaño del buffer (1 - barrera_capital_pct); si
           la caída del peor activo supera ese buffer, solo se pierde el EXCESO sobre el buffer.
           Para la misma barrera nominal, un buffer siempre pierde menos (o igual) que una barrera.
+    tiene_memoria: si True, un periodo en el que NO se cumple la barrera de cupón no se pierde sin
+        más — se acumula, y en el primer periodo futuro en el que SÍ se cumpla la barrera, se cobran
+        de golpe TODOS los cupones acumulados desde el último pago (efecto retroactivo). Solo se
+        pierden definitivamente los periodos acumulados que quedan sin recuperar hasta el vencimiento
+        (la "cola" final si la nota nunca vuelve a cumplir la barrera antes de vencer).
 
     LIMITACIÓN HONESTA: asume independencia entre los distintos tickers (no modela correlación
     real entre acciones) y usa volatilidad histórica (no implícita de opciones, más precisa pero
@@ -1840,6 +1845,7 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
 
     resultados_eventos = []
     ya_llamada = np.zeros(n_simulaciones, dtype=bool)
+    cupones_acumulados = np.zeros(n_simulaciones)  # solo se usa si tiene_memoria=True
     for evento in sorted(dias_hasta_eventos, key=lambda e: e["dias"]):
         idx_dia = min(evento["dias"], max_dias) - 1
         cumple_todas_cupon = np.ones(n_simulaciones, dtype=bool)
@@ -1853,8 +1859,21 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
             cumple_todas_capital &= (precio_dia >= precio_inicial * td["barrera_capital_pct"])
 
         if evento["tipo"] == "cupon":
-            prob = float(np.mean(cumple_todas_cupon & ~ya_llamada))
-            resultados_eventos.append({"tipo": "cupon", "dias": evento["dias"], "probabilidad": prob})
+            activo = ~ya_llamada
+            cumple = cumple_todas_cupon & activo
+            prob = float(np.mean(cumple))  # prob. de cobrar ALGO este periodo concreto (con o sin memoria)
+            if tiene_memoria:
+                # Quien cumple cobra el cupón de este periodo MÁS todo lo acumulado desde el último pago.
+                # Quien no cumple (y sigue activo) acumula un periodo más para el futuro.
+                pagos_este_evento = np.where(cumple, 1.0 + cupones_acumulados, 0.0)
+                cupones_acumulados = np.where(cumple, 0.0, np.where(activo, cupones_acumulados + 1.0, cupones_acumulados))
+            else:
+                pagos_este_evento = np.where(cumple, 1.0, 0.0)
+            cupones_pagados_esperado = float(np.mean(pagos_este_evento))
+            resultados_eventos.append({
+                "tipo": "cupon", "dias": evento["dias"], "probabilidad": prob,
+                "cupones_pagados_esperado": cupones_pagados_esperado,
+            })
         elif evento["tipo"] == "call":
             call_ahora = cumple_todas_call & ~ya_llamada
             prob = float(np.mean(call_ahora))
@@ -1889,6 +1908,9 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
     evento_venc = next((e for e in resultados_eventos if e["tipo"] == "vencimiento_perdida_capital"), None)
     prob_perdida_capital = evento_venc["probabilidad"] if evento_venc else 0.0
     perdida_pct_promedio = evento_venc.get("perdida_pct_promedio", 0.0) if evento_venc else 0.0
+    eventos_cupon_calc = [e for e in resultados_eventos if e["tipo"] == "cupon"]
+    cupones_totales_esperados = float(sum(e["cupones_pagados_esperado"] for e in eventos_cupon_calc))
+    cupones_perdidos_definitivo_esperado = float(np.mean(cupones_acumulados)) if tiene_memoria else None
 
     return {
         "eventos": resultados_eventos,
@@ -1897,6 +1919,9 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
         "perdida_pct_promedio_si_incumple": perdida_pct_promedio,
         "n_simulaciones": n_simulaciones,
         "tipo_proteccion": tipo_proteccion,
+        "tiene_memoria": tiene_memoria,
+        "cupones_totales_esperados": cupones_totales_esperados,
+        "cupones_perdidos_definitivo_esperado": cupones_perdidos_definitivo_esperado,
     }
 
 
@@ -6006,10 +6031,21 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     "un mes cualquiera de un mes con resultados."
                 ),
             )
+            tiene_memoria = st.checkbox(
+                "Tiene memoria (cupones perdidos se recuperan)", value=True, key=f"comp_memoria_{i}",
+                help=(
+                    "Si un periodo NO cumple la barrera de cupón, no se pierde sin más: se acumula, y el primer "
+                    "periodo futuro en el que SÍ se cumpla la barrera, se cobran de golpe TODOS los cupones "
+                    "acumulados desde el último pago (efecto retroactivo). Solo se pierden definitivamente los que "
+                    "queden acumulados sin recuperar hasta el vencimiento. Revisá el term sheet: si dice 'memory "
+                    "coupon' o similar, va marcado; si no lo dice, probablemente sea sin memoria."
+                ),
+            )
             notas_input.append({
                 "nombre": nombre, "tickers": tickers_nota, "cupon_anual": cupon_anual, "meses_venc": meses_venc,
                 "periodicidad": periodicidad, "frecuencia_call": frecuencia_call, "tipo_proteccion": tipo_proteccion,
                 "modo_deriva": modo_deriva, "deriva_manual_pct": deriva_manual_pct, "modelar_earnings": modelar_earnings,
+                "tiene_memoria": tiene_memoria,
             })
 
     col_cap, col_tasa = st.columns(2)
@@ -6063,12 +6099,16 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 continue
 
             eventos = _generar_horario_eventos(nota["meses_venc"], nota["periodicidad"], nota["frecuencia_call"])
-            sim = simular_montecarlo_nota(tickers_datos, eventos, tipo_proteccion=nota["tipo_proteccion"])
+            sim = simular_montecarlo_nota(
+                tickers_datos, eventos, tipo_proteccion=nota["tipo_proteccion"], tiene_memoria=nota["tiene_memoria"],
+            )
 
             eventos_cupon = [e for e in sim["eventos"] if e["tipo"] == "cupon"]
             prob_cupon_media = float(np.mean([e["probabilidad"] for e in eventos_cupon])) if eventos_cupon else 0.0
             cupon_periodo = nota["cupon_anual"] / (12 / nota["periodicidad"])
-            rentabilidad_esperada_cupones = sum(e["probabilidad"] * cupon_periodo for e in eventos_cupon) * (12 / nota["periodicidad"]) / (nota["meses_venc"] / 12)
+            # Con memoria, "cupones_pagados_esperado" ya incluye el cobro retroactivo de periodos
+            # perdidos anteriores — por eso se usa esto (y no solo "probabilidad") para la rentabilidad.
+            rentabilidad_esperada_cupones = sum(e["cupones_pagados_esperado"] * cupon_periodo for e in eventos_cupon) * (12 / nota["periodicidad"]) / (nota["meses_venc"] / 12)
             perdida_esperada_anualizada = sim["probabilidad_perdida_capital"] * sim["perdida_pct_promedio_si_incumple"] / 100 / (nota["meses_venc"] / 12)
             rentabilidad_neta_esperada = rentabilidad_esperada_cupones - perdida_esperada_anualizada
             margen_sobre_inversor = nota["cupon_anual"] - tasa_inversor_pct
@@ -6080,6 +6120,10 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 "periodicidad": nota["periodicidad"], "frecuencia_call": nota["frecuencia_call"],
                 "tipo_proteccion": nota["tipo_proteccion"],
                 "modo_deriva": nota["modo_deriva"], "modelar_earnings": nota["modelar_earnings"],
+                "tiene_memoria": nota["tiene_memoria"],
+                "cupones_totales_esperados": sim["cupones_totales_esperados"],
+                "cupones_totales_periodos": len(eventos_cupon),
+                "cupones_perdidos_definitivo_esperado": sim.get("cupones_perdidos_definitivo_esperado"),
                 "tickers_datos_sim": tickers_datos,  # incluye drift_anual_pct/salto_earnings_pct usados, para el informe
                 "prob_cupon_media": prob_cupon_media, "prob_call_total": sim["probabilidad_call_total"],
                 "prob_perdida_capital": sim["probabilidad_perdida_capital"], "perdida_pct_promedio": sim["perdida_pct_promedio_si_incumple"],
@@ -6151,9 +6195,11 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
         "🏆 Score": f"{r['score']:.0f}/100", "Nota": r["nombre"], "Tickers": ", ".join(r["tickers"]), "Cupón anual": f"{r['cupon_anual']*100:.1f}%",
         "Margen vs. inversor": f"{r['margen_sobre_inversor']*100:.2f}%",
         "Pago": {1: "Mensual", 3: "Trimestral", 6: "Semestral"}[r["periodicidad"]],
+        "Memoria": "Sí" if r.get("tiene_memoria") else "No",
         "Call cada": f"{r['frecuencia_call']} m",
         "Protección": "Buffer" if r["tipo_proteccion"] == "buffer" else "Barrera",
         "Prob. media cupón/periodo": f"{r['prob_cupon_media']*100:.1f}%", "Prob. call (total)": f"{r['prob_call_total']*100:.1f}%",
+        "Cupones esperados": f"{r['cupones_totales_esperados']:.1f}/{r['cupones_totales_periodos']}",
         "Prob. pérdida capital": f"{r['prob_perdida_capital']*100:.1f}%", "Pérdida media si incumple": f"{r['perdida_pct_promedio']:.1f}%",
         "Rentabilidad neta esperada (anual)": f"{r['rentabilidad_esperada_neta']*100:.2f}%",
     } for r in resultados_notas])
@@ -6175,16 +6221,19 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
         proteccion_txt = "buffer (protege el %, pérdida solo del exceso)" if r["tipo_proteccion"] == "buffer" else "barrera (pérdida total si rompe)"
         deriva_txt = deriva_txt_map.get(r.get("modo_deriva"), "neutral (sin deriva)")
         earnings_txt = "sí" if r.get("modelar_earnings") else "no"
+        memoria_txt = "con memoria (recupera cupones perdidos)" if r.get("tiene_memoria") else "sin memoria (cupón perdido, perdido)"
         st.caption(
             f"Cupón nota: {r['cupon_anual']*100:.2f}% anual, pago {pago_txt} · Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual · "
             f"Margen bruto teórico: {margen_vs_inversor*100:.2f}% · Call cada {r['frecuencia_call']} meses · Protección de capital: {proteccion_txt} · "
-            f"Deriva simulación: {deriva_txt} · Shock de earnings: {earnings_txt}"
+            f"Deriva simulación: {deriva_txt} · Shock de earnings: {earnings_txt} · Cupón: {memoria_txt} · "
+            f"Cupones esperados: {r['cupones_totales_esperados']:.1f} de {r['cupones_totales_periodos']} periodos"
         )
         bloques_informe.append(f"### {r['nombre']} (score {r['score']:.0f}/100)")
         bloques_informe.append(
             f"Cupón nota: {r['cupon_anual']*100:.2f}% anual, pago {pago_txt}. Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual. "
             f"Margen bruto teórico: {margen_vs_inversor*100:.2f}%. Call cada {r['frecuencia_call']} meses. Protección de capital: {proteccion_txt}. "
-            f"Deriva usada en la simulación: {deriva_txt}. Shock de earnings modelado: {earnings_txt}."
+            f"Deriva usada en la simulación: {deriva_txt}. Shock de earnings modelado: {earnings_txt}. Cupón {memoria_txt}. "
+            f"Cupones totales esperados a lo largo de la vida de la nota: {r['cupones_totales_esperados']:.1f} de {r['cupones_totales_periodos']} periodos posibles."
         )
         colchones_nota = []
         colchones_cupon_nota = []
@@ -6251,6 +6300,8 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             f"call cada {r['frecuencia_call']} meses, protección de capital tipo {r['tipo_proteccion']}, "
             f"deriva de precio usada en la simulación: {deriva_txt_map.get(r.get('modo_deriva'), 'neutral')}, "
             f"shock de earnings modelado: {'sí' if r.get('modelar_earnings') else 'no'}, "
+            f"cupón con memoria: {'sí, recupera cupones perdidos retroactivamente' if r.get('tiene_memoria') else 'no, cupón perdido es definitivo'}, "
+            f"cupones totales esperados a lo largo de la vida: {r['cupones_totales_esperados']:.1f} de {r['cupones_totales_periodos']} periodos posibles, "
             f"score compuesto {r['score']:.0f}/100, "
             f"prob. media de cobro de cupón por periodo {r['prob_cupon_media']*100:.1f}%, prob. call total {r['prob_call_total']*100:.1f}%, "
             f"prob. pérdida de capital al vencimiento {r['prob_perdida_capital']*100:.1f}% (pérdida media si ocurre: {r['perdida_pct_promedio']:.1f}%, "
@@ -6478,8 +6529,14 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
 
     # --- Probabilidades Monte Carlo para la nota completa (worst-of) ---
     if tickers_datos:
+        tiene_memoria_nota = False
+        if not control_nota.empty and "tiene_memoria" in control_nota.columns:
+            val_memoria = control_nota["tiene_memoria"].dropna()
+            if not val_memoria.empty:
+                tiene_memoria_nota = str(val_memoria.iloc[0]).strip().upper() == "SI"
+        st.caption(f"Cupón con memoria (dato de CONTROL_NOTAS): {'Sí' if tiene_memoria_nota else 'No'}")
         with st.spinner("Ejecutando simulación Monte Carlo..."):
-            sim = simular_montecarlo_nota(tickers_datos, eventos)
+            sim = simular_montecarlo_nota(tickers_datos, eventos, tiene_memoria=tiene_memoria_nota)
         st.markdown("### 🎲 Probabilidades (simulación Monte Carlo, worst-of)")
         eventos_cupon = [e for e in sim["eventos"] if e["tipo"] == "cupon"]
         eventos_call = [e for e in sim["eventos"] if e["tipo"] == "call"]
@@ -6498,7 +6555,14 @@ def _tab_analisis_nota_existente(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_
             st.line_chart(df_prob_cupon, x="Días", y="Prob. cupón (%)", height=300)
             with st.expander("Ver datos exactos de la gráfica"):
                 st.dataframe(df_prob_cupon, use_container_width=True, hide_index=True)
-        st.caption("⚠️ Estimación con volatilidad histórica, sin correlación entre tickers ni deriva de precio — no es una predicción, es una probabilidad bajo supuestos.")
+        if tiene_memoria_nota:
+            st.metric("Cupones totales esperados (con efecto retroactivo de memoria)",
+                      f"{sim['cupones_totales_esperados']:.1f} de {len(eventos_cupon)} periodos posibles")
+        st.caption(
+            "⚠️ Estimación con volatilidad histórica, sin correlación entre tickers — no es una predicción, es una "
+            "probabilidad bajo supuestos. Esta pantalla usa deriva neutral (sin dirección) y no modela shocks de "
+            "earnings; para esas opciones usá el Comparador de Notas."
+        )
     else:
         st.error(
             "⚠️ No se pudo ejecutar la simulación Monte Carlo porque no se consiguió precio/volatilidad "
