@@ -2815,6 +2815,103 @@ def resumen_alertas_por_nota(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame
     return out.sort_values("peor_variacion_%")
 
 
+def evaluar_calls_posibles_notas(df_cal: pd.DataFrame, df_control: pd.DataFrame, df_calls: pd.DataFrame,
+                                   resumen_riesgo: pd.DataFrame) -> list[dict]:
+    """Devuelve SOLO las notas donde un CALL es objetivamente posible en su próxima fecha de call.
+
+    Criterio (a pedido de Yuri): una nota es 'CALL POSIBLE' cuando, a la vez:
+      1) Tiene una fecha de call futura en CALENDARIO_CALLS.
+      2) TODOS los cupones pagados hasta hoy fueron POSITIVA (nunca hubo observación NEGATIVA /
+         barrera de cupón rota) — se reevalúa cada pago histórico con evaluar_nota_en_fecha,
+         igual que hace preparar_calendario_integrado_notas.
+      3) TODOS los tickers de la nota están HOY en positivo (variación_% >= 0) frente a su
+         precio_compra — usando resumen_riesgo, que viene de construir_resumen_actual_notas_alertas
+         (mismos precios que el semáforo, para que esto nunca pueda divergir de lo que ve Yuri).
+    Si falta algún dato de precio de algún ticker de la nota, esa nota NO se reporta (no se puede
+    confirmar la condición 3 con datos incompletos). Las notas que no cumplen NO se incluyen en el
+    resultado — este es el criterio explícito de Yuri: solo enseñar las que sí son posible call."""
+    resultado = []
+    if df_calls is None or df_calls.empty or df_cal is None or df_cal.empty or df_control is None or df_control.empty:
+        return resultado
+
+    hoy = pd.Timestamp.today().normalize()
+
+    calls = df_calls.copy()
+    col_fecha_call = "fecha_call" if "fecha_call" in calls.columns else ("fecha" if "fecha" in calls.columns else None)
+    if col_fecha_call is None or "nota" not in calls.columns:
+        return resultado
+    calls[col_fecha_call] = pd.to_datetime(calls[col_fecha_call], errors="coerce", dayfirst=True).dt.normalize()
+    calls["nota"] = pd.to_numeric(calls["nota"], errors="coerce")
+    calls_fut = calls.dropna(subset=[col_fecha_call, "nota"])
+    calls_fut = calls_fut[calls_fut[col_fecha_call] >= hoy].sort_values(col_fecha_call)
+    if calls_fut.empty:
+        return resultado
+
+    prox_call_por_nota = calls_fut.groupby("nota")[col_fecha_call].first()
+
+    df_cal_local = df_cal.copy()
+    df_cal_local["fecha"] = pd.to_datetime(df_cal_local["fecha"], errors="coerce")
+
+    for nota_f, fecha_call in prox_call_por_nota.items():
+        nota_id = int(nota_f)
+        dias_restantes = (fecha_call - hoy).days
+
+        # 1) Histórico de cupones: TODOS los pagos pasados de esta nota deben ser != NEGATIVA
+        pagos_pasados = df_cal_local[
+            (df_cal_local["nota"] == nota_id) &
+            (df_cal_local["tipo_evento"] == "PAGO") &
+            (df_cal_local["fecha"].notna()) &
+            (df_cal_local["fecha"] <= hoy)
+        ].sort_values("fecha")
+
+        cupon_siempre_pagado = True
+        n_cupones_evaluados = 0
+        for _, row_pago in pagos_pasados.iterrows():
+            fecha_pago = pd.Timestamp(row_pago["fecha"]).normalize()
+            fecha_obs = obtener_observacion_previa_nota(df_cal_local, nota_id, fecha_pago)
+            if fecha_obs is None:
+                continue
+            resultado_obs, _ = evaluar_nota_en_fecha(df_control, nota_id, fecha_obs, preferida="contingency")
+            n_cupones_evaluados += 1
+            if resultado_obs == "NEGATIVA":
+                cupon_siempre_pagado = False
+                break
+
+        if not cupon_siempre_pagado or n_cupones_evaluados == 0:
+            continue
+
+        # 2) Todos los tickers de la nota en positivo HOY vs precio_compra (mismos precios que el semáforo)
+        sub_control = df_control[pd.to_numeric(df_control.get("nota"), errors="coerce") == nota_id]
+        if sub_control.empty:
+            continue
+        tickers_nota = sub_control["ticker"].astype(str).str.strip().str.upper().unique().tolist()
+
+        if resumen_riesgo is None or resumen_riesgo.empty:
+            continue
+        filas_nota = resumen_riesgo[resumen_riesgo["nota"] == nota_id]
+        if filas_nota.empty or len(filas_nota) < len(tickers_nota):
+            continue  # faltan datos de precio de algún ticker: no se puede confirmar, no se reporta
+
+        variaciones = pd.to_numeric(filas_nota["variacion_%"], errors="coerce")
+        if variaciones.isna().any() or (variaciones < 0).any():
+            continue  # algún ticker sin dato o en negativo: no es call posible
+
+        detalle_precios = "; ".join(
+            f"{r['ticker']}: {r['variacion_%']:+.1f}%" for _, r in filas_nota.iterrows()
+        )
+        resultado.append({
+            "nota": nota_id,
+            "fecha_call": fecha_call,
+            "dias_restantes": dias_restantes,
+            "peor_variacion_%": float(variaciones.min()),
+            "detalle_precios": detalle_precios,
+            "n_cupones_pagados_sin_fallo": n_cupones_evaluados,
+        })
+
+    resultado.sort(key=lambda d: d["dias_restantes"])
+    return resultado
+
+
 def construir_semaforo_consolidado_notas(resumen_notas_actual: pd.DataFrame) -> pd.DataFrame:
     """Semáforo por nota (una fila por nota, no por ticker): para cada nota se toma el ticker con
     PEOR variación (el que manda en un worst-of), y se muestra su precio actual, su precio de
@@ -9898,6 +9995,38 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
                     f"  NOTA_{int(nota_id_ia):02d} | {ticker_ia} | precio_compra=${compra_ia:,.2f} | "
                     f"precio_actual=${actual_ia:,.2f} | variación={variacion_ia:+.1f}% | 🔴 EN RIESGO | "
                     f"(dato adicional) precio_contingencia={contingencia_s} | margen a la barrera={margen_s}"
+                )
+
+        # ── CALLS POSIBLES — LISTA DEFINITIVA, PRE-FILTRADA EN PYTHON (no en la IA) ──
+        # Una nota entra aquí SOLO si, a la vez: (1) tiene fecha de call futura en CALENDARIO_CALLS,
+        # (2) TODOS sus cupones pagados hasta hoy fueron POSITIVA (nunca hubo barrera de cupón rota),
+        # y (3) TODOS sus tickers están HOY en positivo (variación_% >= 0) frente a precio_compra
+        # (mismos precios que el semáforo, vía construir_resumen_actual_notas_alertas). Yuri solo
+        # quiere ver aquí las notas que SÍ cumplen — las que no cumplen no aparecen.
+        lineas_riesgo.append("\n=== CALLS POSIBLES — LISTA DEFINITIVA (calculada en código, no en la IA) ===")
+        lineas_riesgo.append(
+            "Una nota es 'CALL POSIBLE' solo si cumple LAS DOS condiciones a la vez: "
+            "(a) ha pagado el cupón TODOS los meses hasta hoy sin ninguna observación NEGATIVA "
+            "(barrera de cupón rota), y (b) en la fecha de call, TODOS los tickers/acciones de la "
+            "nota están en positivo (variación >= 0%) frente a su precio_compra. Si una nota NO "
+            "aparece en esta lista es porque NO cumple ambas condiciones — NO la menciones como "
+            "posible call. NO inventes ni recalcules este criterio."
+        )
+        try:
+            calls_posibles = evaluar_calls_posibles_notas(df_cal, df_control, df_calls_ctx, resumen_riesgo_ia)
+        except Exception as _e_cp:
+            calls_posibles = []
+            lineas_riesgo.append(f"[Error calculando calls posibles: {_e_cp}]")
+        if not calls_posibles:
+            lineas_riesgo.append("Ninguna nota cumple ahora mismo ambas condiciones de call posible.")
+        else:
+            for cp in calls_posibles:
+                lineas_riesgo.append(
+                    f"  NOTA_{cp['nota']:02d} | 🟢 CALL POSIBLE | fecha de call: "
+                    f"{pd.Timestamp(cp['fecha_call']).strftime('%d/%m/%Y')} (en {cp['dias_restantes']} días) | "
+                    f"cupones pagados sin fallo: {cp['n_cupones_pagados_sin_fallo']} | "
+                    f"peor variación de sus tickers: {cp['peor_variacion_%']:+.1f}% | "
+                    f"precios: {cp['detalle_precios']}"
                 )
     except Exception as _e_r:
         import traceback as _tb_r
