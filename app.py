@@ -162,7 +162,7 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str = "", mes: int = 0, anio: 
                   total_intereses: float = 0.0) -> bytes:
     """
     Convierte el extracto Excel a PDF usando reportlab.
-    Lee las hojas PORTADA, DETALLE y RESUMEN MENSUAL del Excel generado
+    Lee las hojas PORTADA y DETALLE del Excel generado
     y reproduce fielmente colores, tipografía y estructura. Sin dependencias externas.
     """
     try:
@@ -1343,7 +1343,7 @@ def preparar_extracto_privado_inversor(contenido_bytes: bytes) -> bytes:
     la combinación y desaparecerían los totales de cierre. Por eso aquí NO se borran columnas:
     se vacía únicamente el contenido de las filas de DETALLE individuales (una por posición),
     dejando intactas las filas de cierre con sus totales de capital e interés.
-    PORTADA y RESUMEN MENSUAL ya son solo totales, no revelan activos, así que se dejan igual.
+    PORTADA ya es solo totales, no revela activos, así que se deja igual.
     """
     try:
         wb = load_workbook(BytesIO(contenido_bytes))
@@ -7420,7 +7420,7 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
     Genera el extracto Excel profesional con:
     - Hoja PORTADA con resumen ejecutivo
     - Hoja DETALLE con filas de operación, cierres mensuales, anuales y cierre final
-    - Hoja RESUMEN_MENSUAL con tabla de totales por mes
+    - (La antigua hoja RESUMEN_MENSUAL se eliminó por duplicar la tabla de la PORTADA)
     - Todo en formato dólar, diseño premium
     """
     from openpyxl import Workbook
@@ -8114,134 +8114,9 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
         cx11 = ws_d.cell(row=fila_excel, column=COL_PAGO, value="")
         cx11.fill = fill(C_DORADO); cx11.border = borde_std
 
-    # ═══════════════════════════════════════════════════════════════
-    # HOJA 3: RESUMEN MENSUAL
-    # ═══════════════════════════════════════════════════════════════
-    ws_m = wb.create_sheet("RESUMEN MENSUAL")
-    ws_m.sheet_view.showGridLines = False
-
-    # Precomputar pagado por mes (para inversores PAGA)
-    pagado_por_mes_m: dict = {}
-    if tiene_pago:
-        for r in det_rows:
-            if str(r.get("pago_intereses", "")).strip().upper() == "PAGA":
-                mk_str = str(r.get("mes", ""))
-                pagado_por_mes_m[mk_str] = pagado_por_mes_m.get(mk_str, 0.0) + float(r.get("interes_mes", 0) or 0)
-
-    if tiene_pago:
-        ws_m.column_dimensions["A"].width = 16
-        ws_m.column_dimensions["B"].width = 20
-        ws_m.column_dimensions["C"].width = 20
-        ws_m.column_dimensions["D"].width = 20
-        ws_m.merge_cells("A1:D1")
-        titulo_m = ws_m["A1"]
-    else:
-        ws_m.column_dimensions["A"].width = 16
-        ws_m.column_dimensions["B"].width = 22
-        ws_m.column_dimensions["C"].width = 22
-        ws_m.merge_cells("A1:C1")
-        titulo_m = ws_m["A1"]
-
-    titulo_m.value = "RESUMEN DE INTERESES POR MES"
-    titulo_m.font = Font(name="Calibri", size=16, bold=True, color=C_BLANCO)
-    titulo_m.fill = fill(C_AZUL_OSC)
-    titulo_m.alignment = aln(h="center", v="center")
-    ws_m.row_dimensions[1].height = 42
-
-    last_col_m = "D" if tiene_pago else "C"
-    ws_m.merge_cells(f"A2:{last_col_m}2")
-    ws_m["A2"].fill = fill("2E86C1")
-    ws_m.row_dimensions[2].height = 5
-
-    if tiene_pago:
-        hdrs_m = ["MES", "GENERADO ($)", "PAGADO ($)", "SALDO ($)"]
-    else:
-        hdrs_m = ["MES", "INTERESES ($)", "ACUMULADO ($)"]
-
-    for ci, hdr in enumerate(hdrs_m, 1):
-        c = ws_m.cell(row=3, column=ci, value=hdr)
-        c.font = Font(name="Calibri", size=11, bold=True, color=C_BLANCO)
-        c.fill = fill(C_AZUL_MED)
-        c.alignment = aln(h="center")
-        c.border = borde_std
-    ws_m.row_dimensions[3].height = 28
-
-    acum_m = 0.0
-    acum_pagado_m = 0.0
-    for ri, tr in enumerate(tot_rows, 4):
-        fondo = C_AZUL_CLARO if ri % 2 == 0 else C_GRIS_CLARO
-        ws_m.row_dimensions[ri].height = 26
-        mes_str_m = str(tr["mes"])
-        val = float(tr["total_mes"] or 0)
-        pagado_m = pagado_por_mes_m.get(mes_str_m, 0.0) if tiene_pago else 0.0
-        saldo_m = val - pagado_m
-        acum_m += val
-        acum_pagado_m += pagado_m
-
-        c1 = ws_m.cell(row=ri, column=1, value=mes_str_m)
-        c1.font = font(size=10); c1.fill = fill(fondo)
-        c1.alignment = aln(h="center"); c1.border = borde_std
-
-        if tiene_pago:
-            c_gen = ws_m.cell(row=ri, column=2, value=val)
-            c_gen.font = font(size=10); c_gen.fill = fill(fondo)
-            c_gen.number_format = fmt_usd; c_gen.alignment = aln(h="right"); c_gen.border = borde_std
-
-            c_pag = ws_m.cell(row=ri, column=3, value=-pagado_m)
-            c_pag.font = Font(name="Calibri", size=10, color="C00000")
-            c_pag.fill = fill(fondo)
-            c_pag.number_format = fmt_usd; c_pag.alignment = aln(h="right"); c_pag.border = borde_std
-
-            c_sal = ws_m.cell(row=ri, column=4, value=saldo_m)
-            c_sal.font = Font(name="Calibri", size=10, bold=True, color="1E4620")
-            c_sal.fill = fill(C_VERDE if saldo_m == 0 else fondo)
-            c_sal.number_format = fmt_usd; c_sal.alignment = aln(h="right"); c_sal.border = borde_std
-        else:
-            acum_rein = acum_m  # para reinversores el acumulado es el total generado
-            c2 = ws_m.cell(row=ri, column=2, value=val)
-            c2.font = font(size=10); c2.fill = fill(fondo)
-            c2.number_format = fmt_usd; c2.alignment = aln(h="right"); c2.border = borde_std
-            c3 = ws_m.cell(row=ri, column=3, value=acum_m)
-            c3.font = font(size=10); c3.fill = fill(fondo)
-            c3.number_format = fmt_usd; c3.alignment = aln(h="right"); c3.border = borde_std
-
-    # Fila total
-    fila_tot = 4 + len(tot_rows)
-    ws_m.row_dimensions[fila_tot].height = 30
-    acum_saldo_m = acum_m - acum_pagado_m
-
-    ct = ws_m.cell(row=fila_tot, column=1, value="TOTAL")
-    ct.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
-    ct.fill = fill(C_DORADO); ct.alignment = aln(h="center"); ct.border = borde_top
-
-    if tiene_pago:
-        for col_i, val_i in [(2, acum_m), (3, -acum_pagado_m), (4, acum_saldo_m)]:
-            c_ti = ws_m.cell(row=fila_tot, column=col_i, value=val_i)
-            c_ti.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
-            c_ti.fill = fill(C_DORADO); c_ti.number_format = fmt_usd
-            c_ti.alignment = aln(h="right"); c_ti.border = borde_top
-        # Fila "Pendiente de pago"
-        fila_pend = fila_tot + 1
-        ws_m.row_dimensions[fila_pend].height = 24
-        ws_m.merge_cells(f"A{fila_pend}:C{fila_pend}")
-        c_pend_lbl = ws_m[f"A{fila_pend}"]
-        c_pend_lbl.value = "TOTAL PENDIENTE DE PAGO"
-        c_pend_lbl.font = Font(name="Calibri", size=11, bold=True, color="C00000")
-        c_pend_lbl.fill = fill("FFE0E0"); c_pend_lbl.alignment = aln(h="right"); c_pend_lbl.border = borde_top
-        c_pend_val = ws_m.cell(row=fila_pend, column=4, value=acum_saldo_m)
-        c_pend_val.font = Font(name="Calibri", size=11, bold=True, color="C00000")
-        c_pend_val.fill = fill("FFE0E0"); c_pend_val.number_format = fmt_usd
-        c_pend_val.alignment = aln(h="right"); c_pend_val.border = borde_top
-    else:
-        ct2 = ws_m.cell(row=fila_tot, column=2, value=acum_m)
-        ct2.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
-        ct2.fill = fill(C_DORADO); ct2.number_format = fmt_usd
-        ct2.alignment = aln(h="right"); ct2.border = borde_top
-        ct3 = ws_m.cell(row=fila_tot, column=3, value=acum_m)
-        ct3.font = Font(name="Calibri", size=11, bold=True, color=C_DORADO_OSC)
-        ct3.fill = fill(C_DORADO); ct3.number_format = fmt_usd
-        ct3.alignment = aln(h="right"); ct3.border = borde_top
-
+    # NOTA: se ha quitado la HOJA 3 "RESUMEN MENSUAL" porque duplicaba exactamente
+    # la misma tabla "RESUMEN MENSUAL DE INTERESES" que ya aparece en la PORTADA.
+    # El Excel ahora tiene solo 2 hojas: PORTADA y DETALLE.
     out = BytesIO()
     wb.save(out)
     return out.getvalue()
