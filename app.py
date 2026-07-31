@@ -438,67 +438,9 @@ def _excel_a_pdf(extracto_bytes: bytes, inversor: str = "", mes: int = 0, anio: 
                         ]))
                     story.append(t_row)
 
-        # ── PÁGINA 3: RESUMEN MENSUAL ─────────────────────────────────────────
-        story.append(PageBreak())
-        ws_r = wb['RESUMEN MENSUAL'] if 'RESUMEN MENSUAL' in wb.sheetnames else (wb['RESUMEN_MENSUAL'] if 'RESUMEN_MENSUAL' in wb.sheetnames else None)
-        if ws_r:
-            res_rows = list(ws_r.iter_rows(min_row=1, max_row=ws_r.max_row, values_only=True))
-
-            t_hdr_rm = Table([[Paragraph('<b>RESUMEN DE INTERESES POR MES</b>',
-                ParagraphStyle('hrm', fontName='Helvetica-Bold', fontSize=11, textColor=C_BLANCO))]], colWidths=[180*mm])
-            t_hdr_rm.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1), C_AZUL_OSC),
-                ('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('LEFTPADDING',(0,0),(-1,-1),8)]))
-            story.append(t_hdr_rm)
-            story.append(Spacer(1, 3*mm))
-
-            # Buscar fila de cabecera (fila 3)
-            hdr_rm = [str(v) if v else '' for v in res_rows[2]] if len(res_rows) > 2 else ['MES','INTERESES ($)','ACUMULADO ($)']
-            n_cols_rm = len(hdr_rm)
-            cw_rm = [180*mm / n_cols_rm] * n_cols_rm
-
-            col_hdr_rm = Table([hdr_rm], colWidths=cw_rm)
-            col_hdr_rm.setStyle(TableStyle([
-                ('BACKGROUND',(0,0),(-1,-1), C_AZUL_CL),
-                ('TEXTCOLOR', (0,0),(-1,-1), C_AZUL_OSC),
-                ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
-                ('FONTSIZE',  (0,0),(-1,-1), 9),
-                ('ALIGN',     (0,0),(-1,-1), 'CENTER'),
-                ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
-                ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
-            ]))
-            story.append(col_hdr_rm)
-
-            data_rm = []; tot_rm = None
-            for row in res_rows[3:]:
-                if not any(v is not None for v in row):
-                    continue
-                if str(row[0] or '') == 'TOTAL':
-                    tot_rm = row
-                else:
-                    r = [str(row[0]) if row[0] else ''] + [f'${float(v):,.2f}' if v is not None else '' for v in row[1:n_cols_rm]]
-                    data_rm.append(r)
-            if data_rm:
-                t_data_rm = Table(data_rm, colWidths=cw_rm)
-                s = _tbl_style_base()
-                s += [('ROWBACKGROUNDS',(0,0),(-1,-1),[C_BLANCO, C_GRIS]),
-                      ('FONTNAME',(0,0),(-1,-1),'Helvetica'),('FONTSIZE',(0,0),(-1,-1),9),
-                      ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(1,0),(-1,-1),'RIGHT')]
-                t_data_rm.setStyle(TableStyle(s))
-                story.append(t_data_rm)
-            if tot_rm is not None:
-                r_tot = [str(tot_rm[0])] + [f'${float(v):,.2f}' if v is not None else '' for v in tot_rm[1:n_cols_rm]]
-                t_tot_rm = Table([r_tot], colWidths=cw_rm)
-                t_tot_rm.setStyle(TableStyle([
-                    ('BACKGROUND',(0,0),(-1,-1), C_DORADO),
-                    ('TEXTCOLOR', (0,0),(-1,-1), rl_colors.Color(74/255,48/255,0)),
-                    ('FONTNAME',  (0,0),(-1,-1), 'Helvetica-Bold'),
-                    ('FONTSIZE',  (0,0),(-1,-1), 9),
-                    ('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(1,0),(-1,-1),'RIGHT'),
-                    ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
-                    ('BOX',(0,0),(-1,-1),0.5,C_BORDE),('INNERGRID',(0,0),(-1,-1),0.3,C_BORDE_L),
-                ]))
-                story.append(t_tot_rm)
-
+        # NOTA: se ha quitado la antigua "PÁGINA 3: RESUMEN MENSUAL" porque duplicaba
+        # exactamente la misma tabla "RESUMEN MENSUAL DE INTERESES" que ya aparece en
+        # la PORTADA (página 1) — el PDF ahora tiene solo 2 páginas: PORTADA y DETALLE.
         doc.build(story)
         return output.getvalue()
 
