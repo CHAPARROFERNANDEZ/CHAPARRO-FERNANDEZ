@@ -2168,11 +2168,14 @@ def _filtrar_notas_activas_en_mes(df_inv: pd.DataFrame, inicio_mes, fin_mes) -> 
 
 def _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes) -> float:
     """Pago devengado a UN inversor de UNA fila de nota en el mes (pro-rata de dias +
-    tramo de tipos Biscafe/Crowe Bolivia). Fuente unica: la usan tanto pago_inversores_notas_mes
-    (total agregado) como el detalle prorrateado de ingresos, para que el pago al inversor
-    sea siempre identico se mire por donde se mire."""
-    INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-    CORTE_TRAMO = pd.Timestamp("2026-02-01")
+    tramo de tipos Biscafe/Crowe Bolivia/JR Real Estate). Fuente unica: la usan tanto
+    pago_inversores_notas_mes (total agregado) como el detalle prorrateado de ingresos,
+    para que el pago al inversor sea siempre identico se mire por donde se mire."""
+    INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
+    FIN_T1 = pd.Timestamp("2026-01-31")
+    INI_T2 = pd.Timestamp("2026-02-01")
+    FIN_T2 = pd.Timestamp("2026-06-30")
+    INI_T3 = pd.Timestamp("2026-07-01")
 
     if es_chaparro_fernandez_row(row):
         return 0.0
@@ -2185,14 +2188,21 @@ def _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes) -> float:
     inv_upper = str(row.get("inversor", "")).strip().upper()
     if inv_upper in INVERSORES_TRAMO:
         pago = 0.0
-        fin_t1 = pd.Timestamp("2026-01-31")
-        if inicio_calc <= fin_t1:
-            d1 = (min(fin_calc, fin_t1) - inicio_calc).days + 1
+        # Tramo 1: hasta 31/01/2026 -> 5%
+        if inicio_calc <= FIN_T1:
+            d1 = (min(fin_calc, FIN_T1) - inicio_calc).days + 1
             pago += (capital * 0.05 / 12) * d1 / dias_mes
-        if fin_calc >= CORTE_TRAMO:
-            ini_t2 = max(inicio_calc, CORTE_TRAMO)
-            d2 = (fin_calc - ini_t2).days + 1
+        # Tramo 2: 01/02/2026 - 30/06/2026 -> 7.5%
+        ini_t2 = max(inicio_calc, INI_T2)
+        fin_t2 = min(fin_calc, FIN_T2)
+        if ini_t2 <= fin_t2:
+            d2 = (fin_t2 - ini_t2).days + 1
             pago += (capital * 0.075 / 12) * d2 / dias_mes
+        # Tramo 3: desde 01/07/2026 -> 10%
+        if fin_calc >= INI_T3:
+            ini_t3 = max(inicio_calc, INI_T3)
+            d3 = (fin_calc - ini_t3).days + 1
+            pago += (capital * 0.10 / 12) * d3 / dias_mes
         return pago
     tasa = float(row.get("interes_inversor_anual", 0) or 0)
     return (capital * tasa / 12) * dias / dias_mes
@@ -4530,7 +4540,7 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
+                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nJR REAL ESTATE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
                               "messages": historial}, timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
@@ -8386,30 +8396,35 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
                 capital = float(row.get("capital_invertido", 0))
                 interes_base = float(row.get("interes_inversor_anual", 0))
 
-                # ── Tramo especial Biscafe / Crowe Bolivia ──────────────────
-                # Hasta el 31/01/2026 cobraban al 5%; desde el 01/02/2026 al 7,5%.
-                # Si la inversión empezó antes del 01/02/2026 y el interés registrado
-                # es 0.075, recalculamos con los dos tramos correctos.
-                INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-                CORTE_TRAMO = datetime(2026, 2, 1)
+                # ── Tramo especial Biscafe / Crowe Bolivia / JR Real Estate ──
+                # Hasta el 31/01/2026 cobraban al 5%; 01/02/2026-30/06/2026 al 7.5%;
+                # desde el 01/07/2026 al 10%. Se aplica siempre, independientemente
+                # de cuándo empezó la inversión ni de lo que diga interes_inversor_anual.
+                INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
                 inversor_upper = str(row.get("inversor", "")).strip().upper()
 
                 if inversor_upper in INVERSORES_TRAMO:
-                    # Biscafe y Crowe Bolivia: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
-                    # Se aplica siempre, independientemente de cuándo empezó la inversión
-                    fin_tramo1  = datetime(2026, 1, 31)
-                    inicio_tramo2 = CORTE_TRAMO
+                    fin_tramo1    = datetime(2026, 1, 31)
+                    inicio_tramo2 = datetime(2026, 2, 1)
+                    fin_tramo2    = datetime(2026, 6, 30)
+                    inicio_tramo3 = datetime(2026, 7, 1)
                     interes_mes = 0.0
                     # Tramo 1: días del mes que caen en o antes del 31/01/2026 → 5%
                     if inicio_calc <= fin_tramo1:
                         fin_t1  = min(fin_calc, fin_tramo1)
                         dias_t1 = (fin_t1 - inicio_calc).days + 1
                         interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes, 2)
-                    # Tramo 2: días del mes que caen en o después del 01/02/2026 → 7.5%
-                    if fin_calc >= inicio_tramo2:
-                        ini_t2  = max(inicio_calc, inicio_tramo2)
-                        dias_t2 = (fin_calc - ini_t2).days + 1
+                    # Tramo 2: días entre 01/02/2026 y 30/06/2026 → 7.5%
+                    ini_t2 = max(inicio_calc, inicio_tramo2)
+                    fin_t2 = min(fin_calc, fin_tramo2)
+                    if ini_t2 <= fin_t2:
+                        dias_t2 = (fin_t2 - ini_t2).days + 1
                         interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes, 2)
+                    # Tramo 3: días desde el 01/07/2026 → 10%
+                    if fin_calc >= inicio_tramo3:
+                        ini_t3  = max(inicio_calc, inicio_tramo3)
+                        dias_t3 = (fin_calc - ini_t3).days + 1
+                        interes_mes += round((capital * 0.10 / 12) * dias_t3 / dias_mes, 2)
                 else:
                     interes_mes = round((capital * interes_base / 12) * dias / dias_mes, 2)
                 mes_fecha = datetime(actual.year, actual.month, 1)
@@ -9555,9 +9570,11 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         df_ext["capital_invertido"] = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
         df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-        INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-        CORTE_TRAMO = datetime(2026, 2, 1)
+        INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
         fin_tramo1 = datetime(2026, 1, 31)
+        inicio_tramo2 = datetime(2026, 2, 1)
+        fin_tramo2 = datetime(2026, 6, 30)
+        inicio_tramo3 = datetime(2026, 7, 1)
 
         def _calcular_intereses_mes(anio_m, mes_m):
             dias_mes_ext = ultimo_dia_mes(anio_m, mes_m)
@@ -9596,10 +9613,15 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
                         fin_t1 = min(fin_calc, fin_tramo1)
                         dias_t1 = (fin_t1 - inicio_calc).days + 1
                         interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_ext, 2)
-                    if fin_calc >= CORTE_TRAMO:
-                        ini_t2 = max(inicio_calc, CORTE_TRAMO)
-                        dias_t2 = (fin_calc - ini_t2).days + 1
+                    ini_t2 = max(inicio_calc, inicio_tramo2)
+                    fin_t2 = min(fin_calc, fin_tramo2)
+                    if ini_t2 <= fin_t2:
+                        dias_t2 = (fin_t2 - ini_t2).days + 1
                         interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_ext, 2)
+                    if fin_calc >= inicio_tramo3:
+                        ini_t3 = max(inicio_calc, inicio_tramo3)
+                        dias_t3 = (fin_calc - ini_t3).days + 1
+                        interes_mes += round((capital * 0.10 / 12) * dias_t3 / dias_mes_ext, 2)
                 else:
                     interes_mes = round((capital * tasa / 12) * dias / dias_mes_ext, 2)
 
@@ -10069,9 +10091,11 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         df_ext["capital_invertido"]      = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
         df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-        TRAMO_INV_E = {"ROBERTO BISCAFE", "CROWE BOLIVIA"}
-        CORTE_T_E   = datetime(2026, 2, 1)
+        TRAMO_INV_E = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
         FIN_T1_E    = datetime(2026, 1, 31)
+        INI_T2_E    = datetime(2026, 2, 1)
+        FIN_T2_E    = datetime(2026, 6, 30)
+        INI_T3_E    = datetime(2026, 7, 1)
 
         # Detectar inversor en la pregunta
         inversores_todos = df_ext["inversor"].dropna().unique().tolist()
@@ -10132,9 +10156,13 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
                     if ic <= FIN_T1_E:
                         ft1 = min(fc, FIN_T1_E)
                         interes += round((capital*0.05/12)*((ft1-ic).days+1)/dm_e, 2)
-                    if fc >= CORTE_T_E:
-                        it2 = max(ic, CORTE_T_E)
-                        interes += round((capital*0.075/12)*((fc-it2).days+1)/dm_e, 2)
+                    it2 = max(ic, INI_T2_E)
+                    ft2 = min(fc, FIN_T2_E)
+                    if it2 <= ft2:
+                        interes += round((capital*0.075/12)*((ft2-it2).days+1)/dm_e, 2)
+                    if fc >= INI_T3_E:
+                        it3 = max(ic, INI_T3_E)
+                        interes += round((capital*0.10/12)*((fc-it3).days+1)/dm_e, 2)
                 else:
                     interes = round((capital*tasa/12)*dias/dm_e, 2)
                 filas_e.append({
@@ -10387,8 +10415,9 @@ Se eligió variación fija en vez de margen a la barrera de contingencia (que se
 
 == INVERSORES Y TASAS ==
 LEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%
-ROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
-CROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026
+ROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026
+CROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026
+JR REAL ESTATE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026
 2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%
 CHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago
 GOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%
