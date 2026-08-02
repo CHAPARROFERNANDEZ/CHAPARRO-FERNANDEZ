@@ -36,7 +36,7 @@ if __name__ == "__main__":  # page config: solo se ejecuta con `streamlit run`, 
     st.set_page_config(
         page_title="Sistema Fondo",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
     )
 
 ARCHIVO = "inversiones.xlsx"
@@ -776,6 +776,67 @@ def aplicar_estilo_profesional():
         .login-subtitle { font-size: 14px; color: #667085; margin-bottom: 20px; }
         #MainMenu, footer {visibility: hidden;}
         header {visibility: visible;}
+
+        /* ── FIX: texto invisible en móvil ─────────────────────────────────
+           El bug real es que el color del texto sigue el modo claro/oscuro
+           del sistema (móvil), pero los fondos de las tarjetas/chat están
+           fijados en claro. En modo oscuro, Streamlit pone el texto en
+           blanco y con fondo blanco se vuelve invisible. Aquí se fuerza
+           el color del texto en TODO el contenido principal (incluidas
+           las respuestas del asistente de IA y el dashboard) para que
+           nunca dependa del tema del dispositivo. */
+        [data-testid="stAppViewContainer"] p,
+        [data-testid="stAppViewContainer"] span,
+        [data-testid="stAppViewContainer"] li,
+        [data-testid="stAppViewContainer"] label,
+        [data-testid="stAppViewContainer"] div:not([class*="brand-"]):not(.login-card):not(.login-logo),
+        [data-testid="stMarkdownContainer"],
+        [data-testid="stMarkdownContainer"] *,
+        [data-testid="stChatMessage"],
+        [data-testid="stChatMessage"] *,
+        [data-testid="stChatMessageContent"],
+        [data-testid="stChatMessageContent"] * {
+            color: #14213d !important;
+        }
+        /* La barra lateral tiene fondo oscuro, así que su texto se queda en
+           claro (esta regla es más específica que la de arriba, por lo que
+           gana la partida sin necesidad de tocar nada más). */
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] li,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] div {
+            color: #f7f1e8 !important;
+        }
+        [data-testid="stChatMessage"] {
+            background: #ffffff !important;
+            border-radius: 16px;
+            border: 1px solid rgba(14, 35, 56, 0.08);
+            padding: 6px 10px;
+        }
+
+        /* ── FIX: botón para abrir el menú lateral, grande y fácil de tocar */
+        [data-testid="collapsedControl"] {
+            background: linear-gradient(135deg, #0e2338 0%, #173b5c 60%, #bf9a5f 100%) !important;
+            border-radius: 12px !important;
+            padding: 8px !important;
+            box-shadow: 0 8px 20px rgba(14, 35, 56, 0.35);
+            top: 0.6rem !important;
+            left: 0.6rem !important;
+        }
+        [data-testid="collapsedControl"] svg {
+            width: 30px !important;
+            height: 30px !important;
+            color: #ffffff !important;
+            fill: #ffffff !important;
+        }
+
+        /* ── FIX: permitir copiar/pegar el texto (incluidas las respuestas
+           del asistente de IA), por si algún navegador móvil lo bloquea */
+        [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] * {
+            -webkit-user-select: text !important;
+            user-select: text !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
