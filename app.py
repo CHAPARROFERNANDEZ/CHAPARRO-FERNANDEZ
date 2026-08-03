@@ -884,6 +884,16 @@ def _descargar_excel_para_credenciales():
         pass
 
 
+def _texto_seguro_excel(valor) -> str:
+    """Convierte un valor leído de Excel a texto de forma segura: si Excel lo interpretó como
+    número entero (float 654321.0 en vez de texto '654321'), quita el '.0' sobrante."""
+    if pd.isna(valor):
+        return ""
+    if isinstance(valor, float) and valor.is_integer():
+        return str(int(valor))
+    return str(valor)
+
+
 def _leer_hoja_usuarios() -> pd.DataFrame:
     """Lee la hoja USUARIOS (usuario, tipo_usuario, password) del Excel del fondo.
     Si la hoja aún no existe (primera vez), devuelve un DataFrame vacío con las columnas
@@ -892,6 +902,9 @@ def _leer_hoja_usuarios() -> pd.DataFrame:
     try:
         df = pd.read_excel(ARCHIVO, sheet_name=HOJA_USUARIOS)
         df.columns = [str(c).strip().lower() for c in df.columns]
+        for col in ["usuario", "tipo_usuario", "password"]:
+            if col in df.columns:
+                df[col] = df[col].apply(_texto_seguro_excel)
         return df
     except Exception:
         return pd.DataFrame(columns=["usuario", "tipo_usuario", "password"])
@@ -985,15 +998,21 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
                 df_u = _leer_hoja_usuarios()
                 if df_u.empty or not {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
                     df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password"])
+                # Todas las columnas como texto: si la hoja se creó vacía, pandas puede haberlas
+                # inferido como float64 (todo NaN), y asignar un string ahí con .loc revienta con
+                # TypeError en pandas 3.x (ya no hace upcast silencioso). Forzamos texto primero.
+                for col in ["usuario", "tipo_usuario", "password"]:
+                    df_u[col] = df_u[col].astype(object)
                 mascara = (
                     (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_actual.strip().lower())
                     & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
                 )
-                if mascara.any():
-                    df_u.loc[mascara, "password"] = pw_nueva
-                else:
-                    fila_nueva = pd.DataFrame([{"usuario": usuario_actual, "tipo_usuario": tipo, "password": pw_nueva}])
-                    df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
+                # En vez de asignar in-place con .loc (fuente del TypeError), quitamos la fila
+                # antigua si existía y añadimos la fila nueva — evita por completo el problema
+                # de tipos, igual de robusto y más simple.
+                df_u = df_u[~mascara]
+                fila_nueva = pd.DataFrame([{"usuario": usuario_actual, "tipo_usuario": tipo, "password": str(pw_nueva)}])
+                df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
                 exito, mensaje = _guardar_hoja_usuarios(df_u)
                 if exito:
                     st.success(f"✅ Contraseña actualizada. {mensaje}")
