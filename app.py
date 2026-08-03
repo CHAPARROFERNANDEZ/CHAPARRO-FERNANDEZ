@@ -861,8 +861,196 @@ def mostrar_hero(usuario=None):
     )
 
 
+HOJA_USUARIOS = "USUARIOS"
+# NOTA DE SEGURIDAD: por decisión explícita de Yuri, las contraseñas se guardan en TEXTO
+# PLANO (no cifradas) en la hoja USUARIOS del Excel del fondo, para que el equipo interno
+# pueda consultarlas directamente cuando lo necesite. Esto es intencionadamente menos seguro
+# que un hash — cualquiera con acceso al Excel (Drive) o a los Secrets de la app puede leerlas.
+
+
+def _descargar_excel_para_credenciales():
+    """Se asegura de que el Excel esté en disco para poder leer/actualizar la hoja USUARIOS,
+    sin depender de funciones definidas más abajo en el archivo (el login se ejecuta antes)."""
+    import os as _os_cred
+    if _os_cred.path.exists(ARCHIVO):
+        return
+    try:
+        url = f"https://docs.google.com/spreadsheets/d/{GDRIVE_FILE_ID}/export?format=xlsx"
+        r = requests.get(url, timeout=30)
+        if r.status_code == 200:
+            with open(ARCHIVO, "wb") as f:
+                f.write(r.content)
+    except Exception:
+        pass
+
+
+def _leer_hoja_usuarios() -> pd.DataFrame:
+    """Lee la hoja USUARIOS (usuario, tipo_usuario, password) del Excel del fondo.
+    Si la hoja aún no existe (primera vez), devuelve un DataFrame vacío con las columnas
+    correctas y el sistema cae automáticamente en las contraseñas iniciales del código."""
+    _descargar_excel_para_credenciales()
+    try:
+        df = pd.read_excel(ARCHIVO, sheet_name=HOJA_USUARIOS)
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["usuario", "tipo_usuario", "password"])
+
+
+def _guardar_hoja_usuarios(df_usuarios: pd.DataFrame) -> tuple[bool, str]:
+    """Guarda la hoja USUARIOS actualizada, preservando intactas todas las demás hojas del
+    Excel, y la sube a Google Drive si hay credenciales de servicio configuradas."""
+    import os as _os_cred
+    try:
+        if _os_cred.path.exists(ARCHIVO):
+            hojas = pd.read_excel(ARCHIVO, sheet_name=None)
+        else:
+            hojas = {}
+    except Exception:
+        hojas = {}
+    hojas[HOJA_USUARIOS] = df_usuarios
+
+    salida = BytesIO()
+    with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+        for nombre_hoja, df in hojas.items():
+            nombre_limpio = str(nombre_hoja)[:31] if str(nombre_hoja).strip() else "Hoja"
+            (df if df is not None else pd.DataFrame()).to_excel(writer, sheet_name=nombre_limpio, index=False)
+    contenido = salida.getvalue()
+    with open(ARCHIVO, "wb") as f:
+        f.write(contenido)
+
+    if "gcp_service_account" not in st.secrets:
+        return False, "No hay credenciales de Google configuradas (falta [gcp_service_account] en Secrets) — el cambio no se sincronizó con Drive y se perderá si el servidor se reinicia."
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+
+        credenciales = service_account.Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        servicio = build("drive", "v3", credentials=credenciales)
+        media = MediaIoBaseUpload(
+            BytesIO(contenido),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=False,
+        )
+        servicio.files().update(fileId=GDRIVE_FILE_ID, media_body=media, fields="id").execute()
+        return True, "Guardada y sincronizada con Google Drive."
+    except Exception as e:
+        return False, f"Se guardó localmente pero no se pudo sincronizar con Drive: {e}"
+
+
+def _verificar_credencial(usuario_input: str, password_input: str, tipo: str, usuarios_codigo: dict) -> Optional[str]:
+    """Comprueba usuario+contraseña para tipo 'admin' o 'inversor'.
+    Prioridad: hoja USUARIOS en Drive (contraseñas que el propio usuario ha cambiado).
+    Si el usuario no está migrado ahí todavía, cae a las contraseñas iniciales del código.
+    Devuelve el nombre canónico del usuario si es correcto, o None."""
+    df_u = _leer_hoja_usuarios()
+    if not df_u.empty and {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
+        fila = df_u[
+            (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_input.strip().lower())
+            & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+        ]
+        if not fila.empty:
+            fila = fila.iloc[0]
+            if str(password_input) == str(fila["password"]):
+                return str(fila["usuario"])
+            return None  # ya migrado a Drive: la contraseña del código queda obsoleta para este usuario
+
+    match = next((u for u in usuarios_codigo if u.strip().lower() == usuario_input.strip().lower()), None)
+    if match and usuarios_codigo.get(match) == password_input:
+        return match
+    return None
+
+
+def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo: dict):
+    """Formulario de autoservicio para que cualquier usuario (equipo interno o inversor)
+    cambie su propia contraseña, sin que haga falta tocar el código."""
+    with st.sidebar.expander("🔑 Cambiar mi contraseña"):
+        with st.form(f"form_cambiar_pw_{tipo}_{usuario_actual}"):
+            pw_actual = st.text_input("Contraseña actual", type="password", key=f"pw_actual_{tipo}")
+            pw_nueva = st.text_input("Nueva contraseña", type="password", key=f"pw_nueva_{tipo}")
+            pw_nueva2 = st.text_input("Repite la nueva contraseña", type="password", key=f"pw_nueva2_{tipo}")
+            enviar = st.form_submit_button("Actualizar contraseña")
+        if enviar:
+            if _verificar_credencial(usuario_actual, pw_actual, tipo, usuarios_codigo) is None:
+                st.error("La contraseña actual no es correcta.")
+            elif len(pw_nueva) < 6:
+                st.error("La nueva contraseña debe tener al menos 6 caracteres.")
+            elif pw_nueva != pw_nueva2:
+                st.error("Las dos contraseñas nuevas no coinciden.")
+            else:
+                df_u = _leer_hoja_usuarios()
+                if df_u.empty or not {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
+                    df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password"])
+                mascara = (
+                    (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_actual.strip().lower())
+                    & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+                )
+                if mascara.any():
+                    df_u.loc[mascara, "password"] = pw_nueva
+                else:
+                    fila_nueva = pd.DataFrame([{"usuario": usuario_actual, "tipo_usuario": tipo, "password": pw_nueva}])
+                    df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
+                exito, mensaje = _guardar_hoja_usuarios(df_u)
+                if exito:
+                    st.success(f"✅ Contraseña actualizada. {mensaje}")
+                else:
+                    st.warning(f"⚠️ Contraseña actualizada localmente. {mensaje}")
+
+
+def panel_ver_contrasenas_admin(usuarios_admin: dict, usuarios_inversores: dict):
+    """Solo para el equipo interno (admin): muestra la contraseña ACTUAL de cada usuario
+    (la de Drive si ya la cambió, o si no la inicial del código), para poder consultarla
+    o compartirla sin tener que tocar el código."""
+    with st.sidebar.expander("👥 Ver contraseñas de usuarios"):
+        df_u = _leer_hoja_usuarios()
+        hay_drive = not df_u.empty and {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns)
+
+        filas = []
+        for u, pw in usuarios_admin.items():
+            actual = pw
+            origen = "inicial (código)"
+            if hay_drive:
+                m = df_u[(df_u["usuario"].astype(str).str.strip().str.lower() == u.strip().lower()) & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == "admin")]
+                if not m.empty:
+                    actual = str(m.iloc[0]["password"])
+                    origen = "cambiada por el usuario"
+            filas.append({"Usuario": u, "Tipo": "Equipo interno", "Contraseña actual": actual, "Origen": origen})
+
+        for u, pw in usuarios_inversores.items():
+            actual = pw
+            origen = "inicial (código)"
+            if hay_drive:
+                m = df_u[(df_u["usuario"].astype(str).str.strip().str.lower() == u.strip().lower()) & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == "inversor")]
+                if not m.empty:
+                    actual = str(m.iloc[0]["password"])
+                    origen = "cambiada por el usuario"
+            filas.append({"Usuario": u, "Tipo": "Inversor", "Contraseña actual": actual, "Origen": origen})
+
+        # Usuarios que hayan cambiado su contraseña sin estar en los diccionarios del código
+        # (por ejemplo un nuevo inversor añadido directamente en la hoja USUARIOS de Drive).
+        if hay_drive:
+            conocidos = {(u.strip().lower(), "admin") for u in usuarios_admin} | {(u.strip().lower(), "inversor") for u in usuarios_inversores}
+            for _, row in df_u.iterrows():
+                clave = (str(row["usuario"]).strip().lower(), str(row["tipo_usuario"]).strip().lower())
+                if clave not in conocidos:
+                    filas.append({
+                        "Usuario": row["usuario"],
+                        "Tipo": "Equipo interno" if row["tipo_usuario"] == "admin" else "Inversor",
+                        "Contraseña actual": row["password"],
+                        "Origen": "cambiada por el usuario",
+                    })
+
+        st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+        st.caption("⚠️ Se muestran en texto plano por decisión explícita — cualquiera con acceso a esta cuenta o al Excel de Drive puede verlas.")
+
+
 if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit run`, no al importar
     aplicar_estilo_profesional()
+
 
 
     # =========================
@@ -871,7 +1059,23 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     USUARIOS = {"Yuri": "1234", "Jordi": "12345", "Alan": "123456"}
     # Portal de inversores: acceso limitado, solo ven su propia posición.
     # El "usuario" debe coincidir exactamente (en mayúsculas) con el valor de la columna 'inversor' en INVERSIONES.
-    USUARIOS_INVERSORES = {"PAM": "Pam2026Wealth!"}
+    USUARIOS_INVERSORES = {
+        "PAM": "Pam2026Wealth!",
+        "LEO": "Leo2026Wealth!",
+        "JORDI CHAPARRO": "Jordi2026Wealth!",
+        "ROBERTO BISCAFE": "Roberto2026Wealth!",
+        "CROWE BOLIVIA": "Crowe2026Wealth!",
+        "JR REAL ESTATE": "JRreal2026Wealth!",
+        "2012 JACC GROUP": "Jacc2026Wealth!",
+        "PEDRO MAGAÑA": "Pedro2026Wealth!",
+        "GOLDEN BRICKS": "Golden2026Wealth!",
+        "TERESA": "Teresa2026Wealth!",
+        "JEP": "Jep2026Wealth!",
+        "JORDI ESPECIAL": "JordiE2026Wealth!",
+        "EVA CHAPARRO": "Eva2026Wealth!",
+        "PAOLA CHAPARRO": "Paola2026Wealth!",
+        "JAPAN JORDI": "JapanJ2026Wealth!",
+    }
 
     if "autenticado" not in st.session_state:
         st.session_state.autenticado = False
@@ -894,26 +1098,28 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         tipo_acceso = st.radio("Tipo de acceso", ["Equipo interno", "Portal de inversor"], horizontal=True, label_visibility="collapsed")
         if tipo_acceso == "Equipo interno":
             with st.form("login_form"):
-                usuario = st.selectbox("Usuario", list(USUARIOS.keys()))
+                usuario_txt = st.text_input("Usuario")
                 password = st.text_input("Contraseña", type="password")
                 entrar = st.form_submit_button("Entrar")
             if entrar:
-                if USUARIOS.get(usuario) == password:
+                usuario_match = _verificar_credencial(usuario_txt, password, "admin", USUARIOS)
+                if usuario_match:
                     st.session_state.autenticado = True
-                    st.session_state.usuario = usuario
+                    st.session_state.usuario = usuario_match
                     st.session_state.tipo_usuario = "admin"
                     st.rerun()
                 else:
                     st.error("Usuario o contraseña incorrectos")
         else:
             with st.form("login_form_inversor"):
-                usuario_inv = st.selectbox("Inversor", list(USUARIOS_INVERSORES.keys()))
+                usuario_inv_txt = st.text_input("Usuario")
                 password_inv = st.text_input("Contraseña", type="password", key="pwd_inversor")
                 entrar_inv = st.form_submit_button("Entrar")
             if entrar_inv:
-                if USUARIOS_INVERSORES.get(usuario_inv) == password_inv:
+                usuario_inv_match = _verificar_credencial(usuario_inv_txt, password_inv, "inversor", USUARIOS_INVERSORES)
+                if usuario_inv_match:
                     st.session_state.autenticado = True
-                    st.session_state.usuario = usuario_inv
+                    st.session_state.usuario = usuario_inv_match
                     st.session_state.tipo_usuario = "inversor"
                     st.rerun()
                 else:
@@ -921,6 +1127,10 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         st.stop()
 
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+    _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
+    formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
+    if st.session_state.tipo_usuario == "admin":
+        panel_ver_contrasenas_admin(USUARIOS, USUARIOS_INVERSORES)
     st.sidebar.caption("🔧 Build de prueba: persistencia de borradores (v2)")
     st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá automáticamente.")
     if st.sidebar.button("Cerrar sesión"):
@@ -1435,6 +1645,217 @@ def preparar_extracto_privado_inversor(contenido_bytes: bytes) -> bytes:
         return contenido_bytes  # si algo falla, mejor devolver el original que romper la descarga
 
 
+def construir_historial_mensual_inversor(df_inv: pd.DataFrame, inversor: str, fecha_fin=None) -> list:
+    """Desglose mes a mes (capital activo ese mes e interés generado ese mes) para UN inversor,
+    usando la misma lógica de extractos (solo NUEVA/CANCELADA). No revela en qué activo está
+    invertido el capital — solo capital e interés, que es toda la información a la que un
+    inversor tiene derecho a acceder sobre sí mismo.
+    """
+    fecha_fin = pd.Timestamp(fecha_fin).normalize() if fecha_fin is not None else pd.Timestamp.today().normalize()
+    df = df_inv.copy()
+    df["inversor"] = df["inversor"].astype(str).str.strip().str.upper()
+    df["tipo_operacion"] = df["tipo_operacion"].astype(str).str.strip().str.lower()
+    df = df[df["inversor"] == inversor.strip().upper()]
+    df = df[df["tipo_operacion"].isin(["nueva", "cancelada"])].copy()
+    if df.empty:
+        return []
+
+    df["fecha_inversion"] = pd.to_datetime(df["fecha_inversion"], errors="coerce", dayfirst=True)
+    df["fecha_final_inversion"] = pd.to_datetime(df["fecha_final_inversion"], errors="coerce", dayfirst=True)
+    df["capital_invertido"] = pd.to_numeric(df["capital_invertido"], errors="coerce").fillna(0)
+    df["interes_inversor_anual"] = pd.to_numeric(df["interes_inversor_anual"], errors="coerce").fillna(0)
+
+    fecha_inicio_global = df["fecha_inversion"].min()
+    if pd.isna(fecha_inicio_global):
+        return []
+
+    historial = []
+    f_iter = pd.Timestamp(fecha_inicio_global.year, fecha_inicio_global.month, 1)
+    while f_iter <= fecha_fin:
+        dias_m = ultimo_dia_mes(f_iter.year, f_iter.month)
+        inicio_mes = datetime(f_iter.year, f_iter.month, 1)
+        fin_mes = datetime(f_iter.year, f_iter.month, dias_m)
+        capital_mes = 0.0
+        interes_mes = 0.0
+        for _, row in df.iterrows():
+            fi = row["fecha_inversion"]
+            if pd.isna(fi):
+                continue
+            fi_dt = fi.to_pydatetime()
+            ff = row["fecha_final_inversion"]
+            if row["tipo_operacion"] == "cancelada" and pd.notna(ff):
+                fecha_fin_row = min(ff.to_pydatetime(), fin_mes)
+            else:
+                fecha_fin_row = fin_mes
+            inicio_calc = max(fi_dt, inicio_mes)
+            fin_calc = min(fecha_fin_row, fin_mes, fecha_fin.to_pydatetime())
+            if inicio_calc > fin_calc:
+                continue
+            dias = (fin_calc - inicio_calc).days + 1
+            interes_mes += row["capital_invertido"] * row["interes_inversor_anual"] / 12 * dias / dias_m
+            if inicio_mes <= fi_dt <= fin_mes or fi_dt <= inicio_mes:
+                if row["tipo_operacion"] != "cancelada" or pd.isna(ff) or ff.to_pydatetime() >= inicio_mes:
+                    capital_mes += row["capital_invertido"]
+        if capital_mes > 0 or interes_mes > 0:
+            historial.append({
+                "anio": f_iter.year, "mes": f_iter.month,
+                "capital": round(capital_mes, 2), "interes": round(interes_mes, 2),
+            })
+        f_iter += pd.DateOffset(months=1)
+    return historial
+
+
+def construir_contexto_ia_inversor(nombre_inversor: str, df_inv: pd.DataFrame, fecha_limite=None) -> str:
+    """Construye el contexto EXCLUSIVO de un inversor para su asistente de IA personal.
+    Contiene ÚNICAMENTE su propio capital, su tasa e intereses — nunca datos del fondo,
+    de otros inversores, ni de en qué activos está invertido el capital.
+    """
+    hoy = pd.Timestamp.today().normalize()
+    fecha_fin = pd.Timestamp(fecha_limite).normalize() if fecha_limite else hoy
+    datos = calcular_intereses_acumulados_inversor(df_inv, nombre_inversor, fecha_fin)
+    historial = construir_historial_mensual_inversor(df_inv, nombre_inversor, fecha_fin)
+
+    meses_nombre = ["", "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+
+    lineas = [
+        f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
+        f"Nombre del inversor (titular de esta sesión): {nombre_inversor}",
+        "",
+        "=== TU POSICIÓN ===",
+    ]
+    if datos["fecha_inicio"] is None:
+        lineas.append("No se encontraron posiciones registradas a tu nombre.")
+    else:
+        lineas.append(f"Capital activo hoy: ${datos['capital_activo']:,.2f}")
+        lineas.append(f"Fecha de inicio de tu inversión: {datos['fecha_inicio'].strftime('%d/%m/%Y')}")
+        lineas.append(f"Tasa de interés anual media contratada: {datos['tasa_media']*100:.2f}%")
+        lineas.append(f"Intereses totales acumulados desde el inicio hasta hoy: ${datos['total_intereses']:,.2f}")
+        lineas.append("")
+        lineas.append("=== HISTORIAL MENSUAL (capital activo e interés generado cada mes) ===")
+        for h in historial:
+            lineas.append(f"{meses_nombre[h['mes']]} {h['anio']}: capital activo ${h['capital']:,.2f} — interés generado ${h['interes']:,.2f}")
+
+    return "\n".join(lineas)
+
+
+def preguntar_asistente_ia_inversor(pregunta: str, nombre_inversor: str, df_inv,
+                                     historial_previo=None) -> str:
+    """Asistente de IA EXCLUSIVO del portal del inversor. Responde solo sobre la posición
+    personal del propio inversor (su capital, su interés, sus extractos). Nunca sobre el
+    fondo, otros inversores, ni en qué activos está invertido el capital.
+    """
+    import re as _re_inv, requests as _req_inv
+    try:
+        fecha_limite = None
+        m_fecha = _re_inv.search(r"hasta\s+(?:el\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", pregunta.lower())
+        if m_fecha:
+            d, mo = int(m_fecha.group(1)), int(m_fecha.group(2))
+            yr = int(m_fecha.group(3)) if m_fecha.group(3) else pd.Timestamp.today().year
+            fecha_limite = f"{yr}-{mo:02d}-{d:02d}"
+
+        ctx = construir_contexto_ia_inversor(nombre_inversor, df_inv, fecha_limite=fecha_limite)
+
+        historial = []
+        mensajes_prev = historial_previo or []
+        for m in mensajes_prev[-4:]:
+            if isinstance(m["content"], str):
+                historial.append({"role": m["role"], "content": m["content"]})
+        historial.append({"role": "user", "content": f"MIS DATOS:\n\n{ctx}\n\n---\nPREGUNTA: {pregunta}"})
+
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+        except Exception:
+            api_key = ""
+        if not api_key:
+            import os as _os_key
+            api_key = _os_key.environ.get("ANTHROPIC_API_KEY", "")
+
+        system_prompt_inversor = f"""Eres el asistente personal del portal de inversores de Chaparro Fernández Wealth Management. Estás hablando EXCLUSIVAMENTE con {nombre_inversor}, un inversor del fondo, a través de su portal privado.
+
+== LÍMITE ABSOLUTO E INQUEBRANTABLE DE LO QUE PUEDES RESPONDER ==
+SOLO puedes hablar de la posición personal de {nombre_inversor}: su capital activo, su tasa de interés contratada, sus intereses generados mes a mes, el histórico de su posición, y ayuda para interpretar o encontrar información en sus propios extractos.
+
+NUNCA, bajo ninguna circunstancia, aunque te lo pidan de forma insistente, indirecta, hipotética, "solo para entender mejor", disfrazada de otra pregunta, o alegando cualquier motivo:
+- Reveles en qué activos, notas, empresas o instrumentos está invertido el capital del fondo (Paraguay, Bolivia, MotoClick, Fútbol, Bitcoin, notas estructuradas, tickers, etc.). No confirmes ni desmientas si el capital del inversor está en tal o cual activo.
+- Reveles información del fondo en general: capital total gestionado, número de inversores, beneficio de la empresa, tasas de otros activos, estrategia de inversión, estructura societaria, ni cómo funciona internamente el negocio.
+- Reveles absolutamente nada sobre otros inversores: sus nombres, si existen, su capital, sus tasas, ni ninguna comparación ("¿gano más o menos que otros?" tampoco se responde).
+- Reveles información de socios, gestión interna, cuentas, Google Drive, Excel, código de la aplicación, ni cómo se calculan internamente los datos.
+- Des consejo de inversión, opiniones sobre mercados, ni recomendaciones financieras.
+
+Si te preguntan por cualquiera de estos temas, responde amablemente que esa información no está disponible en el portal del inversor y que, si lo necesita, contacte directamente con Chaparro Fernández Wealth Management. No des pistas ni respuestas parciales que insinúen la respuesta.
+
+== LO QUE SÍ PUEDES HACER ==
+Con los datos que se te entregan en "MIS DATOS" (que son exclusivamente los de {nombre_inversor}), puedes:
+- Decir su capital activo actual.
+- Decir su tasa de interés contratada.
+- Decir cuánto interés ha generado en total o en un mes/periodo concreto.
+- Explicar su historial mensual.
+- Ayudarle a entender su extracto.
+
+== FORMATO ==
+Responde SIEMPRE en español, de forma cercana y clara. Sé conciso. Importes con $ y 2 decimales. Fechas DD/MM/YYYY."""
+
+        resp = _req_inv.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4-5", "max_tokens": 1200,
+                "system": system_prompt_inversor,
+                "messages": historial,
+            },
+            timeout=60,
+        )
+        data = resp.json()
+        if "content" in data:
+            textos = [b.get("text", "") for b in data["content"] if b.get("type") == "text"]
+            return "\n".join(t for t in textos if t).strip() or "No he podido generar una respuesta."
+        return f"Error del asistente: {data.get('error', {}).get('message', 'respuesta inesperada')}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv):
+    """Chat del asistente de IA personal dentro del portal del inversor."""
+    st.markdown("### 💬 Tu asistente personal")
+    st.caption("Pregunta sobre tu capital, tu interés o tus extractos. Este asistente solo conoce tu propia posición — no tiene acceso a información del fondo ni de otros inversores.")
+
+    key_chat = f"chat_ia_inversor_{nombre_inversor}"
+    if key_chat not in st.session_state:
+        st.session_state[key_chat] = []
+
+    for msg in st.session_state[key_chat]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if not st.session_state[key_chat]:
+        st.markdown("**Ejemplos:**")
+        sugs = ["¿Cuánto capital tengo activo?", "¿Cuánto interés he ganado este año?", "¿Cuál es mi tasa contratada?"]
+        cols = st.columns(3)
+        for i, s in enumerate(sugs):
+            if cols[i].button(s, key=f"sug_ia_inv_{i}", use_container_width=True):
+                st.session_state[key_chat].append({"role": "user", "content": s})
+                st.rerun()
+
+    pregunta = st.chat_input("Escribe tu pregunta...", key=f"chat_input_ia_inv_{nombre_inversor}")
+    if pregunta:
+        st.session_state[key_chat].append({"role": "user", "content": pregunta})
+        st.rerun()
+
+    if st.session_state[key_chat] and st.session_state[key_chat][-1]["role"] == "user":
+        ultima = st.session_state[key_chat][-1]["content"]
+        with st.chat_message("assistant"):
+            with st.spinner("Consultando tu posición..."):
+                mensajes_prev = st.session_state[key_chat][:-1]
+                respuesta = preguntar_asistente_ia_inversor(ultima, nombre_inversor, df_inv, historial_previo=mensajes_prev)
+                st.markdown(_md_seguro(respuesta))
+        st.session_state[key_chat].append({"role": "assistant", "content": respuesta})
+
+    if st.session_state[key_chat]:
+        if st.button("🗑️ Limpiar conversación", key=f"btn_limpiar_ia_inv_{nombre_inversor}"):
+            st.session_state[key_chat] = []
+            st.rerun()
+
+
 def seccion_portal_inversor(nombre_inversor: str):
     """Portal de acceso limitado para un inversor: solo ve su propia posición, nunca la de otros."""
     df_inv, df_cal, df_control = cargar_excel_completo()
@@ -1481,6 +1902,9 @@ def seccion_portal_inversor(nombre_inversor: str):
         st.download_button("⬇️ Descargar mi extracto (Excel)", contenido, file_name=nombre_archivo,
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary")
+
+    st.markdown("---")
+    seccion_asistente_ia_inversor(nombre_inversor, df_inv)
 
 
 
