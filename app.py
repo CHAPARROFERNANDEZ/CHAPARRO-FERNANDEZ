@@ -1082,7 +1082,7 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         "PAM": "Pam2026Wealth!",
         "LEO": "Leo2026Wealth!",
         "JORDI CHAPARRO": "Jordi2026Wealth!",
-        "ROBERTO BISCAFE": "Roberto2026Wealth!",
+        "ROBERTO VISCAFE": "Roberto2026Wealth!",
         "CROWE BOLIVIA": "Crowe2026Wealth!",
         "JR REAL ESTATE": "JRreal2026Wealth!",
         "2012 JACC GROUP": "Jacc2026Wealth!",
@@ -2617,7 +2617,7 @@ def _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes) -> float:
     tramo de tipos Biscafe/Crowe Bolivia/JR Real Estate). Fuente unica: la usan tanto
     pago_inversores_notas_mes (total agregado) como el detalle prorrateado de ingresos,
     para que el pago al inversor sea siempre identico se mire por donde se mire."""
-    INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
+    INVERSORES_TRAMO = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
     FIN_T1 = pd.Timestamp("2026-01-31")
     INI_T2 = pd.Timestamp("2026-02-01")
     FIN_T2 = pd.Timestamp("2026-06-30")
@@ -4986,7 +4986,7 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nJR REAL ESTATE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
+                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO VISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nJR REAL ESTATE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
                               "messages": historial}, timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
@@ -8721,7 +8721,7 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
                 # Hasta el 31/01/2026 cobraban al 5%; 01/02/2026-30/06/2026 al 7.5%;
                 # desde el 01/07/2026 al 10%. Se aplica siempre, independientemente
                 # de cuándo empezó la inversión ni de lo que diga interes_inversor_anual.
-                INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
+                INVERSORES_TRAMO = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
                 inversor_upper = str(row.get("inversor", "")).strip().upper()
 
                 if inversor_upper in INVERSORES_TRAMO:
@@ -9891,7 +9891,7 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         df_ext["capital_invertido"] = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
         df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-        INVERSORES_TRAMO = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
+        INVERSORES_TRAMO = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
         fin_tramo1 = datetime(2026, 1, 31)
         inicio_tramo2 = datetime(2026, 2, 1)
         fin_tramo2 = datetime(2026, 6, 30)
@@ -10412,7 +10412,7 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         df_ext["capital_invertido"]      = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
         df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-        TRAMO_INV_E = {"ROBERTO BISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
+        TRAMO_INV_E = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
         FIN_T1_E    = datetime(2026, 1, 31)
         INI_T2_E    = datetime(2026, 2, 1)
         FIN_T2_E    = datetime(2026, 6, 30)
@@ -10736,7 +10736,7 @@ Se eligió variación fija en vez de margen a la barrera de contingencia (que se
 
 == INVERSORES Y TASAS ==
 LEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%
-ROBERTO BISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026
+ROBERTO VISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026
 CROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026
 JR REAL ESTATE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026
 2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%
