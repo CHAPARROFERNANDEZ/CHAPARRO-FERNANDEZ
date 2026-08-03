@@ -34,7 +34,8 @@ from openpyxl.utils import get_column_letter
 
 if __name__ == "__main__":  # page config: solo se ejecuta con `streamlit run`, no al importar
     st.set_page_config(
-        page_title="Sistema Fondo",
+        page_title="Chaparro Fernández Wealth",
+        page_icon="assets/favicon_cf.png",
         layout="wide",
         initial_sidebar_state="collapsed",
     )
