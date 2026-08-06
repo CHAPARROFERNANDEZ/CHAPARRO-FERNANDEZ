@@ -815,6 +815,16 @@ def aplicar_estilo_profesional():
             padding: 6px 10px;
         }
 
+        /* ── El texto de dentro de los botones (Descargar Excel, Cerrar
+           sesión, etc.) no debe quedar afectado por la regla anterior:
+           el fondo del botón es azul marino, así que su texto siempre
+           tiene que ser blanco para poder leerse. */
+        .stButton button, .stButton button *,
+        .stDownloadButton button, .stDownloadButton button *,
+        button[kind="primary"], button[kind="primary"] * {
+            color: #ffffff !important;
+        }
+
         /* ── Botón para abrir el menú lateral, grande y fácil de tocar */
         [data-testid="collapsedControl"] {
             background: #1e3a5f !important;
