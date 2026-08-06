@@ -815,16 +815,6 @@ def aplicar_estilo_profesional():
             padding: 6px 10px;
         }
 
-        /* ── El texto de dentro de los botones (Descargar Excel, Cerrar
-           sesión, etc.) no debe quedar afectado por la regla anterior:
-           el fondo del botón es azul marino, así que su texto siempre
-           tiene que ser blanco para poder leerse. */
-        .stButton button, .stButton button *,
-        .stDownloadButton button, .stDownloadButton button *,
-        button[kind="primary"], button[kind="primary"] * {
-            color: #ffffff !important;
-        }
-
         /* ── Botón para abrir el menú lateral, grande y fácil de tocar */
         [data-testid="collapsedControl"] {
             background: #1e3a5f !important;
@@ -839,6 +829,29 @@ def aplicar_estilo_profesional():
             height: 28px !important;
             color: #ffffff !important;
             fill: #ffffff !important;
+        }
+
+        /* ── El texto de dentro de los botones (Descargar Excel, Cerrar
+           sesión, Entrar, Actualizar contraseña... TODOS los botones con
+           fondo azul marino) no debe quedar afectado por las reglas de
+           arriba que oscurecen el texto general: aquí se fuerza blanco
+           con máxima prioridad, tanto en la sidebar como en el resto de
+           la app, cubriendo también los botones dentro de formularios. */
+        [data-testid="stAppViewContainer"] .stButton button,
+        [data-testid="stAppViewContainer"] .stButton button *,
+        [data-testid="stAppViewContainer"] .stDownloadButton button,
+        [data-testid="stAppViewContainer"] .stDownloadButton button *,
+        [data-testid="stAppViewContainer"] .stFormSubmitButton button,
+        [data-testid="stAppViewContainer"] .stFormSubmitButton button *,
+        section[data-testid="stSidebar"] .stButton button,
+        section[data-testid="stSidebar"] .stButton button *,
+        section[data-testid="stSidebar"] .stDownloadButton button,
+        section[data-testid="stSidebar"] .stDownloadButton button *,
+        section[data-testid="stSidebar"] .stFormSubmitButton button,
+        section[data-testid="stSidebar"] .stFormSubmitButton button *,
+        button[kind="primary"], button[kind="primary"] *,
+        button[kind="secondary"][class*="stFormSubmitButton"], button[kind="secondary"][class*="stFormSubmitButton"] * {
+            color: #ffffff !important;
         }
 
         /* ── Permitir copiar/pegar el texto (incluidas las respuestas
