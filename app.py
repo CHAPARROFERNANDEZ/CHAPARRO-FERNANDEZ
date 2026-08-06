@@ -690,102 +690,111 @@ def aplicar_estilo_profesional():
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+        /* ── Paleta ───────────────────────────────────────────────────────
+           Fondo claro y uniforme (nada de diagonales oscuras). El azul
+           marino se usa solo como color de acento puntual (títulos,
+           botones, iconos) y el dorado como detalle muy sutil. */
         .stApp {
-            background:
-                radial-gradient(circle at top left, rgba(191, 154, 95, 0.18), transparent 30%),
-                linear-gradient(135deg, #071425 0%, #0e2338 42%, #f6f3ee 42%, #f6f3ee 100%);
+            background: #eef1f5;
             background-attachment: fixed;
         }
         .block-container {
             max-width: 1240px;
-            padding-top: 2.2rem;
+            padding-top: 2rem;
             padding-bottom: 3rem;
-            background: rgba(255, 255, 255, 0.94);
-            border: 1px solid rgba(255, 255, 255, 0.55);
-            border-radius: 28px;
-            box-shadow: 0 24px 70px rgba(4, 20, 37, 0.18);
+            background: #ffffff;
+            border: 1px solid #e4e8ee;
+            border-radius: 20px;
+            box-shadow: 0 10px 34px rgba(15, 35, 60, 0.06);
             margin-top: 1.2rem;
             margin-bottom: 1.2rem;
         }
+
+        /* ── Sidebar clara: mismo tono que el resto de la app, sin
+           necesidad de forzar texto blanco sobre fondo oscuro. */
         section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #071425 0%, #102a43 100%);
-            border-right: 1px solid rgba(191, 154, 95, 0.32);
+            background: #f7f8fb;
+            border-right: 1px solid #e4e8ee;
             transform: none !important;
             visibility: visible !important;
         }
         section[data-testid="stSidebar"] label,
         section[data-testid="stSidebar"] p,
         section[data-testid="stSidebar"] span,
-        section[data-testid="stSidebar"] div { color: #f7f1e8 !important; }
-        section[data-testid="stSidebar"] [data-baseweb="select"] div,
-        section[data-testid="stSidebar"] input { color: #071425 !important; }
-        h1, h2, h3 { color: #102033; letter-spacing: -0.03em; }
+        section[data-testid="stSidebar"] div { color: #1f2937 !important; }
+        section[data-testid="stSidebar"] input { color: #1f2937 !important; }
+
+        h1, h2, h3 { color: #16324f; letter-spacing: -0.02em; }
+
         div[data-testid="stMetric"] {
-            background: linear-gradient(145deg, #ffffff 0%, #f5f0e8 100%);
-            border: 1px solid rgba(191, 154, 95, 0.24);
-            border-radius: 20px;
+            background: #ffffff;
+            border: 1px solid #e4e8ee;
+            border-radius: 16px;
             padding: 18px 20px;
-            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.08);
+            box-shadow: 0 6px 18px rgba(15, 35, 60, 0.05);
         }
-        div[data-testid="stMetricValue"] { color: #0e2338; font-weight: 800; }
+        div[data-testid="stMetricValue"] { color: #16324f; font-weight: 800; }
+
         .stButton > button, .stDownloadButton > button, button[kind="primary"] {
-            border-radius: 999px !important;
-            background: linear-gradient(135deg, #0e2338 0%, #173b5c 60%, #bf9a5f 100%) !important;
+            border-radius: 10px !important;
+            background: #1e3a5f !important;
             color: white !important;
             border: 0 !important;
-            font-weight: 700 !important;
-            padding: 0.55rem 1.2rem !important;
-            box-shadow: 0 10px 24px rgba(14, 35, 56, 0.20);
+            font-weight: 600 !important;
+            padding: 0.5rem 1.1rem !important;
+            box-shadow: none;
+            transition: background 0.15s ease;
         }
+        .stButton > button:hover, .stDownloadButton > button:hover, button[kind="primary"]:hover {
+            background: #2a4d78 !important;
+        }
+
         div[data-testid="stDataFrame"] {
-            border-radius: 18px;
+            border-radius: 14px;
             overflow: hidden;
-            border: 1px solid rgba(14, 35, 56, 0.10);
-            box-shadow: 0 10px 28px rgba(15, 35, 55, 0.06);
+            border: 1px solid #e4e8ee;
         }
+
+        /* ── Cabecera de marca: tarjeta clara con un acento de color,
+           en vez del degradado oscuro que costaba leer. */
         .brand-hero {
             display: flex; align-items: center; justify-content: space-between; gap: 24px;
-            padding: 26px 30px; margin-bottom: 26px; border-radius: 26px;
-            background: linear-gradient(135deg, rgba(14,35,56,0.97) 0%, rgba(20,53,82,0.94) 58%, rgba(191,154,95,0.92) 100%);
-            box-shadow: 0 18px 45px rgba(7, 20, 37, 0.22); color: white;
+            padding: 22px 28px; margin-bottom: 26px; border-radius: 18px;
+            background: #ffffff; border: 1px solid #e4e8ee; border-left: 5px solid #1e3a5f;
+            box-shadow: 0 6px 18px rgba(15, 35, 60, 0.05); color: #16324f;
         }
         .brand-left { display: flex; align-items: center; gap: 18px; }
         .brand-logo {
-            width: 76px; height: 76px; border-radius: 20px; background: rgba(255,255,255,0.94); color: #0e2338;
-            display: flex; align-items: center; justify-content: center; font-size: 34px; font-weight: 800;
-            letter-spacing: -0.10em; border: 1px solid rgba(191,154,95,0.45);
-            box-shadow: inset 0 0 0 2px rgba(191,154,95,0.12), 0 10px 24px rgba(0,0,0,0.16);
+            width: 60px; height: 60px; border-radius: 14px; background: #1e3a5f; color: #ffffff;
+            display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 800;
+            letter-spacing: -0.06em;
         }
-        .brand-title { font-size: 30px; line-height: 1.05; font-weight: 800; letter-spacing: -0.04em; }
-        .brand-subtitle { margin-top: 8px; color: rgba(255,255,255,0.78); font-size: 14px; font-weight: 500; }
+        .brand-title { font-size: 24px; line-height: 1.15; font-weight: 800; letter-spacing: -0.02em; color: #16324f; }
+        .brand-subtitle { margin-top: 6px; color: #64748b; font-size: 14px; font-weight: 500; }
         .brand-tag {
-            padding: 9px 14px; border-radius: 999px; background: rgba(255,255,255,0.13);
-            border: 1px solid rgba(255,255,255,0.25); font-size: 13px; font-weight: 700; color: #fff; white-space: nowrap;
+            padding: 8px 14px; border-radius: 999px; background: #f0f4f9;
+            border: 1px solid #d8e0ea; font-size: 13px; font-weight: 700; color: #1e3a5f; white-space: nowrap;
         }
+
         .login-card {
-            max-width: 460px; margin: 6vh auto 0 auto; padding: 34px 34px 30px 34px; border-radius: 30px;
-            background: rgba(255,255,255,0.94); border: 1px solid rgba(191,154,95,0.30);
-            box-shadow: 0 26px 80px rgba(4, 20, 37, 0.32); text-align: center;
+            max-width: 440px; margin: 6vh auto 0 auto; padding: 34px 34px 30px 34px; border-radius: 20px;
+            background: #ffffff; border: 1px solid #e4e8ee;
+            box-shadow: 0 14px 40px rgba(15, 35, 60, 0.10); text-align: center;
         }
         .login-logo {
-            width: 96px; height: 96px; border-radius: 26px; margin: 0 auto 18px auto;
-            background: linear-gradient(145deg, #ffffff, #f3eadc); color: #0e2338;
-            display: flex; align-items: center; justify-content: center; font-size: 42px; font-weight: 800;
-            letter-spacing: -0.10em; border: 1px solid rgba(191,154,95,0.45);
+            width: 76px; height: 76px; border-radius: 18px; margin: 0 auto 18px auto;
+            background: #1e3a5f; color: #ffffff;
+            display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 800;
+            letter-spacing: -0.06em;
         }
-        .login-title { font-size: 26px; font-weight: 800; color: #0e2338; letter-spacing: -0.03em; margin-bottom: 6px; }
-        .login-subtitle { font-size: 14px; color: #667085; margin-bottom: 20px; }
+        .login-title { font-size: 24px; font-weight: 800; color: #16324f; letter-spacing: -0.02em; margin-bottom: 6px; }
+        .login-subtitle { font-size: 14px; color: #64748b; margin-bottom: 20px; }
         #MainMenu, footer {visibility: hidden;}
         header {visibility: visible;}
 
-        /* ── FIX: texto invisible en móvil ─────────────────────────────────
-           El bug real es que el color del texto sigue el modo claro/oscuro
-           del sistema (móvil), pero los fondos de las tarjetas/chat están
-           fijados en claro. En modo oscuro, Streamlit pone el texto en
-           blanco y con fondo blanco se vuelve invisible. Aquí se fuerza
-           el color del texto en TODO el contenido principal (incluidas
-           las respuestas del asistente de IA y el dashboard) para que
-           nunca dependa del tema del dispositivo. */
+        /* ── Texto siempre legible, sin depender del modo claro/oscuro
+           del dispositivo (evita el bug de texto invisible en móvil). */
         [data-testid="stAppViewContainer"] p,
         [data-testid="stAppViewContainer"] span,
         [data-testid="stAppViewContainer"] li,
@@ -797,42 +806,32 @@ def aplicar_estilo_profesional():
         [data-testid="stChatMessage"] *,
         [data-testid="stChatMessageContent"],
         [data-testid="stChatMessageContent"] * {
-            color: #14213d !important;
-        }
-        /* La barra lateral tiene fondo oscuro, así que su texto se queda en
-           claro (esta regla es más específica que la de arriba, por lo que
-           gana la partida sin necesidad de tocar nada más). */
-        section[data-testid="stSidebar"] p,
-        section[data-testid="stSidebar"] span,
-        section[data-testid="stSidebar"] li,
-        section[data-testid="stSidebar"] label,
-        section[data-testid="stSidebar"] div {
-            color: #f7f1e8 !important;
+            color: #1f2937 !important;
         }
         [data-testid="stChatMessage"] {
-            background: #ffffff !important;
-            border-radius: 16px;
-            border: 1px solid rgba(14, 35, 56, 0.08);
+            background: #f7f8fb !important;
+            border-radius: 14px;
+            border: 1px solid #e4e8ee;
             padding: 6px 10px;
         }
 
-        /* ── FIX: botón para abrir el menú lateral, grande y fácil de tocar */
+        /* ── Botón para abrir el menú lateral, grande y fácil de tocar */
         [data-testid="collapsedControl"] {
-            background: linear-gradient(135deg, #0e2338 0%, #173b5c 60%, #bf9a5f 100%) !important;
-            border-radius: 12px !important;
+            background: #1e3a5f !important;
+            border-radius: 10px !important;
             padding: 8px !important;
-            box-shadow: 0 8px 20px rgba(14, 35, 56, 0.35);
+            box-shadow: 0 4px 12px rgba(15, 35, 60, 0.18);
             top: 0.6rem !important;
             left: 0.6rem !important;
         }
         [data-testid="collapsedControl"] svg {
-            width: 30px !important;
-            height: 30px !important;
+            width: 28px !important;
+            height: 28px !important;
             color: #ffffff !important;
             fill: #ffffff !important;
         }
 
-        /* ── FIX: permitir copiar/pegar el texto (incluidas las respuestas
+        /* ── Permitir copiar/pegar el texto (incluidas las respuestas
            del asistente de IA), por si algún navegador móvil lo bloquea */
         [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] * {
             -webkit-user-select: text !important;
@@ -1021,53 +1020,6 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
                     st.warning(f"⚠️ Contraseña actualizada localmente. {mensaje}")
 
 
-def panel_ver_contrasenas_admin(usuarios_admin: dict, usuarios_inversores: dict):
-    """Solo para el equipo interno (admin): muestra la contraseña ACTUAL de cada usuario
-    (la de Drive si ya la cambió, o si no la inicial del código), para poder consultarla
-    o compartirla sin tener que tocar el código."""
-    with st.sidebar.expander("👥 Ver contraseñas de usuarios"):
-        df_u = _leer_hoja_usuarios()
-        hay_drive = not df_u.empty and {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns)
-
-        filas = []
-        for u, pw in usuarios_admin.items():
-            actual = pw
-            origen = "inicial (código)"
-            if hay_drive:
-                m = df_u[(df_u["usuario"].astype(str).str.strip().str.lower() == u.strip().lower()) & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == "admin")]
-                if not m.empty:
-                    actual = str(m.iloc[0]["password"])
-                    origen = "cambiada por el usuario"
-            filas.append({"Usuario": u, "Tipo": "Equipo interno", "Contraseña actual": actual, "Origen": origen})
-
-        for u, pw in usuarios_inversores.items():
-            actual = pw
-            origen = "inicial (código)"
-            if hay_drive:
-                m = df_u[(df_u["usuario"].astype(str).str.strip().str.lower() == u.strip().lower()) & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == "inversor")]
-                if not m.empty:
-                    actual = str(m.iloc[0]["password"])
-                    origen = "cambiada por el usuario"
-            filas.append({"Usuario": u, "Tipo": "Inversor", "Contraseña actual": actual, "Origen": origen})
-
-        # Usuarios que hayan cambiado su contraseña sin estar en los diccionarios del código
-        # (por ejemplo un nuevo inversor añadido directamente en la hoja USUARIOS de Drive).
-        if hay_drive:
-            conocidos = {(u.strip().lower(), "admin") for u in usuarios_admin} | {(u.strip().lower(), "inversor") for u in usuarios_inversores}
-            for _, row in df_u.iterrows():
-                clave = (str(row["usuario"]).strip().lower(), str(row["tipo_usuario"]).strip().lower())
-                if clave not in conocidos:
-                    filas.append({
-                        "Usuario": row["usuario"],
-                        "Tipo": "Equipo interno" if row["tipo_usuario"] == "admin" else "Inversor",
-                        "Contraseña actual": row["password"],
-                        "Origen": "cambiada por el usuario",
-                    })
-
-        st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
-        st.caption("⚠️ Se muestran en texto plano por decisión explícita — cualquiera con acceso a esta cuenta o al Excel de Drive puede verlas.")
-
-
 if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit run`, no al importar
     aplicar_estilo_profesional()
 
@@ -1149,8 +1101,6 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
-    if st.session_state.tipo_usuario == "admin":
-        panel_ver_contrasenas_admin(USUARIOS, USUARIOS_INVERSORES)
     st.sidebar.caption("🔧 Build de prueba: persistencia de borradores (v2)")
     st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá automáticamente.")
     if st.sidebar.button("Cerrar sesión"):
@@ -10789,28 +10739,10 @@ def seccion_asistente_ia_fondo():
 
     import os, re as _re_ia, requests as _req_ia
 
-    # ── Gestión de PDFs ───────────────────────────────────────────────────────
-    import tempfile, base64 as _b64
-    carpeta_tmp = os.path.join(tempfile.gettempdir(), "notas_pdfs_cf")
-    carpeta_repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notas_pdfs")
-    os.makedirs(carpeta_tmp, exist_ok=True)
-
+    # Los PDFs de notas (si existen en el repo) se siguen usando automáticamente
+    # como contexto adicional cuando la pregunta menciona una nota concreta,
+    # pero ya no se gestionan ni se muestran desde esta pantalla.
     pdfs_b64 = pdfs_disponibles_notas()
-    n_pdfs = len(pdfs_b64)
-
-    with st.expander(f"📂 PDFs de notas cargados ({n_pdfs})", expanded=n_pdfs == 0):
-        if pdfs_b64:
-            for p in sorted(pdfs_b64.keys()):
-                st.markdown(f"✅ `{p}`")
-        else:
-            st.info("No hay PDFs. Súbelos desde aquí o a la carpeta notas_pdfs/ en GitHub.")
-        subidos = st.file_uploader("Subir PDFs", type=["pdf"], accept_multiple_files=True, key="up_pdfs_ia")
-        if subidos:
-            for f in subidos:
-                with open(os.path.join(carpeta_tmp, f.name), "wb") as out:
-                    out.write(f.read())
-            st.success(f"✅ {len(subidos)} PDF(s) guardado(s).")
-            st.rerun()
 
     # (El contexto se construye con construir_contexto_ia_fondo(), definida a nivel de módulo)
 
@@ -10821,22 +10753,6 @@ def seccion_asistente_ia_fondo():
     for msg in st.session_state["chat_ia_cf"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-
-    if not st.session_state["chat_ia_cf"]:
-        st.markdown("**Ejemplos:**")
-        sugs = [
-            "¿Cuándo es el próximo cobro?",
-            "¿Cuánto cobraremos del 28/05 al 07/06?",
-            "¿Cuándo es el próximo call?",
-            "¿Cuánto capital hay activo hoy?",
-            "¿Cuánto beneficio ha generado MotoClick?",
-            "Dame los detalles de la Nota 7",
-        ]
-        col1, col2, col3 = st.columns(3)
-        for i, s in enumerate(sugs):
-            if [col1,col2,col3][i%3].button(s, key=f"sug_ia_{i}", use_container_width=True):
-                st.session_state["chat_ia_cf"].append({"role": "user", "content": s})
-                st.rerun()
 
     pregunta = st.chat_input("Escribe tu pregunta...", key="chat_input_ia_cf")
     if pregunta:
@@ -10872,7 +10788,7 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
     menu = st.sidebar.selectbox(
         "Menú principal",
         [
-            "Dashboard financiero", "Centro de control", "Consultas",
+            "Dashboard financiero", "Centro de control",
             "Notas estructuradas", "Alertas y calendario", "Extractos", "Gestión de Excel",
             "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
         ],
@@ -10883,24 +10799,6 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
 
     elif menu == "Centro de control":
         centro_control_inversiones()
-    elif menu == "Consultas":
-        tipo_consulta = st.selectbox(
-            "¿Qué quieres consultar?",
-            ["Notas", "Fútbol", "Paraguay", "Bolivia", "MotoClick", "Bitcoin"],
-            key="consultas_selector"
-        )
-        if tipo_consulta == "Notas":
-            seccion_notas()
-        elif tipo_consulta == "Fútbol":
-            seccion_activo("Fútbol", "futbol", TASA_ANUAL_FUTBOL)
-        elif tipo_consulta == "Paraguay":
-            seccion_activo("Paraguay", "paraguay", TASA_ANUAL_PARAGUAY, incluir_ingresado_desde_inicio=True)
-        elif tipo_consulta == "Bolivia":
-            seccion_activo("Bolivia", "bolivia", TASA_ANUAL_BOLIVIA, incluir_ingresado_desde_inicio=True)
-        elif tipo_consulta == "Bitcoin":
-            seccion_activo("Bitcoin", "bitcoin", TASA_ANUAL_BITCOIN, incluir_ingresado_desde_inicio=True)
-        elif tipo_consulta == "MotoClick":
-            seccion_activo("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK)
     elif menu == "Notas estructuradas":
         seccion_notas_archivo()
     elif menu == "Alertas y calendario":
