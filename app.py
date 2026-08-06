@@ -712,12 +712,14 @@ def aplicar_estilo_profesional():
         }
 
         /* ── Sidebar clara: mismo tono que el resto de la app, sin
-           necesidad de forzar texto blanco sobre fondo oscuro. */
+           necesidad de forzar texto blanco sobre fondo oscuro. En móvil
+           dejamos que Streamlit la abra/cierre de forma normal (antes se
+           forzaba siempre visible, y eso es justo lo que la dejaba como
+           una tira estrecha con el texto partido letra a letra en el
+           borde izquierdo cuando estaba "cerrada"). */
         section[data-testid="stSidebar"] {
             background: #f7f8fb;
             border-right: 1px solid #e4e8ee;
-            transform: none !important;
-            visibility: visible !important;
         }
         section[data-testid="stSidebar"] label,
         section[data-testid="stSidebar"] p,
@@ -852,6 +854,33 @@ def aplicar_estilo_profesional():
         button[kind="primary"], button[kind="primary"] *,
         button[kind="secondary"][class*="stFormSubmitButton"], button[kind="secondary"][class*="stFormSubmitButton"] * {
             color: #ffffff !important;
+        }
+
+        /* ── Cuadro de escribir al Asistente IA (chat_input): en móvil,
+           al seguir el modo claro/oscuro del sistema, si el teléfono está
+           en oscuro este cuadro se queda con fondo negro y letra negra —
+           ilegible. Se fuerza aquí un fondo claro y letra oscura siempre,
+           tanto en el propio cuadro como en el texto que se escribe. */
+        [data-testid="stChatInput"],
+        [data-testid="stChatInputContainer"],
+        [data-testid="stBottomBlockContainer"],
+        [data-testid="stChatFloatingInputContainer"] {
+            background: #ffffff !important;
+        }
+        [data-testid="stChatInput"] textarea,
+        [data-testid="stChatInputContainer"] textarea {
+            background: #ffffff !important;
+            color: #1f2937 !important;
+            caret-color: #1f2937 !important;
+        }
+        [data-testid="stChatInput"] textarea::placeholder,
+        [data-testid="stChatInputContainer"] textarea::placeholder {
+            color: #94a3b8 !important;
+        }
+        [data-testid="stChatInput"] button svg,
+        [data-testid="stChatInputContainer"] button svg {
+            color: #1e3a5f !important;
+            fill: #1e3a5f !important;
         }
 
         /* ── Permitir copiar/pegar el texto (incluidas las respuestas
@@ -1124,8 +1153,6 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
-    st.sidebar.caption("🔧 Build de prueba: persistencia de borradores (v2)")
-    st.sidebar.caption("Si el menú se oculta, recarga la página: ahora se abrirá automáticamente.")
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.autenticado = False
         st.session_state.usuario = None
