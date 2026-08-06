@@ -10835,14 +10835,16 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         seccion_portal_inversor(st.session_state.usuario)
         st.stop()
 
-    menu = st.sidebar.selectbox(
-        "Menú principal",
-        [
-            "Dashboard financiero", "Centro de control",
-            "Notas estructuradas", "Alertas y calendario", "Extractos", "Gestión de Excel",
-            "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
-        ],
-    )
+    menu_opciones = [
+        "Dashboard financiero", "Centro de control",
+        "Notas estructuradas", "Alertas y calendario", "Extractos",
+        "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
+    ]
+    # "Gestión de Excel" es acceso directo al Excel del fondo: solo Yuri debe verlo.
+    if str(st.session_state.usuario).strip().lower() == "yuri":
+        menu_opciones.insert(5, "Gestión de Excel")
+
+    menu = st.sidebar.selectbox("Menú principal", menu_opciones)
 
     if menu == "Dashboard financiero":
         dashboard_financiero()
@@ -10856,7 +10858,7 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
 
     elif menu == "Extractos":
         seccion_extractos()
-    elif menu == "Gestión de Excel":
+    elif menu == "Gestión de Excel" and str(st.session_state.usuario).strip().lower() == "yuri":
         seccion_gestion_excel()
     elif menu == "🏦 Deuda Jordi Chaparro":
         seccion_deuda_jordi()
