@@ -4627,24 +4627,36 @@ def dashboard_financiero():
         detalle_devengo = interes_devengado_no_cobrado_notas(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
         total_devengado = float(detalle_devengo["interes_devengado_no_cobrado"].sum()) if not detalle_devengo.empty else 0.0
 
-    cols_kpi = st.columns(5) if incluir_devengado else st.columns(4)
+    cols_kpi = st.columns(4)
     with cols_kpi[0]:
         tarjeta_kpi("Capital activo total", fmt(resumen["capital_total"]), "Capital actualmente vivo", "normal")
     with cols_kpi[1]:
-        tarjeta_kpi("Cobro estimado mes", fmt(resumen["cobro_total_mes"]), "Ingresos brutos esperados", "positivo")
+        if incluir_devengado:
+            tarjeta_kpi(
+                "Cobro estimado mes",
+                fmt(resumen["cobro_total_mes"]),
+                f"+ {fmt(total_devengado)} devengado no cobrado",
+                "positivo",
+            )
+        else:
+            tarjeta_kpi("Cobro estimado mes", fmt(resumen["cobro_total_mes"]), "Ingresos brutos esperados", "positivo")
     with cols_kpi[2]:
         tarjeta_kpi("Pago inversores mes", fmt(resumen["pago_total_mes"]), "Obligaciones estimadas", "riesgo")
     with cols_kpi[3]:
-        estado = "positivo" if resumen["beneficio_total_mes"] >= 0 else "negativo"
-        tarjeta_kpi("Beneficio estimado mes", fmt(resumen["beneficio_total_mes"]), "Margen neto estimado", estado)
-    if incluir_devengado:
-        with cols_kpi[4]:
+        if incluir_devengado:
+            beneficio_con_devengado = resumen["cobro_total_mes"] + total_devengado - resumen["pago_total_mes"]
+            estado = "positivo" if beneficio_con_devengado >= 0 else "negativo"
             tarjeta_kpi(
-                "Cobro + devengado no cobrado",
-                fmt(resumen["cobro_total_mes"] + total_devengado),
-                f"Cobro real de {nombre_mes_es(mes_dashboard)} + interés corrido desde el último pago hasta fin de mes",
-                "positivo",
+                "Beneficio estimado mes",
+                fmt(beneficio_con_devengado),
+                "Margen neto estimado (incluye devengado no cobrado)",
+                estado,
             )
+        else:
+            estado = "positivo" if resumen["beneficio_total_mes"] >= 0 else "negativo"
+            tarjeta_kpi("Beneficio estimado mes", fmt(resumen["beneficio_total_mes"]), "Margen neto estimado", estado)
+
+    if incluir_devengado:
         if not detalle_devengo.empty:
             with st.expander("Ver detalle del interés devengado por nota", expanded=False):
                 tabla_devengo = detalle_devengo.copy().sort_values("interes_devengado_no_cobrado", ascending=False)
