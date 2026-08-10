@@ -2789,11 +2789,17 @@ def detalle_notas_mes_prorrateado(df_inv: pd.DataFrame, anio: int, mes: int, df_
     return pd.DataFrame(filas)
 
 
-def interes_devengado_no_cobrado_notas(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame) -> pd.DataFrame:
+def interes_devengado_no_cobrado_notas(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, anio: int | None = None, mes: int | None = None) -> pd.DataFrame:
     """Interes corrido por nota: lo que cada nota ya ha generado como INGRESO de la empresa
     (cobro_compania / interes_nota_anual) desde el ULTIMO PAGO REAL cobrado (evento PAGO en
-    CALENDARIO_NOTAS con fecha <= hoy) hasta fin del mes en curso, y que todavia no se ha
-    cobrado porque el proximo PAGO cae mas adelante (tipico de notas trimestrales/semestrales).
+    CALENDARIO_NOTAS con fecha <= fin del mes seleccionado) hasta fin de ese mes, y que
+    todavia no se ha cobrado porque el proximo PAGO cae mas adelante (tipico de notas
+    trimestrales/semestrales).
+
+    anio/mes: mes del dashboard a analizar (igual que anio_dashboard/mes_dashboard). Si se
+    omiten, se usa el mes en curso. Esto permite navegar mes a mes en vez de acumular siempre
+    hasta hoy: para agosto se ve el corrido hasta fin de agosto, para julio hasta fin de julio,
+    cada uno con su propio "ultimo pago" (que puede ser distinto si hubo un PAGO real entre medias).
 
     Formula (interes corrido ACT/365 -- respuesta literal a lo que pidio el jefe de Yuri:
     "cuanto llevo devengado desde el ultimo pago hasta fin de mes"):
@@ -2801,18 +2807,24 @@ def interes_devengado_no_cobrado_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
         interes_devengado = capital_invertido x interes_nota_anual / 365 x dias_devengo
 
     Reglas (confirmadas con Yuri 10/08/2026):
-    - Todas las notas activas hoy, incluyendo REINVERSION (el capital reinvertido sigue
-      generando interes real de la nota para la empresa, igual que en el prorrateo mensual).
-    - Si la nota nunca tuvo un PAGO real todavia, el devengo arranca en su fecha_inversion.
-    - Respeta la barrera de cupon: si la ultima observacion conocida hasta hoy fue NEGATIVA,
-      esa nota no devenga interes (mismo criterio que detalle_notas_mes_prorrateado).
+    - Todas las notas activas en el mes seleccionado, incluyendo REINVERSION (el capital
+      reinvertido sigue generando interes real de la nota para la empresa, igual que en el
+      prorrateo mensual).
+    - Si la nota nunca tuvo un PAGO real todavia (hasta fin del mes seleccionado), el devengo
+      arranca en su fecha_inversion.
+    - Respeta la barrera de cupon: si la ultima observacion conocida hasta fin de mes fue
+      NEGATIVA, esa nota no devenga interes (mismo criterio que detalle_notas_mes_prorrateado).
     - Es el INGRESO de la empresa (interes_nota_anual), NO el pago a inversores
       (interes_inversor_anual) -- el jefe pregunto por lo que "tengo" devengado, no por lo
       que se debe pagar a los inversores.
     """
     hoy = pd.Timestamp.today().normalize()
+    anio = int(anio) if anio else hoy.year
+    mes = int(mes) if mes else hoy.month
     import calendar as _cal
-    fin_mes = pd.Timestamp(hoy.year, hoy.month, _cal.monthrange(hoy.year, hoy.month)[1])
+    dias_mes_sel = _cal.monthrange(anio, mes)[1]
+    inicio_mes = pd.Timestamp(anio, mes, 1)
+    fin_mes = pd.Timestamp(anio, mes, dias_mes_sel)
 
     cols_vacias = ["nota", "inversor", "capital_invertido", "interes_nota_anual",
                    "ultimo_pago_cobrado", "dias_devengo", "interes_devengado_no_cobrado",
@@ -2821,19 +2833,21 @@ def interes_devengado_no_cobrado_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
     notas_todas = filtrar_notas(df_inv)
     activas = notas_todas[
         notas_todas["fecha_inversion"].notna()
-        & (notas_todas["fecha_inversion"] <= hoy)
-        & (notas_todas["fecha_final_inversion"].isna() | (notas_todas["fecha_final_inversion"] >= hoy))
+        & (notas_todas["fecha_inversion"] <= fin_mes)
+        & (notas_todas["fecha_final_inversion"].isna() | (notas_todas["fecha_final_inversion"] >= inicio_mes))
     ].copy()
     if activas.empty:
         return pd.DataFrame(columns=cols_vacias)
 
-    pagos_hechos = pagos_notas_hasta_hoy(df_cal) if df_cal is not None else pd.DataFrame()
+    pagos_hasta_fin_mes = df_cal[
+        (df_cal["tipo_evento"] == "PAGO") & (df_cal["fecha"].notna()) & (df_cal["fecha"] <= fin_mes)
+    ].copy().sort_values(["fecha", "nota"]) if df_cal is not None and not df_cal.empty else pd.DataFrame()
     cache_barrera = {}
 
     def _ultimo_pago(nota_int):
-        if pagos_hechos.empty:
+        if pagos_hasta_fin_mes.empty:
             return None
-        pagos_nota = pagos_hechos[pagos_hechos["nota"] == nota_int]
+        pagos_nota = pagos_hasta_fin_mes[pagos_hasta_fin_mes["nota"] == nota_int]
         return None if pagos_nota.empty else pagos_nota.iloc[-1]["fecha"]
 
     def _ingreso_habilitado(nota_int):
@@ -2841,7 +2855,7 @@ def interes_devengado_no_cobrado_notas(df_inv: pd.DataFrame, df_cal: pd.DataFram
             return cache_barrera[nota_int]
         habilitado = True
         if df_cal is not None and df_control is not None and not df_control.empty:
-            fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, hoy)
+            fecha_obs = obtener_observacion_previa_nota(df_cal, nota_int, fin_mes)
             if fecha_obs is not None:
                 resultado_obs, _ = evaluar_nota_en_fecha(df_control, nota_int, fecha_obs, preferida="contingency")
                 if resultado_obs == "NEGATIVA":
@@ -4532,7 +4546,7 @@ def dashboard_financiero():
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
 
     hoy = pd.Timestamp.today().normalize()
-    col_activo, col_periodo_1, col_periodo_2, col_chaparro, col_prorrateo = st.columns([1.3, 0.9, 0.9, 1.1, 1.1])
+    col_activo, col_periodo_1, col_periodo_2, col_chaparro, col_prorrateo, col_devengo = st.columns([1.2, 0.8, 0.8, 1.0, 1.0, 1.0])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
         ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin"],
@@ -4549,6 +4563,12 @@ def dashboard_financiero():
         value=False,
         key="dashboard_prorratear_notas",
         help="Si está activado, el cobro de notas trimestrales/semestrales se reparte a partes iguales entre los meses del periodo (devengo mensual) en vez de aparecer todo de golpe en el mes de cobro real. Solo afecta a los INGRESOS de notas mostrados aquí y en el desglose de Notas; el pago a inversores no cambia, y no afecta a Fútbol, MotoClick, Paraguay, Bolivia ni Bitcoin.",
+    )
+    incluir_devengado = col_devengo.checkbox(
+        "Incluir interés devengado",
+        value=False,
+        key="dashboard_incluir_devengado",
+        help="Si está activado, añade una tarjeta con el cobro real del mes + el interés corrido de cada nota desde su último pago real hasta fin del mes seleccionado (ACT/365), y un detalle por nota. Es específico del mes elegido arriba, no se acumula entre meses. No afecta al pago a inversores ni al beneficio.",
     )
     anio_dashboard = int(col_periodo_1.number_input(
         "Año del dashboard",
@@ -4601,16 +4621,41 @@ def dashboard_financiero():
     )
     df_inv_calculo = aplicar_filtro_chaparro_fernandez(df_inv, incluir_chaparro)
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
+    detalle_devengo = pd.DataFrame()
+    total_devengado = 0.0
+    if incluir_devengado:
+        detalle_devengo = interes_devengado_no_cobrado_notas(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
+        total_devengado = float(detalle_devengo["interes_devengado_no_cobrado"].sum()) if not detalle_devengo.empty else 0.0
+
+    cols_kpi = st.columns(5) if incluir_devengado else st.columns(4)
+    with cols_kpi[0]:
         tarjeta_kpi("Capital activo total", fmt(resumen["capital_total"]), "Capital actualmente vivo", "normal")
-    with c2:
+    with cols_kpi[1]:
         tarjeta_kpi("Cobro estimado mes", fmt(resumen["cobro_total_mes"]), "Ingresos brutos esperados", "positivo")
-    with c3:
+    with cols_kpi[2]:
         tarjeta_kpi("Pago inversores mes", fmt(resumen["pago_total_mes"]), "Obligaciones estimadas", "riesgo")
-    with c4:
+    with cols_kpi[3]:
         estado = "positivo" if resumen["beneficio_total_mes"] >= 0 else "negativo"
         tarjeta_kpi("Beneficio estimado mes", fmt(resumen["beneficio_total_mes"]), "Margen neto estimado", estado)
+    if incluir_devengado:
+        with cols_kpi[4]:
+            tarjeta_kpi(
+                "Cobro + devengado no cobrado",
+                fmt(resumen["cobro_total_mes"] + total_devengado),
+                f"Cobro real de {nombre_mes_es(mes_dashboard)} + interés corrido desde el último pago hasta fin de mes",
+                "positivo",
+            )
+        if not detalle_devengo.empty:
+            with st.expander("Ver detalle del interés devengado por nota", expanded=False):
+                tabla_devengo = detalle_devengo.copy().sort_values("interes_devengado_no_cobrado", ascending=False)
+                tabla_devengo["ultimo_pago_cobrado"] = pd.to_datetime(tabla_devengo["ultimo_pago_cobrado"]).dt.strftime("%d/%m/%Y")
+                tabla_devengo["interes_nota_anual"] = tabla_devengo["interes_nota_anual"].apply(lambda x: f"{x*100:.2f}%")
+                tabla_devengo["capital_invertido"] = tabla_devengo["capital_invertido"].apply(fmt)
+                tabla_devengo["interes_devengado_no_cobrado"] = tabla_devengo["interes_devengado_no_cobrado"].apply(fmt)
+                st.dataframe(tabla_devengo, use_container_width=True, hide_index=True)
+                boton_descarga_excel(detalle_devengo, "interes_devengado_no_cobrado.xlsx")
+        else:
+            st.caption(f"No hay interés corrido de notas para {nombre_mes_es(mes_dashboard)} {anio_dashboard}.")
 
     st.markdown("### Rentabilidad del mes")
     r1, r2, r3, r4 = st.columns(4)
@@ -4622,31 +4667,6 @@ def dashboard_financiero():
         tarjeta_kpi("% pagado inversores mes", fmt_pct(resumen["rentabilidad_pagada_inversor_mes"]), "Pago inversores / capital", "riesgo")
     with r4:
         tarjeta_kpi("% pagado inversores anual", fmt_pct(resumen["rentabilidad_pagada_inversor_anualizada"]), "Coste anualizado del capital", "riesgo")
-
-    st.markdown("### Interés corrido de notas")
-    detalle_devengo = interes_devengado_no_cobrado_notas(df_inv, df_cal, df_control)
-    total_devengado = float(detalle_devengo["interes_devengado_no_cobrado"].sum()) if not detalle_devengo.empty else 0.0
-    hoy_devengo = pd.Timestamp.today().normalize()
-    d1, d2 = st.columns([1, 3])
-    with d1:
-        tarjeta_kpi(
-            "Interés devengado no cobrado",
-            fmt(total_devengado),
-            f"Desde el último pago real de cada nota hasta fin de {hoy_devengo.strftime('%B %Y')}",
-            "positivo",
-        )
-    with d2:
-        if not detalle_devengo.empty:
-            with st.expander("Ver detalle por nota", expanded=False):
-                tabla_devengo = detalle_devengo.copy().sort_values("interes_devengado_no_cobrado", ascending=False)
-                tabla_devengo["ultimo_pago_cobrado"] = pd.to_datetime(tabla_devengo["ultimo_pago_cobrado"]).dt.strftime("%d/%m/%Y")
-                tabla_devengo["interes_nota_anual"] = tabla_devengo["interes_nota_anual"].apply(lambda x: f"{x*100:.2f}%")
-                tabla_devengo["capital_invertido"] = tabla_devengo["capital_invertido"].apply(fmt)
-                tabla_devengo["interes_devengado_no_cobrado"] = tabla_devengo["interes_devengado_no_cobrado"].apply(fmt)
-                st.dataframe(tabla_devengo, use_container_width=True, hide_index=True)
-                boton_descarga_excel(detalle_devengo, "interes_devengado_no_cobrado.xlsx")
-        else:
-            st.caption("No hay notas activas con interés corrido en este momento.")
 
     if vista_dashboard == "General":
         tarjeta_bitcoin_etf()
