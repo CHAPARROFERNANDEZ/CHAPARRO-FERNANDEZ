@@ -3270,6 +3270,61 @@ def preparar_tabla_rentabilidad(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _precio_yfinance_history(ticker):
+    """Intento 1: historial de 5 días (método actual)."""
+    try:
+        hist = yf.Ticker(ticker).history(period="5d")
+        if hist is not None and not hist.empty:
+            cierre = hist["Close"].dropna()
+            if not cierre.empty:
+                return float(cierre.iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def _precio_yfinance_fastinfo(ticker):
+    """Intento 2: endpoint distinto de yfinance (fast_info) — a veces funciona cuando history() falla."""
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        precio = fi.get("lastPrice") or fi.get("last_price") or fi.get("regularMarketPrice")
+        if precio:
+            return float(precio)
+    except Exception:
+        pass
+    return None
+
+
+def _precio_stooq(ticker):
+    """Intento 3: Stooq, fuente alternativa gratuita sin API key. Fallback final si yfinance falla."""
+    try:
+        for candidato in [ticker, f"{ticker}.US"]:
+            url = f"https://stooq.com/q/l/?s={candidato.lower()}&f=sd2t2ohlcv&h&e=csv"
+            r = requests.get(url, timeout=8)
+            if r.status_code == 200:
+                lineas = r.text.strip().split("\n")
+                if len(lineas) >= 2:
+                    campos = lineas[1].split(",")
+                    if len(campos) >= 7 and campos[6] not in ("N/D", ""):
+                        precio = float(campos[6])
+                        if precio > 0:
+                            return precio
+    except Exception:
+        pass
+    return None
+
+
+def obtener_precio_actual_con_fallback(ticker):
+    """Precio actual con cadena de respaldo: yfinance (history) -> yfinance (fast_info) -> Stooq.
+    Solo devuelve None si las tres fuentes fallan — evita el 'SIN PRECIO DISPONIBLE' innecesario."""
+    ticker = str(ticker).strip().upper()
+    for fuente in (_precio_yfinance_history, _precio_yfinance_fastinfo, _precio_stooq):
+        precio = fuente(ticker)
+        if precio is not None and precio > 0:
+            return precio
+    return None
+
+
 def clasificar_alerta_riesgo(variacion_pct):
     """Clasifica el riesgo de un ticker según su variación % desde el precio de compra.
     Criterio único y simple (a pedido de Yuri, tras sopesar pros/contras): 🔴 EN RIESGO si la
@@ -3316,15 +3371,7 @@ def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataF
     filas = []
     for _, row in control.iterrows():
         ticker = row["ticker"]
-        precio_actual = None
-        try:
-            hist = yf.Ticker(ticker).history(period="5d")
-            if hist is not None and not hist.empty:
-                cierre = hist["Close"].dropna()
-                if not cierre.empty:
-                    precio_actual = float(cierre.iloc[-1])
-        except Exception:
-            precio_actual = None
+        precio_actual = obtener_precio_actual_con_fallback(ticker)
 
         precio_compra = float(row["precio_compra"])
         barrera = float(row[barrera_col]) if barrera_col is not None and pd.notna(row.get(barrera_col)) else None
