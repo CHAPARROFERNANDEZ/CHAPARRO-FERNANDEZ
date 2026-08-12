@@ -9894,40 +9894,95 @@ def _posiciones_activas_para_cerrar(df_inv: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def _sugerir_fecha_inicio_nota(numero_nota: int, df_cal: pd.DataFrame):
+    """Sugiere la fecha_inversion de una nota: primer PAGO del calendario, menos 1 periodo
+    completo (1 mes si el cobro es mensual, 3 meses si es trimestral, etc. — no siempre 1 mes fijo).
+    Busca primero en CALENDARIO_NOTAS ya guardado; si la nota todavía no está guardada (se está dando
+    de alta a la vez que su inversión), busca en el borrador de extracción de IA de esa misma nota
+    en la pestaña 'Notas estructuradas → Añadir nota nueva' (en sesión o persistido en Drive).
+    Devuelve (fecha_sugerida: pd.Timestamp|None, periodicidad_meses: int, fuente: str)."""
+    fechas_pago = []
+    fuente = ""
+
+    if df_cal is not None and not df_cal.empty and "nota" in df_cal.columns and "tipo_evento" in df_cal.columns:
+        cal_n = df_cal[
+            (pd.to_numeric(df_cal["nota"], errors="coerce") == numero_nota)
+            & (df_cal["tipo_evento"].astype(str).str.upper() == "PAGO")
+        ]
+        if not cal_n.empty:
+            fechas_pago = sorted(pd.to_datetime(cal_n["fecha"], errors="coerce").dropna().tolist())
+            if fechas_pago:
+                fuente = "calendario ya guardado (CALENDARIO_NOTAS)"
+
+    if not fechas_pago:
+        try:
+            almacen_notas = st.session_state.get("notas_wizard_datos", {})
+            extraido = almacen_notas.get(numero_nota) or cargar_borrador_nota("nueva", numero_nota)
+            if extraido and extraido.get("calendario"):
+                fechas_pago = sorted(pd.to_datetime(
+                    [e.get("pago") for e in extraido["calendario"] if e.get("pago") and str(e.get("pago")).strip().upper() != "REVISAR"],
+                    errors="coerce",
+                ).dropna().tolist())
+                if fechas_pago:
+                    fuente = "borrador de extracción de IA de la nota (pestaña Notas estructuradas → Añadir nota nueva)"
+        except Exception:
+            pass
+
+    if not fechas_pago:
+        return None, 1, ""
+
+    primer_pago = fechas_pago[0]
+    periodicidad_meses = 1
+    if len(fechas_pago) >= 2:
+        delta_dias = (fechas_pago[1] - fechas_pago[0]).days
+        delta_meses_aprox = max(1, round(delta_dias / 30.44))
+        periodicidad_meses = min([1, 3, 6], key=lambda p: abs(p - delta_meses_aprox))
+
+    fecha_sugerida = pd.Timestamp(primer_pago) - pd.DateOffset(months=periodicidad_meses)
+    return pd.Timestamp(fecha_sugerida), periodicidad_meses, fuente
+
+
 def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
     """Alta/cierre/reinversión de posiciones directamente desde la app, escribiendo en Google Drive
     con el mismo patrón que el wizard de 'Notas estructuradas': primero se guarda como BORRADOR
     revisable (hoja BORRADORES_INVERSIONES), y solo se escribe de verdad en INVERSIONES (y en
     REINVERSIONES si aplica) cuando Yuri confirma explícitamente tras revisar la previsualización.
-    Solo visible/accesible para el usuario 'Yuri' (se controla también en el menú principal)."""
+    Solo visible/accesible para el usuario 'Yuri' (se controla también en el menú principal).
+
+    Soporta más de un inversor en la misma inversión (ej. dos inversores en la misma nota): los
+    datos del activo/nota (tipo, nombre, fecha, cupón...) se rellenan una sola vez y se comparten;
+    cada inversor tiene su propia fila con su capital, su tasa y su id_inversion."""
     st.markdown("## ➕ Nueva inversión")
     st.caption(
-        "Da de alta una inversión nueva, cierra una posición existente (call/vencimiento/retiro/traspaso) "
-        "o registra una reinversión — sin tocar el Excel a mano. Funciona igual que el wizard de notas: "
-        "se guarda como borrador que puedes revisar/retomar, y solo se escribe en INVERSIONES cuando "
-        "confirmas explícitamente."
+        "Da de alta una inversión nueva (nota estructurada O cualquier activo fijo — Paraguay, MotoClick, "
+        "Fútbol, Bolivia, Bitcoin — se elige en 'Tipo de inversión' más abajo), cierra una posición existente "
+        "(call/vencimiento/retiro/traspaso) o registra una reinversión — sin tocar el Excel a mano. Funciona "
+        "igual que el wizard de notas: se guarda como borrador que puedes revisar/retomar, y solo se escribe "
+        "en INVERSIONES cuando confirmas explícitamente."
     )
 
     # ── Referencia del borrador (clave libre para poder guardarlo/retomarlo) ──────────────
+    # Tiene un valor por defecto autogenerado para que el formulario aparezca de inmediato sin
+    # tener que escribir nada — solo hace falta cambiarla si quieres ponerle un nombre concreto
+    # para retomarla más tarde.
     if "inversion_wizard_datos" not in st.session_state:
         st.session_state["inversion_wizard_datos"] = {}
     if "inversion_wizard_clave_actual" not in st.session_state:
-        st.session_state["inversion_wizard_clave_actual"] = ""
+        st.session_state["inversion_wizard_clave_actual"] = f"borrador-{pd.Timestamp.now().strftime('%Y%m%d-%H%M%S')}"
 
     claves_existentes = listar_claves_borradores_inversion()
     col_clave1, col_clave2 = st.columns([2, 1])
     with col_clave1:
         clave = st.text_input(
-            "Referencia de esta operación (para guardarla como borrador y poder retomarla)",
+            "Referencia de esta operación (opcional cambiarla — solo sirve para guardar/retomar el borrador)",
             value=st.session_state["inversion_wizard_clave_actual"],
-            placeholder="ej. PAM-NOTA28, EVA-CIERRE-AGO26, CROWE-REINVERSION-SEP26...",
             key="inversion_wizard_clave_input",
         )
     with col_clave2:
         st.write("")
         st.write("")
         if claves_existentes:
-            clave_retomar = st.selectbox("...o retomar borrador", ["—"] + claves_existentes, key="inversion_wizard_retomar_sel", label_visibility="visible")
+            clave_retomar = st.selectbox("...o retomar borrador guardado", ["—"] + claves_existentes, key="inversion_wizard_retomar_sel", label_visibility="visible")
             if clave_retomar != "—" and st.button("📂 Cargar borrador"):
                 borrador = cargar_borrador_inversion(clave_retomar)
                 if borrador:
@@ -9937,10 +9992,7 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                 else:
                     st.error("No se pudo cargar ese borrador.")
 
-    clave = clave.strip()
-    if not clave:
-        st.info("Escribe una referencia arriba (o carga un borrador existente) para empezar.")
-        return
+    clave = clave.strip() or st.session_state["inversion_wizard_clave_actual"]
     st.session_state["inversion_wizard_clave_actual"] = clave
     datos_previos = st.session_state["inversion_wizard_datos"] if st.session_state.get("inversion_wizard_clave_actual") == clave else {}
 
@@ -9949,9 +10001,9 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
     tipo_operacion = st.selectbox(
         "Tipo de operación",
         ["NUEVA", "CANCELADA", "REINVERSION"],
-        index=["NUEVA", "CANCELADA", "REINVERSION"].index(datos_previos.get("tipo_operacion", "NUEVA")),
+        index=["NUEVA", "CANCELADA", "REINVERSION"].index(datos_previos.get("tipo_operacion", "NUEVA")) if isinstance(datos_previos.get("tipo_operacion"), str) and datos_previos.get("tipo_operacion") in ["NUEVA", "CANCELADA", "REINVERSION"] else 0,
         help=(
-            "NUEVA: entra capital fresco de un inversor a un activo/nota.\n\n"
+            "NUEVA: entra capital fresco de uno o varios inversores a un activo/nota.\n\n"
             "CANCELADA: se cierra una posición existente (call, vencimiento, retiro completo, traspaso a otro inversor).\n\n"
             "REINVERSION: el capital de una posición cerrada se recoloca en otro activo/nota. OJO — según la "
             "lógica actual del fondo, el pago mensual al inversor sigue calculándose sobre la fila NUEVA "
@@ -10029,24 +10081,23 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         return
 
     # ═══════════════════════════════════════════════════════════════════
-    # RAMA: NUEVA / REINVERSION — construir una fila completa
+    # RAMA: NUEVA / REINVERSION — datos del activo/nota (compartidos) +
+    # uno o varios inversores (cada uno con su propia fila)
     # ═══════════════════════════════════════════════════════════════════
-    try:
-        inversores_conocidos = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]) | set(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
-    except NameError:
-        inversores_conocidos = sorted(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique())
+    st.markdown("### 1. Datos del activo/nota (se comparten entre todos los inversores de esta operación)")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        inversor_sel = st.selectbox("Inversor", inversores_conocidos + ["Otro (escribir)"], key="ni_inversor_sel")
-        inversor_final = st.text_input("Escribe el nombre del inversor (exacto, en mayúsculas)", key="ni_inversor_libre") if inversor_sel == "Otro (escribir)" else inversor_sel
+    col2, col3 = st.columns(2)
     with col2:
-        tipo_inversion_sel = st.selectbox("Tipo de inversión", ["nota", "paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "otro"], key="ni_tipo_inv_sel")
+        tipo_inversion_sel = st.selectbox(
+            "Tipo de inversión", ["nota", "paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "otro"],
+            key="ni_tipo_inv_sel",
+            help="Aquí eliges si es una nota estructurada o un activo fijo (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin) — o cualquier otro tipo nuevo con 'otro'.",
+        )
         tipo_inversion_final = st.text_input("Escribe el tipo de inversión", key="ni_tipo_inv_libre") if tipo_inversion_sel == "otro" else tipo_inversion_sel
-
     es_nota = tipo_inversion_final.strip().lower() == "nota"
 
-    col3, col4 = st.columns(2)
+    fecha_sugerida_nota, periodicidad_sugerida_nota, fuente_sugerencia_nota = None, 1, ""
+
     with col3:
         if es_nota:
             numero_nota_ni = st.number_input("Número de nota (para nombre_activo = NOTA_XX)", min_value=1, max_value=999, step=1, key="ni_numero_nota")
@@ -10059,16 +10110,27 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
             subtipo_inversion_final = st.selectbox("subtipo_inversion", ([tipo_inversion_final] if tipo_inversion_final not in subtipo_conocidos else []) + subtipo_conocidos + ["otro"], key="ni_subtipo_sel")
             if subtipo_inversion_final == "otro":
                 subtipo_inversion_final = st.text_input("Escribe subtipo_inversion", key="ni_subtipo_libre")
-    with col4:
-        capital_invertido_final = st.number_input("Capital invertido ($)", min_value=0.0, step=1000.0, format="%.2f", key="ni_capital")
 
-    col5, col6 = st.columns(2)
+    if es_nota:
+        fecha_sugerida_nota, periodicidad_sugerida_nota, fuente_sugerencia_nota = _sugerir_fecha_inicio_nota(int(numero_nota_ni), df_cal)
+        if fecha_sugerida_nota is not None:
+            periodo_txt = {1: "mensual", 3: "trimestral", 6: "semestral"}.get(periodicidad_sugerida_nota, f"cada {periodicidad_sugerida_nota} meses")
+            st.info(
+                f"📌 Fecha de inicio sugerida para INVERSIONES: **{fecha_sugerida_nota.strftime('%d/%m/%Y')}** "
+                f"— calculada como el primer PAGO menos 1 periodo ({periodo_txt}), a partir de {fuente_sugerencia_nota}."
+            )
+            if st.button("📅 Usar esta fecha sugerida", key="ni_usar_fecha_sugerida"):
+                st.session_state["ni_fecha_inicio"] = fecha_sugerida_nota.date()
+                st.rerun()
+        else:
+            st.caption("No se encontró un calendario de PAGO guardado ni un borrador de extracción para esta nota — pon la fecha de inicio a mano (primer pago menos 1 periodo).")
+
+    col4, col5 = st.columns(2)
+    with col4:
+        valor_fecha_inicio = fecha_sugerida_nota.date() if (es_nota and fecha_sugerida_nota is not None) else pd.Timestamp.today().date()
+        fecha_inversion_final = st.date_input("Fecha de inicio (fecha_inversion)", value=valor_fecha_inicio, key="ni_fecha_inicio",
+                                                help="Para notas: es la primera fecha de PAGO del calendario menos 1 periodo completo (1 mes si el cobro es mensual, 3 meses si es trimestral) — no el Initial Valuation Date del PDF.")
     with col5:
-        interes_inversor_anual_pct = st.number_input(
-            "Interés anual pagado AL INVERSOR (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key="ni_interes_inversor",
-            help="Tasa fija que se le paga a este inversor sobre su capital. OJO: para Roberto Viscafe, Crowe Bolivia y JR Real Estate la tasa es escalonada en el tiempo (5% → 7.5% → 10%) — revisa cuál corresponde a la fecha de inicio de esta posición.",
-        )
-    with col6:
         if es_nota:
             interes_nota_anual_pct = st.number_input("Cupón anual de la NOTA (%)", min_value=0.0, max_value=200.0, step=0.5, format="%.2f", key="ni_interes_nota",
                                                         help="El cupón real de la nota — este es el dato que faltaba en el asistente de IA. Debe coincidir con CONTROL_NOTAS/el PDF de la nota.")
@@ -10077,31 +10139,7 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
             default_tasa = tasas_fijas.get(tipo_inversion_final.strip().lower(), 0.0)
             interes_nota_anual_pct = st.number_input("Tasa anual que rinde el activo para la empresa (%)", min_value=0.0, max_value=200.0, step=0.5, format="%.2f", value=default_tasa, key="ni_interes_activo")
 
-    col7, col8 = st.columns(2)
-    with col7:
-        fecha_inversion_final = st.date_input("Fecha de inicio (fecha_inversion)", value=pd.Timestamp.today().date(), key="ni_fecha_inicio",
-                                                help="Para notas: recuerda que la fecha que cuenta para el pago al inversor es la primera fecha de PAGO del calendario menos 1 mes, no el Initial Valuation Date del PDF.")
-    with col8:
-        pago_intereses_sel = st.selectbox("pago_intereses", ["reinvierte", "paga"], key="ni_pago_intereses",
-                                            help="'paga' = el inversor cobra en efectivo cada mes. 'reinvierte' = se acumula (todos excepto JEP usan 'reinvierte').")
-
-    col9, col10 = st.columns(2)
-    with col9:
-        opciones_capital_real = ["si", "no"]
-        default_capital_real = 0 if tipo_operacion == "NUEVA" else 1
-        capital_nuevo_real_sel = st.selectbox("capital_nuevo_real", opciones_capital_real, index=default_capital_real, key="ni_capital_nuevo_real",
-                                                help="Marca 'si' si es dinero genuinamente nuevo entrando al fondo, o 'no' si es una reasignación interna de capital ya existente — se usa para no contar dos veces el mismo capital en los totales 'solo real'.")
-    with col10:
-        email_conocido = ""
-        if df_inv is not None and not df_inv.empty and "inversor" in df_inv.columns and "email" in df_inv.columns:
-            fila_email = df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == inversor_final.strip().upper()]
-            emails_previos = fila_email["email"].dropna().astype(str)
-            emails_previos = emails_previos[emails_previos.str.strip() != ""]
-            if not emails_previos.empty:
-                email_conocido = emails_previos.iloc[-1]
-        email_final = st.text_input("email del inversor", value=email_conocido, key="ni_email")
-
-    with st.expander("Campos adicionales (metodo_calculo, activo_generador_interes, cuenta_cobro, id_inversion)", expanded=False):
+    with st.expander("Campos adicionales del activo (metodo_calculo, activo_generador_interes, cuenta_cobro)", expanded=False):
         metodo_calculo_ops = _valores_conocidos_columna(df_inv, "metodo_calculo")
         default_metodo = "NOTA" if es_nota and "NOTA" in metodo_calculo_ops else ((metodo_calculo_ops[0] if metodo_calculo_ops else "(dejar en blanco)"))
         opciones_metodo = ["(dejar en blanco)"] + metodo_calculo_ops + ["otro"]
@@ -10127,18 +10165,13 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         elif cuenta_cobro_final == "(dejar en blanco)":
             cuenta_cobro_final = ""
 
-        ids_recientes = df_inv["id_inversion"].dropna().astype(str).tail(5).tolist() if df_inv is not None and "id_inversion" in df_inv.columns else []
-        if ids_recientes:
-            st.caption(f"Últimos id_inversion usados (para mantener la misma convención): {', '.join(ids_recientes)}")
-        id_inversion_final = st.text_input("id_inversion (escribe uno siguiendo la convención de arriba, ej. OP005)", key="ni_id_inversion")
-
     id_inversion_origen_reinv = None
     if tipo_operacion == "REINVERSION":
         st.markdown("#### Origen de la reinversión")
         st.caption(
-            "Se guarda en la columna id_inversion_origen de esta misma fila (trazabilidad de dónde viene "
-            "el capital) — no modifica ni cierra la posición original. Si además hace falta cerrar "
-            "formalmente la posición original, hazlo por separado con una operación CANCELADA."
+            "Se guarda en la columna id_inversion_origen de cada fila (trazabilidad de dónde viene el "
+            "capital) — no modifica ni cierra la posición original. Si además hace falta cerrar formalmente "
+            "la posición original, hazlo por separado con una operación CANCELADA."
         )
         activas_origen = _posiciones_activas_para_cerrar(df_inv)
         if not activas_origen.empty:
@@ -10147,96 +10180,171 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                 lambda r: f"{r.get('id_inversion','?')} | {r.get('inversor','?')} | {r.get('nombre_activo','?')} | ${float(r.get('capital_invertido',0) or 0):,.2f}",
                 axis=1,
             )
-            etiqueta_origen = st.selectbox("Posición de origen (opcional)", ["(sin vincular)"] + activas_origen["_etiqueta"].tolist(), key="ni_origen_reinv_sel")
+            etiqueta_origen = st.selectbox("Posición de origen (opcional, se aplica a todos los inversores de abajo)", ["(sin vincular)"] + activas_origen["_etiqueta"].tolist(), key="ni_origen_reinv_sel")
             if etiqueta_origen != "(sin vincular)":
                 id_inversion_origen_reinv = str(activas_origen[activas_origen["_etiqueta"] == etiqueta_origen].iloc[0].get("id_inversion", ""))
 
-    # ── Construir preview de la fila ────────────────────────────────────
-    fila_preview = {
-        "id_inversion": id_inversion_final,
-        "inversor": inversor_final,
-        "tipo_inversion": tipo_inversion_final,
-        "subtipo_inversion": subtipo_inversion_final,
-        "nombre_activo": nombre_activo_final,
-        "metodo_calculo": metodo_calculo_final,
-        "cuenta_cobro": cuenta_cobro_final,
-        "activo_generador_interes": activo_generador_final,
-        "fecha_inversion": str(fecha_inversion_final),
-        "fecha_final_inversion": "",
-        "motivo": "",
-        "capital_invertido": capital_invertido_final,
-        "interes_nota_anual": round(interes_nota_anual_pct / 100.0, 6),
-        "interes_inversor_anual": round(interes_inversor_anual_pct / 100.0, 6),
-        "tipo_operacion": tipo_operacion,
-        "id_inversion_origen": id_inversion_origen_reinv or "",
-        "capital_nuevo_real": capital_nuevo_real_sel,
-        "email": email_final,
-        "pago_intereses": pago_intereses_sel,
-    }
+    # ═══════════════════════════════════════════════════════════════════
+    # 2. INVERSOR(ES) — uno o varios en la misma inversión
+    # ═══════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 2. Inversor(es)")
+    st.caption("Si en esta misma nota/activo participa más de un inversor, pulsa '➕ Añadir otro inversor' — comparten todo lo de arriba, pero cada uno tiene su propio capital, tasa, id_inversion, etc.")
 
-    st.markdown("#### Previsualización de la fila (revísala antes de guardar)")
-    df_preview = pd.DataFrame([fila_preview])
-    df_preview_editado = st.data_editor(df_preview, use_container_width=True, key="ni_preview_editor")
+    try:
+        inversores_conocidos = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]) | set(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
+    except NameError:
+        inversores_conocidos = sorted(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique())
 
-    datos_borrador = df_preview_editado.iloc[0].to_dict()
+    if "ni_num_inversores" not in st.session_state:
+        st.session_state["ni_num_inversores"] = 1
+
+    ids_recientes = df_inv["id_inversion"].dropna().astype(str).tail(5).tolist() if df_inv is not None and "id_inversion" in df_inv.columns else []
+    if ids_recientes:
+        st.caption(f"Últimos id_inversion usados (para mantener la misma convención): {', '.join(ids_recientes)}")
+
+    filas_inversores = []
+    for i in range(st.session_state["ni_num_inversores"]):
+        with st.container(border=True):
+            st.markdown(f"**Inversor #{i + 1}**")
+            colx1, colx2, colx3 = st.columns(3)
+            with colx1:
+                inv_sel = st.selectbox("Inversor", inversores_conocidos + ["Otro (escribir)"], key=f"ni_inversor_sel_{i}")
+                inv_final = st.text_input("Escribe el nombre (exacto, mayúsculas)", key=f"ni_inversor_libre_{i}") if inv_sel == "Otro (escribir)" else inv_sel
+            with colx2:
+                capital_i = st.number_input("Capital ($)", min_value=0.0, step=1000.0, format="%.2f", key=f"ni_capital_{i}")
+            with colx3:
+                tasa_inv_i = st.number_input(
+                    "Interés anual AL INVERSOR (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key=f"ni_interes_inversor_{i}",
+                    help="OJO: para Roberto Viscafe, Crowe Bolivia y JR Real Estate la tasa es escalonada en el tiempo (5% → 7.5% → 10%) — revisa cuál corresponde a la fecha de inicio.",
+                )
+            colx4, colx5, colx6 = st.columns(3)
+            with colx4:
+                pago_i = st.selectbox("pago_intereses", ["reinvierte", "paga"], key=f"ni_pago_intereses_{i}")
+            with colx5:
+                cap_real_i = st.selectbox("capital_nuevo_real", ["si", "no"], index=0 if tipo_operacion == "NUEVA" else 1, key=f"ni_capital_real_{i}")
+            with colx6:
+                email_default_i = ""
+                if df_inv is not None and not df_inv.empty and "inversor" in df_inv.columns and "email" in df_inv.columns:
+                    fe = df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == inv_final.strip().upper()]
+                    em = fe["email"].dropna().astype(str)
+                    em = em[em.str.strip() != ""]
+                    if not em.empty:
+                        email_default_i = em.iloc[-1]
+                email_i = st.text_input("email", value=email_default_i, key=f"ni_email_{i}")
+            id_inv_i = st.text_input("id_inversion (sigue la convención de arriba, ej. OP005)", key=f"ni_id_inversion_{i}")
+
+            if st.session_state["ni_num_inversores"] > 1:
+                if st.button(f"🗑️ Quitar inversor #{i + 1}", key=f"ni_quitar_{i}"):
+                    st.session_state["ni_num_inversores"] -= 1
+                    st.rerun()
+
+            filas_inversores.append({
+                "id_inversion": id_inv_i,
+                "inversor": inv_final,
+                "tipo_inversion": tipo_inversion_final,
+                "subtipo_inversion": subtipo_inversion_final,
+                "nombre_activo": nombre_activo_final,
+                "metodo_calculo": metodo_calculo_final,
+                "cuenta_cobro": cuenta_cobro_final,
+                "activo_generador_interes": activo_generador_final,
+                "fecha_inversion": str(fecha_inversion_final),
+                "fecha_final_inversion": "",
+                "motivo": "",
+                "capital_invertido": capital_i,
+                "interes_nota_anual": round(interes_nota_anual_pct / 100.0, 6),
+                "interes_inversor_anual": round(tasa_inv_i / 100.0, 6),
+                "tipo_operacion": tipo_operacion,
+                "id_inversion_origen": id_inversion_origen_reinv or "",
+                "capital_nuevo_real": cap_real_i,
+                "email": email_i,
+                "pago_intereses": pago_i,
+            })
+
+    if st.button("➕ Añadir otro inversor a esta misma inversión", key="ni_add_inversor"):
+        st.session_state["ni_num_inversores"] += 1
+        st.rerun()
+
+    # ── Construir preview (una fila por inversor) ────────────────────────
+    st.markdown("---")
+    st.markdown("#### Previsualización de las filas (revísalas antes de guardar)")
+    df_preview = pd.DataFrame(filas_inversores)
+    df_preview_editado = st.data_editor(df_preview, use_container_width=True, num_rows="dynamic", key="ni_preview_editor")
+
+    filas_borrador = df_preview_editado.to_dict(orient="records")
 
     col_a, col_g, col_d = st.columns(3)
     with col_a:
         if st.button("📌 Guardar avance del borrador", key="ni_guardar_avance"):
-            guardar_borrador_inversion(clave, datos_borrador)
-            st.session_state["inversion_wizard_datos"] = datos_borrador
+            guardar_borrador_inversion(clave, {"tipo_operacion": tipo_operacion, "filas": filas_borrador})
+            st.session_state["inversion_wizard_datos"] = {"tipo_operacion": tipo_operacion, "filas": filas_borrador}
 
     with col_g:
-        confirmar = st.button(f"💾 Confirmar y escribir en INVERSIONES", type="primary", key="ni_confirmar")
+        confirmar = st.button("💾 Confirmar y escribir en INVERSIONES", type="primary", key="ni_confirmar")
     with col_d:
         if st.button("🗑️ Descartar borrador", key="ni_descartar"):
             borrar_borrador_inversion(clave)
             st.session_state["inversion_wizard_datos"] = {}
             st.session_state["inversion_wizard_clave_actual"] = ""
+            st.session_state["ni_num_inversores"] = 1
             st.rerun()
 
     if confirmar:
-        if not str(datos_borrador.get("id_inversion", "")).strip():
-            st.error("Falta id_inversion — es la clave que identifica la fila, no puede quedar vacío.")
+        ids_vacios = [i + 1 for i, f in enumerate(filas_borrador) if not str(f.get("id_inversion", "")).strip()]
+        if ids_vacios:
+            st.error(f"Falta id_inversion en el/los inversor(es) #{', '.join(map(str, ids_vacios))} — no puede quedar vacío.")
+            return
+        if not filas_borrador:
+            st.error("No hay ningún inversor en la previsualización.")
             return
         hojas = leer_todas_las_hojas_excel()
         if not hojas or "INVERSIONES" not in hojas:
-            st.error("No se pudo leer INVERSIONES para guardar la nueva fila.")
+            st.error("No se pudo leer INVERSIONES para guardar las filas nuevas.")
             return
         mapa = _mapa_columnas_reales(hojas, "INVERSIONES")
         if not mapa:
             st.error("No se pudo determinar el nombre real de las columnas de INVERSIONES.")
             return
-        fila_real = {}
-        for clave_logica, valor in datos_borrador.items():
-            if clave_logica.startswith("_"):
-                continue
-            col_real = mapa.get(clave_logica)
-            if col_real:
-                fila_real[col_real] = valor
-        columnas_faltantes = [k for k in datos_borrador if not k.startswith("_") and k not in mapa]
-        if columnas_faltantes:
-            st.warning(f"⚠️ Estas columnas no existen tal cual en la hoja INVERSIONES real y NO se escribieron: {', '.join(columnas_faltantes)}. Añádelas a mano en el Excel si hacen falta.")
+
+        filas_reales = []
+        columnas_faltantes_global = set()
+        for fila_logica in filas_borrador:
+            fila_real = {}
+            for clave_logica, valor in fila_logica.items():
+                if str(clave_logica).startswith("_"):
+                    continue
+                col_real = mapa.get(clave_logica)
+                if col_real:
+                    fila_real[col_real] = valor
+                else:
+                    columnas_faltantes_global.add(clave_logica)
+            filas_reales.append(fila_real)
+        if columnas_faltantes_global:
+            st.warning(f"⚠️ Estas columnas no existen tal cual en la hoja INVERSIONES real y NO se escribieron: {', '.join(sorted(columnas_faltantes_global))}. Añádelas a mano en el Excel si hacen falta.")
 
         df_raw = hojas["INVERSIONES"]
-        fila_nueva_df = pd.DataFrame([fila_real])
-        hojas["INVERSIONES"] = pd.concat([df_raw, fila_nueva_df], ignore_index=True)
+        hojas["INVERSIONES"] = pd.concat([df_raw, pd.DataFrame(filas_reales)], ignore_index=True)
 
         # Vínculo adicional en la hoja histórica REINVERSIONES (aparte de la columna
-        # id_inversion_origen ya escrita arriba en la propia fila de INVERSIONES) — solo si esa
-        # hoja existe de verdad en tu Excel.
-        id_origen_reinv = datos_borrador.get("id_inversion_origen")
-        if tipo_operacion == "REINVERSION" and id_origen_reinv and "REINVERSIONES" in hojas:
+        # id_inversion_origen ya escrita en cada fila de INVERSIONES) — solo si esa hoja existe.
+        if tipo_operacion == "REINVERSION" and "REINVERSIONES" in hojas:
             mapa_reinv = _mapa_columnas_reales(hojas, "REINVERSIONES")
             col_origen = mapa_reinv.get("id_inversion_origen")
             col_destino = mapa_reinv.get("id_inversion_destino")
             if col_origen and col_destino:
-                fila_reinv = {col_origen: id_origen_reinv, col_destino: datos_borrador.get("id_inversion", "")}
-                if mapa_reinv.get("fecha"):
-                    fila_reinv[mapa_reinv["fecha"]] = pd.Timestamp(fecha_inversion_final)
-                if mapa_reinv.get("importe"):
-                    fila_reinv[mapa_reinv["importe"]] = capital_invertido_final
-                hojas["REINVERSIONES"] = pd.concat([hojas["REINVERSIONES"], pd.DataFrame([fila_reinv])], ignore_index=True)
+                filas_reinv = []
+                for fila_logica in filas_borrador:
+                    id_origen_f = fila_logica.get("id_inversion_origen")
+                    if not id_origen_f:
+                        continue
+                    fila_reinv = {col_origen: id_origen_f, col_destino: fila_logica.get("id_inversion", "")}
+                    if mapa_reinv.get("fecha"):
+                        fila_reinv[mapa_reinv["fecha"]] = pd.Timestamp(fecha_inversion_final)
+                    if mapa_reinv.get("importe"):
+                        fila_reinv[mapa_reinv["importe"]] = fila_logica.get("capital_invertido")
+                    filas_reinv.append(fila_reinv)
+                if filas_reinv:
+                    hojas["REINVERSIONES"] = pd.concat([hojas["REINVERSIONES"], pd.DataFrame(filas_reinv)], ignore_index=True)
             else:
                 st.info("No se encontraron las columnas id_inversion_origen/id_inversion_destino en REINVERSIONES — añade el vínculo a mano si hace falta.")
 
@@ -10248,7 +10356,9 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         guardar_excel_completo_desde_hojas(hojas)
         st.session_state["inversion_wizard_datos"] = {}
         st.session_state["inversion_wizard_clave_actual"] = ""
-        st.success(f"Fila guardada en INVERSIONES (id_inversion = {datos_borrador.get('id_inversion')}).")
+        st.session_state["ni_num_inversores"] = 1
+        ids_guardados = ", ".join(str(f.get("id_inversion", "")) for f in filas_borrador)
+        st.success(f"{len(filas_borrador)} fila(s) guardada(s) en INVERSIONES (id_inversion: {ids_guardados}).")
         st.cache_data.clear()
 
 
