@@ -10014,32 +10014,74 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
     )
 
     # ═══════════════════════════════════════════════════════════════════
-    # RAMA: CANCELADA — cerrar una posición ya existente
+    # RAMA: CANCELADA — cerrar una posición ya existente (o TODAS las de un
+    # mismo activo/nota de golpe — útil para un call, que cierra a la vez
+    # las posiciones de todos los inversores de esa nota)
     # ═══════════════════════════════════════════════════════════════════
     if tipo_operacion == "CANCELADA":
         activas = _posiciones_activas_para_cerrar(df_inv)
         if activas.empty:
             st.warning("No se han encontrado posiciones activas (NUEVA/REINVERSION sin fecha_final_inversion) para cerrar.")
             return
-        activas = activas.copy()
-        activas["_etiqueta"] = activas.apply(
-            lambda r: f"{r.get('id_inversion','?')} | {r.get('inversor','?')} | {r.get('nombre_activo','?')} | ${float(r.get('capital_invertido',0) or 0):,.2f} | desde {pd.Timestamp(r['fecha_inversion']).strftime('%d/%m/%Y') if pd.notna(r.get('fecha_inversion')) else '?'}",
-            axis=1,
-        )
-        etiqueta_sel = st.selectbox("Posición a cerrar", activas["_etiqueta"].tolist(), key="cancelada_posicion_sel")
-        fila_origen = activas[activas["_etiqueta"] == etiqueta_sel].iloc[0]
-        id_inversion_cerrar = str(fila_origen.get("id_inversion", ""))
 
-        st.dataframe(fila_origen.drop(labels=["_etiqueta"]).to_frame().T, use_container_width=True, hide_index=True)
+        modo_cierre = st.radio(
+            "¿Qué quieres cerrar?",
+            ["Una posición en concreto", "TODAS las posiciones activas de un mismo activo/nota (útil para un call)"],
+            key="cancelada_modo",
+            help="Cuando llaman a una nota (call), normalmente hay que cerrar de golpe la posición de TODOS los inversores que estaban en esa nota, todos con la misma fecha y motivo — para eso usa la segunda opción.",
+        )
+
+        if modo_cierre == "Una posición en concreto":
+            activas_et = activas.copy()
+            activas_et["_etiqueta"] = activas_et.apply(
+                lambda r: f"{r.get('id_inversion','?')} | {r.get('inversor','?')} | {r.get('nombre_activo','?')} | ${float(r.get('capital_invertido',0) or 0):,.2f} | desde {pd.Timestamp(r['fecha_inversion']).strftime('%d/%m/%Y') if pd.notna(r.get('fecha_inversion')) else '?'}",
+                axis=1,
+            )
+            etiqueta_sel = st.selectbox("Posición a cerrar", activas_et["_etiqueta"].tolist(), key="cancelada_posicion_sel")
+            filas_a_cerrar = activas_et[activas_et["_etiqueta"] == etiqueta_sel]
+            st.dataframe(filas_a_cerrar.drop(columns=["_etiqueta"]), use_container_width=True, hide_index=True)
+        else:
+            nombres_activo_disp = sorted(activas["nombre_activo"].dropna().astype(str).unique()) if "nombre_activo" in activas.columns else []
+            nombre_activo_cerrar = st.selectbox("Activo/nota a cerrar por completo", nombres_activo_disp, key="cancelada_activo_sel")
+            filas_a_cerrar = activas[activas["nombre_activo"].astype(str) == nombre_activo_cerrar]
+            st.caption(f"Se cerrarán de golpe estas {len(filas_a_cerrar)} posición(es) — una por cada inversor activo en {nombre_activo_cerrar}:")
+            st.dataframe(filas_a_cerrar, use_container_width=True, hide_index=True)
+
+        ids_a_cerrar = filas_a_cerrar["id_inversion"].astype(str).tolist()
 
         fecha_final = st.date_input("Fecha de cierre (fecha_final_inversion)", value=pd.Timestamp.today().date(), key="cancelada_fecha_final")
         motivos_conocidos = _valores_conocidos_columna(df_inv, "motivo") or ["call", "call final", "vencimiento", "retiro", "traspaso"]
-        motivo_sel = st.selectbox("Motivo del cierre", motivos_conocidos + ["Otro (escribir)"], key="cancelada_motivo_sel")
+        default_motivo_idx = motivos_conocidos.index("call") if "call" in motivos_conocidos else 0
+        motivo_sel = st.selectbox("Motivo del cierre", motivos_conocidos + ["Otro (escribir)"], index=default_motivo_idx, key="cancelada_motivo_sel")
         motivo_final = st.text_input("Escribe el motivo", key="cancelada_motivo_libre") if motivo_sel == "Otro (escribir)" else motivo_sel
+
+        # Si es una nota y hay una hoja CALENDARIO_CALLS con fechas de posible call para esa
+        # nota, ofrece marcar ese call como ejecutado a la vez que se cierran las posiciones —
+        # para no dejar el calendario de calls desactualizado.
+        marcar_call_calendario = False
+        etiqueta_call_calendario = None
+        df_calls_cancelada = leer_hoja_excel("CALENDARIO_CALLS") if motivo_final.strip().lower().startswith("call") else pd.DataFrame()
+        if not df_calls_cancelada.empty and "nota" in df_calls_cancelada.columns:
+            numero_nota_cerrar = extraer_numero_nota(nombre_activo_cerrar) if modo_cierre != "Una posición en concreto" else extraer_numero_nota(str(filas_a_cerrar.iloc[0].get("nombre_activo", "")))
+            if pd.notna(numero_nota_cerrar):
+                calls_nota_cancelada = df_calls_cancelada[pd.to_numeric(df_calls_cancelada["nota"], errors="coerce") == numero_nota_cerrar]
+                if not calls_nota_cancelada.empty:
+                    calls_nota_cancelada = calls_nota_cancelada.copy()
+                    calls_nota_cancelada["_etiqueta"] = calls_nota_cancelada.apply(
+                        lambda r: f"{pd.Timestamp(r.get('fecha_call')).strftime('%d/%m/%Y') if pd.notna(r.get('fecha_call')) else '?'} | estado actual: {r.get('estado','?')}",
+                        axis=1,
+                    )
+                    etiqueta_call_calendario = st.selectbox(
+                        "Marcar también este call como ejecutado en CALENDARIO_CALLS (opcional)",
+                        ["(no marcar ninguno)"] + calls_nota_cancelada["_etiqueta"].tolist(),
+                        key="cancelada_call_calendario_sel",
+                    )
+                    if etiqueta_call_calendario != "(no marcar ninguno)":
+                        marcar_call_calendario = True
 
         datos_borrador = {
             "tipo_operacion": "CANCELADA",
-            "id_inversion_cerrar": id_inversion_cerrar,
+            "ids_a_cerrar": ids_a_cerrar,
             "fecha_final_inversion": str(fecha_final),
             "motivo": motivo_final,
         }
@@ -10051,7 +10093,7 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                 st.session_state["inversion_wizard_datos"] = datos_borrador
 
         with col_g:
-            if st.button("💾 Confirmar cierre en el Excel", type="primary"):
+            if st.button(f"💾 Confirmar cierre de {len(ids_a_cerrar)} posición(es) en el Excel", type="primary"):
                 hojas = leer_todas_las_hojas_excel()
                 if not hojas or "INVERSIONES" not in hojas:
                     st.error("No se pudo leer INVERSIONES para guardar el cierre.")
@@ -10064,19 +10106,39 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                     if not col_id or not col_ff:
                         st.error("No se encontraron las columnas id_inversion / fecha_final_inversion en la hoja INVERSIONES — revisa los nombres de columna a mano.")
                     else:
-                        mascara = df_raw[col_id].astype(str) == id_inversion_cerrar
+                        mascara = df_raw[col_id].astype(str).isin(ids_a_cerrar)
                         if not mascara.any():
-                            st.error(f"No se encontró la fila con id_inversion = {id_inversion_cerrar} en la hoja real — puede que el Excel haya cambiado desde que se cargó esta pantalla. Recarga y vuelve a intentarlo.")
+                            st.error("No se encontró ninguna de esas filas en la hoja real — puede que el Excel haya cambiado desde que se cargó esta pantalla. Recarga y vuelve a intentarlo.")
                         else:
                             df_raw.loc[mascara, col_ff] = pd.Timestamp(fecha_final)
                             if col_mot:
                                 df_raw.loc[mascara, col_mot] = motivo_final
                             hojas["INVERSIONES"] = df_raw
+
+                            if marcar_call_calendario and "CALENDARIO_CALLS" in hojas:
+                                mapa_calls = _mapa_columnas_reales(hojas, "CALENDARIO_CALLS")
+                                col_nota_calls = mapa_calls.get("nota")
+                                col_fecha_call = mapa_calls.get("fecha_call")
+                                col_estado_calls = mapa_calls.get("estado")
+                                if col_nota_calls and col_fecha_call and col_estado_calls:
+                                    fecha_call_marcar = pd.to_datetime(etiqueta_call_calendario.split(" | ")[0], dayfirst=True, errors="coerce")
+                                    df_calls_raw = hojas["CALENDARIO_CALLS"]
+                                    estados_conocidos = _valores_conocidos_columna(df_calls_raw.rename(columns={col_estado_calls: "estado"}), "estado")
+                                    estado_ejecutado = next((e for e in estados_conocidos if "ejecut" in e.lower() or "call" in e.lower() or "confirm" in e.lower()), (estados_conocidos[0] if estados_conocidos else "EJECUTADO"))
+                                    mascara_call = (
+                                        (pd.to_numeric(df_calls_raw[col_nota_calls], errors="coerce") == numero_nota_cerrar)
+                                        & (pd.to_datetime(df_calls_raw[col_fecha_call], errors="coerce", dayfirst=True) == fecha_call_marcar)
+                                    )
+                                    if mascara_call.any():
+                                        df_calls_raw.loc[mascara_call, col_estado_calls] = estado_ejecutado
+                                        hojas["CALENDARIO_CALLS"] = df_calls_raw
+                                        st.info(f"CALENDARIO_CALLS actualizado: estado = '{estado_ejecutado}' para la fecha {fecha_call_marcar.strftime('%d/%m/%Y')}.")
+
                             guardar_excel_completo_desde_hojas(hojas)
                             borrar_borrador_inversion(clave)
                             st.session_state["inversion_wizard_datos"] = {}
                             st.session_state["inversion_wizard_clave_actual"] = ""
-                            st.success(f"Posición {id_inversion_cerrar} cerrada el {fecha_final} (motivo: {motivo_final}).")
+                            st.success(f"{len(ids_a_cerrar)} posición(es) cerrada(s) el {fecha_final} (motivo: {motivo_final}): {', '.join(ids_a_cerrar)}.")
                             st.cache_data.clear()
         return
 
