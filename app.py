@@ -10082,26 +10082,39 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         fecha_inversion_final = st.date_input("Fecha de inicio (fecha_inversion)", value=pd.Timestamp.today().date(), key="ni_fecha_inicio",
                                                 help="Para notas: recuerda que la fecha que cuenta para el pago al inversor es la primera fecha de PAGO del calendario menos 1 mes, no el Initial Valuation Date del PDF.")
     with col8:
-        periodicidad_sel = st.selectbox("Periodicidad de cobro (meses)", [1, 3, 6], index=0, key="ni_periodicidad")
+        pago_intereses_sel = st.selectbox("pago_intereses", ["reinvierte", "paga"], key="ni_pago_intereses",
+                                            help="'paga' = el inversor cobra en efectivo cada mes. 'reinvierte' = se acumula (todos excepto JEP usan 'reinvierte').")
 
     col9, col10 = st.columns(2)
     with col9:
-        pago_intereses_sel = st.selectbox("pago_intereses", ["reinvierte", "paga"], key="ni_pago_intereses",
-                                            help="'paga' = el inversor cobra en efectivo cada mes. 'reinvierte' = se acumula (todos excepto JEP usan 'reinvierte').")
+        opciones_capital_real = ["si", "no"]
+        default_capital_real = 0 if tipo_operacion == "NUEVA" else 1
+        capital_nuevo_real_sel = st.selectbox("capital_nuevo_real", opciones_capital_real, index=default_capital_real, key="ni_capital_nuevo_real",
+                                                help="Marca 'si' si es dinero genuinamente nuevo entrando al fondo, o 'no' si es una reasignación interna de capital ya existente — se usa para no contar dos veces el mismo capital en los totales 'solo real'.")
     with col10:
-        capital_nuevo_real_sel = st.selectbox("capital_nuevo_real", ["SI", "NO"], index=0 if tipo_operacion == "NUEVA" else 1, key="ni_capital_nuevo_real",
-                                                help="Marca si es dinero genuinamente nuevo entrando al fondo (SI) o una reasignación interna de capital ya existente (NO) — se usa para no contar dos veces el mismo capital en los totales 'solo real'.")
+        email_conocido = ""
+        if df_inv is not None and not df_inv.empty and "inversor" in df_inv.columns and "email" in df_inv.columns:
+            fila_email = df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == inversor_final.strip().upper()]
+            emails_previos = fila_email["email"].dropna().astype(str)
+            emails_previos = emails_previos[emails_previos.str.strip() != ""]
+            if not emails_previos.empty:
+                email_conocido = emails_previos.iloc[-1]
+        email_final = st.text_input("email del inversor", value=email_conocido, key="ni_email")
 
     with st.expander("Campos adicionales (metodo_calculo, activo_generador_interes, cuenta_cobro, id_inversion)", expanded=False):
         metodo_calculo_ops = _valores_conocidos_columna(df_inv, "metodo_calculo")
-        metodo_calculo_final = st.selectbox("metodo_calculo", ["(dejar en blanco)"] + metodo_calculo_ops + ["otro"], key="ni_metodo_calculo_sel")
+        default_metodo = "NOTA" if es_nota and "NOTA" in metodo_calculo_ops else ((metodo_calculo_ops[0] if metodo_calculo_ops else "(dejar en blanco)"))
+        opciones_metodo = ["(dejar en blanco)"] + metodo_calculo_ops + ["otro"]
+        metodo_calculo_final = st.selectbox("metodo_calculo", opciones_metodo, index=opciones_metodo.index(default_metodo) if default_metodo in opciones_metodo else 0, key="ni_metodo_calculo_sel")
         if metodo_calculo_final == "otro":
             metodo_calculo_final = st.text_input("Escribe metodo_calculo", key="ni_metodo_calculo_libre")
         elif metodo_calculo_final == "(dejar en blanco)":
             metodo_calculo_final = ""
 
         activo_gen_ops = _valores_conocidos_columna(df_inv, "activo_generador_interes")
-        activo_generador_final = st.selectbox("activo_generador_interes", ["(dejar en blanco)"] + activo_gen_ops + ["otro"], key="ni_activo_gen_sel")
+        default_activo_gen = "SI" if "SI" in activo_gen_ops else (activo_gen_ops[0] if activo_gen_ops else "(dejar en blanco)")
+        opciones_activo_gen = ["(dejar en blanco)"] + activo_gen_ops + ["otro"]
+        activo_generador_final = st.selectbox("activo_generador_interes", opciones_activo_gen, index=opciones_activo_gen.index(default_activo_gen) if default_activo_gen in opciones_activo_gen else 0, key="ni_activo_gen_sel")
         if activo_generador_final == "otro":
             activo_generador_final = st.text_input("Escribe activo_generador_interes", key="ni_activo_gen_libre")
         elif activo_generador_final == "(dejar en blanco)":
@@ -10117,15 +10130,15 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         ids_recientes = df_inv["id_inversion"].dropna().astype(str).tail(5).tolist() if df_inv is not None and "id_inversion" in df_inv.columns else []
         if ids_recientes:
             st.caption(f"Últimos id_inversion usados (para mantener la misma convención): {', '.join(ids_recientes)}")
-        id_inversion_final = st.text_input("id_inversion (escribe uno siguiendo la convención de arriba)", key="ni_id_inversion")
+        id_inversion_final = st.text_input("id_inversion (escribe uno siguiendo la convención de arriba, ej. OP005)", key="ni_id_inversion")
 
     id_inversion_origen_reinv = None
     if tipo_operacion == "REINVERSION":
         st.markdown("#### Origen de la reinversión")
         st.caption(
-            "Esto SOLO alimenta la hoja REINVERSIONES (trazabilidad histórica de dónde viene el capital) — "
-            "no modifica ni cierra la posición original. Si además hace falta cerrar formalmente la posición "
-            "original, hazlo por separado con una operación CANCELADA."
+            "Se guarda en la columna id_inversion_origen de esta misma fila (trazabilidad de dónde viene "
+            "el capital) — no modifica ni cierra la posición original. Si además hace falta cerrar "
+            "formalmente la posición original, hazlo por separado con una operación CANCELADA."
         )
         activas_origen = _posiciones_activas_para_cerrar(df_inv)
         if not activas_origen.empty:
@@ -10146,21 +10159,20 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         "subtipo_inversion": subtipo_inversion_final,
         "nombre_activo": nombre_activo_final,
         "metodo_calculo": metodo_calculo_final,
-        "activo_generador_interes": activo_generador_final,
-        "tipo_operacion": tipo_operacion,
-        "capital_nuevo_real": capital_nuevo_real_sel,
         "cuenta_cobro": cuenta_cobro_final,
-        "motivo": "",
+        "activo_generador_interes": activo_generador_final,
         "fecha_inversion": str(fecha_inversion_final),
         "fecha_final_inversion": "",
+        "motivo": "",
         "capital_invertido": capital_invertido_final,
-        "interes_inversor_anual": round(interes_inversor_anual_pct / 100.0, 6),
         "interes_nota_anual": round(interes_nota_anual_pct / 100.0, 6),
-        "periodicidad_meses": periodicidad_sel,
+        "interes_inversor_anual": round(interes_inversor_anual_pct / 100.0, 6),
+        "tipo_operacion": tipo_operacion,
+        "id_inversion_origen": id_inversion_origen_reinv or "",
+        "capital_nuevo_real": capital_nuevo_real_sel,
+        "email": email_final,
         "pago_intereses": pago_intereses_sel,
     }
-    if id_inversion_origen_reinv:
-        fila_preview["_id_inversion_origen_reinv"] = id_inversion_origen_reinv
 
     st.markdown("#### Previsualización de la fila (revísala antes de guardar)")
     df_preview = pd.DataFrame([fila_preview])
@@ -10210,8 +10222,10 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         fila_nueva_df = pd.DataFrame([fila_real])
         hojas["INVERSIONES"] = pd.concat([df_raw, fila_nueva_df], ignore_index=True)
 
-        # Vínculo de trazabilidad en REINVERSIONES, si aplica y la hoja existe
-        id_origen_reinv = datos_borrador.get("_id_inversion_origen_reinv")
+        # Vínculo adicional en la hoja histórica REINVERSIONES (aparte de la columna
+        # id_inversion_origen ya escrita arriba en la propia fila de INVERSIONES) — solo si esa
+        # hoja existe de verdad en tu Excel.
+        id_origen_reinv = datos_borrador.get("id_inversion_origen")
         if tipo_operacion == "REINVERSION" and id_origen_reinv and "REINVERSIONES" in hojas:
             mapa_reinv = _mapa_columnas_reales(hojas, "REINVERSIONES")
             col_origen = mapa_reinv.get("id_inversion_origen")
