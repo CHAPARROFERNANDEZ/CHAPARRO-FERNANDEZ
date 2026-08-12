@@ -5143,31 +5143,48 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                         prox = df_c2[df_c2["fecha"] >= hoy].sort_values("fecha").head(15)
                         cols_cal = [c for c in ["fecha","nota","tipo_evento","importe_cobro","importe_pago_inversor"] if c in prox.columns]
                         ctx_lines += ["", "=== PRÓXIMOS EVENTOS ===", prox[cols_cal].to_string(index=False)]
-                    # Control notas: solo columnas esenciales
+                    # Control notas: incluye emisor y cupón anual — antes faltaban aquí, por lo que
+                    # el asistente no tenía forma de saber el cupón real de una nota confirmada y
+                    # podía inventarlo o sacarlo de un PDF equivocado.
                     if df_control is not None and not df_control.empty:
-                        cols_ctrl = [c for c in ["nota","ticker","precio_compra","contingency","barrera_capital","fecha_vencimiento","proximo_call"] if c in df_control.columns]
+                        cols_ctrl = [c for c in ["nota","ticker","emisor","precio_compra","contingency","barrera_capital","fecha_vencimiento","proximo_call"] if c in df_control.columns]
                         if cols_ctrl:
-                            ctx_lines += ["", "=== NOTAS (resumen) ===", df_control[cols_ctrl].to_string(index=False)]
+                            ctx_lines += ["", "=== NOTAS (resumen, fuente: CONTROL_NOTAS) ===", df_control[cols_ctrl].to_string(index=False)]
+                    # Cupón anual por nota — fuente: INVERSIONES (interes_nota_anual), la misma
+                    # columna que usa el resto de la app. Es la ÚNICA fuente válida de cupón.
+                    if df_inv is not None and not df_inv.empty and "nombre_activo" in df_inv.columns and "interes_nota_anual" in df_inv.columns:
+                        try:
+                            df_notas_cupon = df_inv[df_inv["nombre_activo"].astype(str).str.upper().str.startswith("NOTA")].copy()
+                            cupon_por_nota = df_notas_cupon.groupby("nombre_activo")["interes_nota_anual"].first().dropna()
+                            if not cupon_por_nota.empty:
+                                lineas_cupon = [f"  {n}: {v*100:.2f}% anual" for n, v in cupon_por_nota.items()]
+                                ctx_lines += ["", "=== CUPÓN ANUAL POR NOTA (fuente: INVERSIONES, USA SIEMPRE ESTE DATO) ==="] + lineas_cupon
+                        except Exception:
+                            pass
                     contexto = "\n".join(ctx_lines)
 
-                    # Filtrar solo los PDFs relevantes según la pregunta (máx 3)
-                    # para no superar el límite de tokens
+                    # Filtrar PDFs: SOLO si la pregunta menciona un número de nota concreto que
+                    # coincide con un PDF cargado. Antes, si no había número explícito pero la
+                    # pregunta tenía palabras como "próximo"/"cobro"/"call", se mandaban los primeros
+                    # 3 PDFs de la carpeta al azar — podían ser de notas totalmente distintas a la
+                    # pregunta, y el modelo terminaba describiendo cupones/fechas de la nota
+                    # equivocada. Ahora, sin número explícito, no se manda ningún PDF: se responde
+                    # solo con los datos ya verificados del Excel (arriba), que son la fuente fiable.
                     import re as _re
                     nums_mencionados = _re.findall(r"nota[_\s]*(\d+)", ultima.lower())
+                    pdfs_filtrados = {}
                     if nums_mencionados:
-                        # Si menciona notas concretas, solo esas
                         # Normalizar nombre del PDF para comparar: "NOTA 10.pdf" -> "nota10"
                         def _norm(s): return _re.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
                         pdfs_filtrados = {k: v for k, v in pdfs_b64.items()
                                           if any(_norm(k) == f"nota{n}" for n in nums_mencionados)}
                         if not pdfs_filtrados:
-                            pdfs_filtrados = dict(list(pdfs_b64.items())[:3])
-                    elif any(w in ultima.lower() for w in ["próximo", "proximo", "siguiente", "cobro", "call", "pago"]):
-                        # Preguntas de calendario: enviar solo los 3 primeros PDFs
-                        pdfs_filtrados = dict(list(pdfs_b64.items())[:3])
-                    else:
-                        # Pregunta general: sin PDFs, solo con el contexto del Excel
-                        pdfs_filtrados = {}
+                            contexto += (
+                                f"\n\n[AVISO: se menciona la nota {', '.join(nums_mencionados)} pero no hay "
+                                f"un PDF cargado con ese nombre — usa solo los datos del Excel de arriba, y si "
+                                f"falta algo que solo está en el documento oficial, dilo explícitamente en vez "
+                                f"de adivinarlo con otro PDF.]"
+                            )
 
                     contenido = []
                     for nombre_pdf, pdf_b64 in pdfs_filtrados.items():
@@ -5183,7 +5200,7 @@ def _tab_asistente_ia_notas(df_inv, df_cal, df_control):
                     resp = _req.post("https://api.anthropic.com/v1/messages",
                         headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
                         json={"model": "claude-sonnet-4-5", "max_tokens": 1000,
-                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO VISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nJR REAL ESTATE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
+                              "system": 'Eres el asistente financiero de Chaparro Fernández Wealth Management, un fondo de inversión privado. Respondes preguntas de socios e inversores con total precisión sobre el estado del fondo.\n\n== ESTRUCTURA DEL NEGOCIO ==\nEl fondo capta capital de inversores, lo invierte en activos y paga a cada inversor un interés fijo anual. El beneficio es la diferencia entre lo que rinden los activos y lo que se paga a inversores.\n\n== ACTIVOS Y TASAS ==\nParaguay: 15% | Bolivia: 15% | MotoClick: 25% | Fútbol: 15% | Bitcoin: 20% | Notas: tasa variable por nota\n\n== INVERSORES Y TASAS ==\nLEO: 10% | JORDI CHAPARRO: 15% | YURI FERNANDEZ: 15%\nROBERTO VISCAFE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nCROWE BOLIVIA: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\nJR REAL ESTATE: 5% hasta 31/01/2026, 7.5% desde 01/02/2026 hasta 30/06/2026, 10% desde 01/07/2026\n2012 JACC GROUP: 10% | PEDRO MAGAÑA: 10% | PAM: 10%\nCHAPARRO FERNANDEZ: 0% — sociedad gestora, no recibe pago como inversor\nGOLDEN BRICKS: 10% | TERESA: 10% | JEP: 15%\nJORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%\n\n== REGLAS DE CÁLCULO ==\n1. Pago inversor = capital x tasa_inversor / 12 x pro-rata días del mes\n2. El pago es MENSUAL y FIJO independiente del calendario de cobros de notas\n3. Para notas: el cobro de la empresa sigue CALENDARIO_NOTAS; el pago al inversor es siempre mensual\n4. Reinversiones cuentan para cobro empresa Y pago inversor\n5. CHAPARRO FERNANDEZ: pago=0, todo cobro es beneficio de la empresa\n6. NOTA_10: pago trimestral\n\n== REGLA ANTI-INVENCIÓN (cupones, fechas, emisor) ==\nEl cupón/tasa anual y el emisor de cada nota SOLO son válidos si vienen de los bloques "CUPÓN ANUAL POR NOTA" o "NOTAS (resumen, fuente: CONTROL_NOTAS)" del contexto, o de un PDF que sí esté adjunto en este mensaje. Las fechas de observación/pago/call SOLO son válidas si vienen del bloque "PRÓXIMOS EVENTOS". Si te preguntan por un dato de una nota y no lo ves en ninguna de esas fuentes (por ejemplo, porque no se adjuntó el PDF de esa nota), dilo explícitamente ("no tengo ese dato para la Nota X en este momento — súbeme su PDF o revisa CONTROL_NOTAS") en vez de aproximarlo, deducirlo de otra nota parecida o inventarlo.\n\n== FORMATO ==\nResponde SIEMPRE en español. Sé conciso: da el dato pedido directamente. Si piden detalle, entonces desarrolla. Fechas DD/MM/YYYY, importes con $ y 2 decimales.',
                               "messages": historial}, timeout=60)
                     data = resp.json()
                     respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
@@ -9263,6 +9280,120 @@ def borrar_borrador_nota(tipo_wizard: str, numero_nota: int):
         st.warning(f"⚠️ No se pudo borrar el borrador correctamente: {e}")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# BORRADORES DE ALTA DE INVERSIÓN (hoja BORRADORES_INVERSIONES)
+# Mismo patrón que BORRADORES_NOTAS: se guarda como JSON bajo una "CLAVE" libre
+# que Yuri elige (ej. "PAM-NOTA28"), persiste en Drive, y sobrevive a redeploys.
+# ══════════════════════════════════════════════════════════════════════════
+
+def guardar_borrador_inversion(clave: str, datos: dict) -> bool:
+    """Igual patrón que guardar_borrador_nota, pero para altas/cierres/reinversiones de INVERSIONES."""
+    import json as _json
+    try:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas:
+            st.error("⚠️ No se pudo leer el Excel para guardar el borrador — esta operación NO está a salvo todavía.")
+            return False
+        fila_nueva = pd.DataFrame([{
+            "CLAVE": str(clave),
+            "JSON_DATOS": _json.dumps(datos, ensure_ascii=False, default=str),
+            "FECHA_GUARDADO": pd.Timestamp.now(),
+        }])
+        if "BORRADORES_INVERSIONES" in hojas and not hojas["BORRADORES_INVERSIONES"].empty:
+            df_b = hojas["BORRADORES_INVERSIONES"]
+            df_b = df_b[df_b["CLAVE"].astype(str) != str(clave)]
+            hojas["BORRADORES_INVERSIONES"] = pd.concat([df_b, fila_nueva], ignore_index=True)
+        else:
+            hojas["BORRADORES_INVERSIONES"] = fila_nueva
+        contenido = excel_hojas_a_bytes(hojas)
+        with open(ARCHIVO, "wb") as f:
+            f.write(contenido)
+        st.cache_data.clear()
+
+        if "gcp_service_account" not in st.secrets:
+            st.warning("⚠️ Borrador guardado solo localmente (no hay credenciales de Google configuradas) — se perderá si el servidor se reinicia o actualizas el código.")
+            return False
+
+        exito, mensaje = subir_excel_a_drive(hojas)
+        if exito:
+            st.success("📝 Borrador guardado y a salvo en Google Drive — sobrevivirá aunque cambies el código.")
+            return True
+        else:
+            st.error(f"⚠️ El borrador se guardó solo localmente — la subida a Google Drive falló: {mensaje}.")
+            return False
+    except Exception as e:
+        st.error(f"⚠️ No se pudo guardar el borrador (error: {e}). Esta operación no está a salvo todavía.")
+        return False
+
+
+def cargar_borrador_inversion(clave: str) -> dict | None:
+    """Recupera el borrador guardado (si existe) para esa clave."""
+    import json as _json
+    try:
+        df_b = leer_hoja_excel("BORRADORES_INVERSIONES")
+        if df_b.empty:
+            return None
+        df_b.columns = [str(c).strip().upper() for c in df_b.columns]
+        fila = df_b[df_b["CLAVE"].astype(str) == str(clave)]
+        if fila.empty:
+            return None
+        return _json.loads(fila.iloc[-1]["JSON_DATOS"])
+    except Exception:
+        return None
+
+
+def listar_claves_borradores_inversion() -> list:
+    """Lista las claves de borradores de inversión guardados, para poder retomarlos."""
+    try:
+        df_b = leer_hoja_excel("BORRADORES_INVERSIONES")
+        if df_b.empty:
+            return []
+        df_b.columns = [str(c).strip().upper() for c in df_b.columns]
+        return sorted(df_b["CLAVE"].dropna().astype(str).unique().tolist())
+    except Exception:
+        return []
+
+
+def borrar_borrador_inversion(clave: str):
+    """Elimina el borrador de una operación (se llama tras guardarla de verdad, o al descartarla)."""
+    try:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas or "BORRADORES_INVERSIONES" not in hojas or hojas["BORRADORES_INVERSIONES"].empty:
+            return
+        df_b = hojas["BORRADORES_INVERSIONES"]
+        hojas["BORRADORES_INVERSIONES"] = df_b[df_b["CLAVE"].astype(str) != str(clave)]
+        contenido = excel_hojas_a_bytes(hojas)
+        with open(ARCHIVO, "wb") as f:
+            f.write(contenido)
+        st.cache_data.clear()
+        if "gcp_service_account" in st.secrets:
+            exito, mensaje = subir_excel_a_drive(hojas)
+            if not exito:
+                st.warning(f"⚠️ El borrador se borró localmente pero no se pudo sincronizar con Drive: {mensaje}")
+    except Exception as e:
+        st.warning(f"⚠️ No se pudo borrar el borrador correctamente: {e}")
+
+
+def _valores_conocidos_columna(df: pd.DataFrame, columna: str) -> list:
+    """Valores distintos ya usados en una columna de INVERSIONES — para ofrecerlos como opciones
+    en el formulario de alta en vez de adivinar la convención exacta (metodo_calculo,
+    activo_generador_interes, cuenta_cobro, motivo...)."""
+    if df is None or df.empty or columna not in df.columns:
+        return []
+    valores = df[columna].astype(str).str.strip()
+    valores = valores[(valores != "") & (valores.str.lower() != "nan")]
+    return sorted(valores.unique().tolist())
+
+
+def _mapa_columnas_reales(hojas: dict, nombre_hoja: str) -> dict:
+    """Mapa {nombre_columna_en_minusculas: nombre_columna_real_en_el_excel}, para escribir una fila
+    nueva respetando exactamente el nombre/formato de columna que ya tiene la hoja en Drive, sin
+    adivinar mayúsculas ni tener que igualar el orden a mano."""
+    if not hojas or nombre_hoja not in hojas or hojas[nombre_hoja] is None:
+        return {}
+    return {str(c).strip().lower(): c for c in hojas[nombre_hoja].columns}
+
+
 def aplicar_formula_simple(df: pd.DataFrame, operacion: str, columna_a: str, columna_b: str | None, nueva_columna: str) -> pd.DataFrame:
     """Aplica cálculos tipo Excel básicos sobre columnas numéricas."""
     out = df.copy()
@@ -9749,6 +9880,362 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
             anio += 1
 
     return pd.DataFrame(filas)
+
+
+def _posiciones_activas_para_cerrar(df_inv: pd.DataFrame) -> pd.DataFrame:
+    """Posiciones NUEVA/REINVERSION sin fecha_final_inversion — candidatas a cerrar (CANCELADA)."""
+    if df_inv is None or df_inv.empty:
+        return pd.DataFrame()
+    d = df_inv.copy()
+    if "tipo_operacion" in d.columns:
+        d = d[d["tipo_operacion"].astype(str).str.strip().str.upper().isin(["NUEVA", "REINVERSION"])]
+    if "fecha_final_inversion" in d.columns:
+        d = d[d["fecha_final_inversion"].isna()]
+    return d
+
+
+def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
+    """Alta/cierre/reinversión de posiciones directamente desde la app, escribiendo en Google Drive
+    con el mismo patrón que el wizard de 'Notas estructuradas': primero se guarda como BORRADOR
+    revisable (hoja BORRADORES_INVERSIONES), y solo se escribe de verdad en INVERSIONES (y en
+    REINVERSIONES si aplica) cuando Yuri confirma explícitamente tras revisar la previsualización.
+    Solo visible/accesible para el usuario 'Yuri' (se controla también en el menú principal)."""
+    st.markdown("## ➕ Nueva inversión")
+    st.caption(
+        "Da de alta una inversión nueva, cierra una posición existente (call/vencimiento/retiro/traspaso) "
+        "o registra una reinversión — sin tocar el Excel a mano. Funciona igual que el wizard de notas: "
+        "se guarda como borrador que puedes revisar/retomar, y solo se escribe en INVERSIONES cuando "
+        "confirmas explícitamente."
+    )
+
+    # ── Referencia del borrador (clave libre para poder guardarlo/retomarlo) ──────────────
+    if "inversion_wizard_datos" not in st.session_state:
+        st.session_state["inversion_wizard_datos"] = {}
+    if "inversion_wizard_clave_actual" not in st.session_state:
+        st.session_state["inversion_wizard_clave_actual"] = ""
+
+    claves_existentes = listar_claves_borradores_inversion()
+    col_clave1, col_clave2 = st.columns([2, 1])
+    with col_clave1:
+        clave = st.text_input(
+            "Referencia de esta operación (para guardarla como borrador y poder retomarla)",
+            value=st.session_state["inversion_wizard_clave_actual"],
+            placeholder="ej. PAM-NOTA28, EVA-CIERRE-AGO26, CROWE-REINVERSION-SEP26...",
+            key="inversion_wizard_clave_input",
+        )
+    with col_clave2:
+        st.write("")
+        st.write("")
+        if claves_existentes:
+            clave_retomar = st.selectbox("...o retomar borrador", ["—"] + claves_existentes, key="inversion_wizard_retomar_sel", label_visibility="visible")
+            if clave_retomar != "—" and st.button("📂 Cargar borrador"):
+                borrador = cargar_borrador_inversion(clave_retomar)
+                if borrador:
+                    st.session_state["inversion_wizard_clave_actual"] = clave_retomar
+                    st.session_state["inversion_wizard_datos"] = borrador
+                    st.rerun()
+                else:
+                    st.error("No se pudo cargar ese borrador.")
+
+    clave = clave.strip()
+    if not clave:
+        st.info("Escribe una referencia arriba (o carga un borrador existente) para empezar.")
+        return
+    st.session_state["inversion_wizard_clave_actual"] = clave
+    datos_previos = st.session_state["inversion_wizard_datos"] if st.session_state.get("inversion_wizard_clave_actual") == clave else {}
+
+    st.markdown("---")
+
+    tipo_operacion = st.selectbox(
+        "Tipo de operación",
+        ["NUEVA", "CANCELADA", "REINVERSION"],
+        index=["NUEVA", "CANCELADA", "REINVERSION"].index(datos_previos.get("tipo_operacion", "NUEVA")),
+        help=(
+            "NUEVA: entra capital fresco de un inversor a un activo/nota.\n\n"
+            "CANCELADA: se cierra una posición existente (call, vencimiento, retiro completo, traspaso a otro inversor).\n\n"
+            "REINVERSION: el capital de una posición cerrada se recoloca en otro activo/nota. OJO — según la "
+            "lógica actual del fondo, el pago mensual al inversor sigue calculándose sobre la fila NUEVA "
+            "original (misma fecha y misma tasa, sin reiniciar el reloj de intereses); esta fila de "
+            "REINVERSION solo redirige de qué activo cobra la EMPRESA a partir de ahora. Si tienes dudas en "
+            "un caso concreto, revísalo con calma antes de confirmar — es el tipo de operación más delicado."
+        ),
+    )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # RAMA: CANCELADA — cerrar una posición ya existente
+    # ═══════════════════════════════════════════════════════════════════
+    if tipo_operacion == "CANCELADA":
+        activas = _posiciones_activas_para_cerrar(df_inv)
+        if activas.empty:
+            st.warning("No se han encontrado posiciones activas (NUEVA/REINVERSION sin fecha_final_inversion) para cerrar.")
+            return
+        activas = activas.copy()
+        activas["_etiqueta"] = activas.apply(
+            lambda r: f"{r.get('id_inversion','?')} | {r.get('inversor','?')} | {r.get('nombre_activo','?')} | ${float(r.get('capital_invertido',0) or 0):,.2f} | desde {pd.Timestamp(r['fecha_inversion']).strftime('%d/%m/%Y') if pd.notna(r.get('fecha_inversion')) else '?'}",
+            axis=1,
+        )
+        etiqueta_sel = st.selectbox("Posición a cerrar", activas["_etiqueta"].tolist(), key="cancelada_posicion_sel")
+        fila_origen = activas[activas["_etiqueta"] == etiqueta_sel].iloc[0]
+        id_inversion_cerrar = str(fila_origen.get("id_inversion", ""))
+
+        st.dataframe(fila_origen.drop(labels=["_etiqueta"]).to_frame().T, use_container_width=True, hide_index=True)
+
+        fecha_final = st.date_input("Fecha de cierre (fecha_final_inversion)", value=pd.Timestamp.today().date(), key="cancelada_fecha_final")
+        motivos_conocidos = _valores_conocidos_columna(df_inv, "motivo") or ["call", "call final", "vencimiento", "retiro", "traspaso"]
+        motivo_sel = st.selectbox("Motivo del cierre", motivos_conocidos + ["Otro (escribir)"], key="cancelada_motivo_sel")
+        motivo_final = st.text_input("Escribe el motivo", key="cancelada_motivo_libre") if motivo_sel == "Otro (escribir)" else motivo_sel
+
+        datos_borrador = {
+            "tipo_operacion": "CANCELADA",
+            "id_inversion_cerrar": id_inversion_cerrar,
+            "fecha_final_inversion": str(fecha_final),
+            "motivo": motivo_final,
+        }
+
+        col_a, col_g = st.columns(2)
+        with col_a:
+            if st.button("📌 Guardar avance del borrador"):
+                guardar_borrador_inversion(clave, datos_borrador)
+                st.session_state["inversion_wizard_datos"] = datos_borrador
+
+        with col_g:
+            if st.button("💾 Confirmar cierre en el Excel", type="primary"):
+                hojas = leer_todas_las_hojas_excel()
+                if not hojas or "INVERSIONES" not in hojas:
+                    st.error("No se pudo leer INVERSIONES para guardar el cierre.")
+                else:
+                    df_raw = hojas["INVERSIONES"]
+                    mapa = _mapa_columnas_reales(hojas, "INVERSIONES")
+                    col_id = mapa.get("id_inversion")
+                    col_ff = mapa.get("fecha_final_inversion")
+                    col_mot = mapa.get("motivo")
+                    if not col_id or not col_ff:
+                        st.error("No se encontraron las columnas id_inversion / fecha_final_inversion en la hoja INVERSIONES — revisa los nombres de columna a mano.")
+                    else:
+                        mascara = df_raw[col_id].astype(str) == id_inversion_cerrar
+                        if not mascara.any():
+                            st.error(f"No se encontró la fila con id_inversion = {id_inversion_cerrar} en la hoja real — puede que el Excel haya cambiado desde que se cargó esta pantalla. Recarga y vuelve a intentarlo.")
+                        else:
+                            df_raw.loc[mascara, col_ff] = pd.Timestamp(fecha_final)
+                            if col_mot:
+                                df_raw.loc[mascara, col_mot] = motivo_final
+                            hojas["INVERSIONES"] = df_raw
+                            guardar_excel_completo_desde_hojas(hojas)
+                            borrar_borrador_inversion(clave)
+                            st.session_state["inversion_wizard_datos"] = {}
+                            st.session_state["inversion_wizard_clave_actual"] = ""
+                            st.success(f"Posición {id_inversion_cerrar} cerrada el {fecha_final} (motivo: {motivo_final}).")
+                            st.cache_data.clear()
+        return
+
+    # ═══════════════════════════════════════════════════════════════════
+    # RAMA: NUEVA / REINVERSION — construir una fila completa
+    # ═══════════════════════════════════════════════════════════════════
+    try:
+        inversores_conocidos = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]) | set(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
+    except NameError:
+        inversores_conocidos = sorted(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique())
+
+    col1, col2 = st.columns(2)
+    with col1:
+        inversor_sel = st.selectbox("Inversor", inversores_conocidos + ["Otro (escribir)"], key="ni_inversor_sel")
+        inversor_final = st.text_input("Escribe el nombre del inversor (exacto, en mayúsculas)", key="ni_inversor_libre") if inversor_sel == "Otro (escribir)" else inversor_sel
+    with col2:
+        tipo_inversion_sel = st.selectbox("Tipo de inversión", ["nota", "paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "otro"], key="ni_tipo_inv_sel")
+        tipo_inversion_final = st.text_input("Escribe el tipo de inversión", key="ni_tipo_inv_libre") if tipo_inversion_sel == "otro" else tipo_inversion_sel
+
+    es_nota = tipo_inversion_final.strip().lower() == "nota"
+
+    col3, col4 = st.columns(2)
+    with col3:
+        if es_nota:
+            numero_nota_ni = st.number_input("Número de nota (para nombre_activo = NOTA_XX)", min_value=1, max_value=999, step=1, key="ni_numero_nota")
+            nombre_activo_final = f"NOTA_{int(numero_nota_ni):02d}"
+            st.caption(f"nombre_activo se guardará como: **{nombre_activo_final}**")
+            subtipo_inversion_final = "ESTRUCTURADA"
+        else:
+            nombre_activo_final = st.text_input("nombre_activo", value=tipo_inversion_final, key="ni_nombre_activo_libre")
+            subtipo_conocidos = _valores_conocidos_columna(df_inv, "subtipo_inversion")
+            subtipo_inversion_final = st.selectbox("subtipo_inversion", ([tipo_inversion_final] if tipo_inversion_final not in subtipo_conocidos else []) + subtipo_conocidos + ["otro"], key="ni_subtipo_sel")
+            if subtipo_inversion_final == "otro":
+                subtipo_inversion_final = st.text_input("Escribe subtipo_inversion", key="ni_subtipo_libre")
+    with col4:
+        capital_invertido_final = st.number_input("Capital invertido ($)", min_value=0.0, step=1000.0, format="%.2f", key="ni_capital")
+
+    col5, col6 = st.columns(2)
+    with col5:
+        interes_inversor_anual_pct = st.number_input(
+            "Interés anual pagado AL INVERSOR (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key="ni_interes_inversor",
+            help="Tasa fija que se le paga a este inversor sobre su capital. OJO: para Roberto Viscafe, Crowe Bolivia y JR Real Estate la tasa es escalonada en el tiempo (5% → 7.5% → 10%) — revisa cuál corresponde a la fecha de inicio de esta posición.",
+        )
+    with col6:
+        if es_nota:
+            interes_nota_anual_pct = st.number_input("Cupón anual de la NOTA (%)", min_value=0.0, max_value=200.0, step=0.5, format="%.2f", key="ni_interes_nota",
+                                                        help="El cupón real de la nota — este es el dato que faltaba en el asistente de IA. Debe coincidir con CONTROL_NOTAS/el PDF de la nota.")
+        else:
+            tasas_fijas = {"paraguay": 15.0, "bolivia": 15.0, "motoclick": 25.0, "futbol": 15.0, "bitcoin": 20.0}
+            default_tasa = tasas_fijas.get(tipo_inversion_final.strip().lower(), 0.0)
+            interes_nota_anual_pct = st.number_input("Tasa anual que rinde el activo para la empresa (%)", min_value=0.0, max_value=200.0, step=0.5, format="%.2f", value=default_tasa, key="ni_interes_activo")
+
+    col7, col8 = st.columns(2)
+    with col7:
+        fecha_inversion_final = st.date_input("Fecha de inicio (fecha_inversion)", value=pd.Timestamp.today().date(), key="ni_fecha_inicio",
+                                                help="Para notas: recuerda que la fecha que cuenta para el pago al inversor es la primera fecha de PAGO del calendario menos 1 mes, no el Initial Valuation Date del PDF.")
+    with col8:
+        periodicidad_sel = st.selectbox("Periodicidad de cobro (meses)", [1, 3, 6], index=0, key="ni_periodicidad")
+
+    col9, col10 = st.columns(2)
+    with col9:
+        pago_intereses_sel = st.selectbox("pago_intereses", ["reinvierte", "paga"], key="ni_pago_intereses",
+                                            help="'paga' = el inversor cobra en efectivo cada mes. 'reinvierte' = se acumula (todos excepto JEP usan 'reinvierte').")
+    with col10:
+        capital_nuevo_real_sel = st.selectbox("capital_nuevo_real", ["SI", "NO"], index=0 if tipo_operacion == "NUEVA" else 1, key="ni_capital_nuevo_real",
+                                                help="Marca si es dinero genuinamente nuevo entrando al fondo (SI) o una reasignación interna de capital ya existente (NO) — se usa para no contar dos veces el mismo capital en los totales 'solo real'.")
+
+    with st.expander("Campos adicionales (metodo_calculo, activo_generador_interes, cuenta_cobro, id_inversion)", expanded=False):
+        metodo_calculo_ops = _valores_conocidos_columna(df_inv, "metodo_calculo")
+        metodo_calculo_final = st.selectbox("metodo_calculo", ["(dejar en blanco)"] + metodo_calculo_ops + ["otro"], key="ni_metodo_calculo_sel")
+        if metodo_calculo_final == "otro":
+            metodo_calculo_final = st.text_input("Escribe metodo_calculo", key="ni_metodo_calculo_libre")
+        elif metodo_calculo_final == "(dejar en blanco)":
+            metodo_calculo_final = ""
+
+        activo_gen_ops = _valores_conocidos_columna(df_inv, "activo_generador_interes")
+        activo_generador_final = st.selectbox("activo_generador_interes", ["(dejar en blanco)"] + activo_gen_ops + ["otro"], key="ni_activo_gen_sel")
+        if activo_generador_final == "otro":
+            activo_generador_final = st.text_input("Escribe activo_generador_interes", key="ni_activo_gen_libre")
+        elif activo_generador_final == "(dejar en blanco)":
+            activo_generador_final = ""
+
+        cuenta_cobro_ops = _valores_conocidos_columna(df_inv, "cuenta_cobro")
+        cuenta_cobro_final = st.selectbox("cuenta_cobro", ["(dejar en blanco)"] + cuenta_cobro_ops + ["otro"], key="ni_cuenta_cobro_sel")
+        if cuenta_cobro_final == "otro":
+            cuenta_cobro_final = st.text_input("Escribe cuenta_cobro", key="ni_cuenta_cobro_libre")
+        elif cuenta_cobro_final == "(dejar en blanco)":
+            cuenta_cobro_final = ""
+
+        ids_recientes = df_inv["id_inversion"].dropna().astype(str).tail(5).tolist() if df_inv is not None and "id_inversion" in df_inv.columns else []
+        if ids_recientes:
+            st.caption(f"Últimos id_inversion usados (para mantener la misma convención): {', '.join(ids_recientes)}")
+        id_inversion_final = st.text_input("id_inversion (escribe uno siguiendo la convención de arriba)", key="ni_id_inversion")
+
+    id_inversion_origen_reinv = None
+    if tipo_operacion == "REINVERSION":
+        st.markdown("#### Origen de la reinversión")
+        st.caption(
+            "Esto SOLO alimenta la hoja REINVERSIONES (trazabilidad histórica de dónde viene el capital) — "
+            "no modifica ni cierra la posición original. Si además hace falta cerrar formalmente la posición "
+            "original, hazlo por separado con una operación CANCELADA."
+        )
+        activas_origen = _posiciones_activas_para_cerrar(df_inv)
+        if not activas_origen.empty:
+            activas_origen = activas_origen.copy()
+            activas_origen["_etiqueta"] = activas_origen.apply(
+                lambda r: f"{r.get('id_inversion','?')} | {r.get('inversor','?')} | {r.get('nombre_activo','?')} | ${float(r.get('capital_invertido',0) or 0):,.2f}",
+                axis=1,
+            )
+            etiqueta_origen = st.selectbox("Posición de origen (opcional)", ["(sin vincular)"] + activas_origen["_etiqueta"].tolist(), key="ni_origen_reinv_sel")
+            if etiqueta_origen != "(sin vincular)":
+                id_inversion_origen_reinv = str(activas_origen[activas_origen["_etiqueta"] == etiqueta_origen].iloc[0].get("id_inversion", ""))
+
+    # ── Construir preview de la fila ────────────────────────────────────
+    fila_preview = {
+        "id_inversion": id_inversion_final,
+        "inversor": inversor_final,
+        "tipo_inversion": tipo_inversion_final,
+        "subtipo_inversion": subtipo_inversion_final,
+        "nombre_activo": nombre_activo_final,
+        "metodo_calculo": metodo_calculo_final,
+        "activo_generador_interes": activo_generador_final,
+        "tipo_operacion": tipo_operacion,
+        "capital_nuevo_real": capital_nuevo_real_sel,
+        "cuenta_cobro": cuenta_cobro_final,
+        "motivo": "",
+        "fecha_inversion": str(fecha_inversion_final),
+        "fecha_final_inversion": "",
+        "capital_invertido": capital_invertido_final,
+        "interes_inversor_anual": round(interes_inversor_anual_pct / 100.0, 6),
+        "interes_nota_anual": round(interes_nota_anual_pct / 100.0, 6),
+        "periodicidad_meses": periodicidad_sel,
+        "pago_intereses": pago_intereses_sel,
+    }
+    if id_inversion_origen_reinv:
+        fila_preview["_id_inversion_origen_reinv"] = id_inversion_origen_reinv
+
+    st.markdown("#### Previsualización de la fila (revísala antes de guardar)")
+    df_preview = pd.DataFrame([fila_preview])
+    df_preview_editado = st.data_editor(df_preview, use_container_width=True, key="ni_preview_editor")
+
+    datos_borrador = df_preview_editado.iloc[0].to_dict()
+
+    col_a, col_g, col_d = st.columns(3)
+    with col_a:
+        if st.button("📌 Guardar avance del borrador", key="ni_guardar_avance"):
+            guardar_borrador_inversion(clave, datos_borrador)
+            st.session_state["inversion_wizard_datos"] = datos_borrador
+
+    with col_g:
+        confirmar = st.button(f"💾 Confirmar y escribir en INVERSIONES", type="primary", key="ni_confirmar")
+    with col_d:
+        if st.button("🗑️ Descartar borrador", key="ni_descartar"):
+            borrar_borrador_inversion(clave)
+            st.session_state["inversion_wizard_datos"] = {}
+            st.session_state["inversion_wizard_clave_actual"] = ""
+            st.rerun()
+
+    if confirmar:
+        if not str(datos_borrador.get("id_inversion", "")).strip():
+            st.error("Falta id_inversion — es la clave que identifica la fila, no puede quedar vacío.")
+            return
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas or "INVERSIONES" not in hojas:
+            st.error("No se pudo leer INVERSIONES para guardar la nueva fila.")
+            return
+        mapa = _mapa_columnas_reales(hojas, "INVERSIONES")
+        if not mapa:
+            st.error("No se pudo determinar el nombre real de las columnas de INVERSIONES.")
+            return
+        fila_real = {}
+        for clave_logica, valor in datos_borrador.items():
+            if clave_logica.startswith("_"):
+                continue
+            col_real = mapa.get(clave_logica)
+            if col_real:
+                fila_real[col_real] = valor
+        columnas_faltantes = [k for k in datos_borrador if not k.startswith("_") and k not in mapa]
+        if columnas_faltantes:
+            st.warning(f"⚠️ Estas columnas no existen tal cual en la hoja INVERSIONES real y NO se escribieron: {', '.join(columnas_faltantes)}. Añádelas a mano en el Excel si hacen falta.")
+
+        df_raw = hojas["INVERSIONES"]
+        fila_nueva_df = pd.DataFrame([fila_real])
+        hojas["INVERSIONES"] = pd.concat([df_raw, fila_nueva_df], ignore_index=True)
+
+        # Vínculo de trazabilidad en REINVERSIONES, si aplica y la hoja existe
+        id_origen_reinv = datos_borrador.get("_id_inversion_origen_reinv")
+        if tipo_operacion == "REINVERSION" and id_origen_reinv and "REINVERSIONES" in hojas:
+            mapa_reinv = _mapa_columnas_reales(hojas, "REINVERSIONES")
+            col_origen = mapa_reinv.get("id_inversion_origen")
+            col_destino = mapa_reinv.get("id_inversion_destino")
+            if col_origen and col_destino:
+                fila_reinv = {col_origen: id_origen_reinv, col_destino: datos_borrador.get("id_inversion", "")}
+                if mapa_reinv.get("fecha"):
+                    fila_reinv[mapa_reinv["fecha"]] = pd.Timestamp(fecha_inversion_final)
+                if mapa_reinv.get("importe"):
+                    fila_reinv[mapa_reinv["importe"]] = capital_invertido_final
+                hojas["REINVERSIONES"] = pd.concat([hojas["REINVERSIONES"], pd.DataFrame([fila_reinv])], ignore_index=True)
+            else:
+                st.info("No se encontraron las columnas id_inversion_origen/id_inversion_destino en REINVERSIONES — añade el vínculo a mano si hace falta.")
+
+        # Quitar el borrador de esta misma tanda de hojas para no escribir el Excel dos veces
+        if "BORRADORES_INVERSIONES" in hojas and not hojas["BORRADORES_INVERSIONES"].empty:
+            df_b = hojas["BORRADORES_INVERSIONES"]
+            hojas["BORRADORES_INVERSIONES"] = df_b[df_b["CLAVE"].astype(str) != str(clave)]
+
+        guardar_excel_completo_desde_hojas(hojas)
+        st.session_state["inversion_wizard_datos"] = {}
+        st.session_state["inversion_wizard_clave_actual"] = ""
+        st.success(f"Fila guardada en INVERSIONES (id_inversion = {datos_borrador.get('id_inversion')}).")
+        st.cache_data.clear()
 
 
 def seccion_deuda_jordi():
@@ -10375,6 +10862,42 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
     # principio del contexto, antes de truncar. Así, aunque el resto del contexto crezca mucho
     # (más inversores, más meses), la lista de notas en riesgo real nunca puede quedar cortada.
     lineas_riesgo = []
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 0. EMISOR Y CUPÓN ANUAL POR NOTA — fuente: CONTROL_NOTAS (emisor) +
+    #    INVERSIONES (interes_nota_anual). Se calcula en código y se inserta
+    #    en lineas_riesgo (protegido de truncamiento) porque antes NO existía
+    #    en ningún bloque del contexto: la IA no tenía forma de saber el cupón
+    #    real de una nota confirmada y podía inventarlo. Esta es la ÚNICA
+    #    fuente válida para responder "¿qué tasa/cupón paga la nota X?".
+    # ══════════════════════════════════════════════════════════════════════
+    try:
+        lineas_riesgo.append("\n=== NOTAS ACTIVAS: EMISOR Y CUPÓN ANUAL (fuente: CONTROL_NOTAS + INVERSIONES) ===")
+        lineas_riesgo.append("(USA SIEMPRE ESTOS DATOS PARA EL CUPÓN/TASA DE UNA NOTA. NO INVENTES NI APROXIMES UN CUPÓN QUE NO ESTÉ AQUÍ.)")
+        df_control_activo_cupon = obtener_control_notas_activas(df_inv, df_control)
+        notas_cupon = sorted(pd.to_numeric(df_control_activo_cupon.get("nota"), errors="coerce").dropna().unique().astype(int)) if df_control_activo_cupon is not None and not df_control_activo_cupon.empty else []
+        if not notas_cupon:
+            lineas_riesgo.append("  Sin notas activas en CONTROL_NOTAS.")
+        else:
+            for nota_id_c in notas_cupon:
+                nombre_nota_c = f"NOTA_{nota_id_c:02d}"
+                inv_nota_c = df_inv[df_inv.get("nombre_activo", pd.Series(dtype=str)).astype(str).str.upper().str.replace(" ", "_") == nombre_nota_c]
+                cupon_c = None
+                if not inv_nota_c.empty and "interes_nota_anual" in inv_nota_c.columns and inv_nota_c["interes_nota_anual"].notna().any():
+                    cupon_c = float(inv_nota_c["interes_nota_anual"].dropna().iloc[0])
+                cupon_s = f"{cupon_c*100:.2f}% anual" if cupon_c is not None else "N/D (revisar columna interes_nota_anual en INVERSIONES)"
+                emisor_c = "N/D"
+                filas_control_c = df_control_activo_cupon[pd.to_numeric(df_control_activo_cupon.get("nota"), errors="coerce") == nota_id_c]
+                if "emisor" in filas_control_c.columns:
+                    emisores_c = filas_control_c["emisor"].dropna().astype(str).str.strip()
+                    emisores_c = emisores_c[emisores_c != ""]
+                    if not emisores_c.empty:
+                        emisor_c = emisores_c.iloc[0]
+                tickers_c = ", ".join(sorted(filas_control_c["ticker"].dropna().astype(str).unique())) if "ticker" in filas_control_c.columns else ""
+                lineas_riesgo.append(f"  NOTA_{nota_id_c:02d} | Emisor: {emisor_c} | Cupón anual: {cupon_s} | Tickers: {tickers_c}")
+    except Exception as _e_cup:
+        lineas_riesgo.append(f"[Error emisor/cupón por nota: {_e_cup}]")
+
     try:
         lineas_riesgo.append(f"\n=== ESTADO DE RIESGO DE NOTAS ===")
         hoy_r = pd.Timestamp.today().normalize()
@@ -10795,16 +11318,25 @@ def preguntar_asistente_ia_fondo(pregunta: str, df_inv, df_cal, df_control,
 
         ctx = construir_contexto_ia_fondo(pregunta, df_inv, df_cal, df_control, fecha_limite=fecha_limite, mostrar_debug_ui=False)
 
-        # Seleccionar PDFs relevantes (máx 2 para no superar tokens)
+        # Seleccionar PDFs relevantes: SOLO si la pregunta menciona un número de nota concreto
+        # que además coincide con un PDF cargado. Antes, si no había coincidencia exacta pero la
+        # pregunta contenía palabras como "call"/"cobro"/"próximo", se mandaban los primeros 2 PDFs
+        # de la carpeta sin relación real con la pregunta — eso podía hacer que el modelo describiera
+        # el cupón/fechas/condiciones de una nota equivocada. Ahora, si no hay coincidencia exacta,
+        # no se manda ningún PDF: el modelo responde solo con los datos ya verificados del Excel
+        # (CONTROL_NOTAS/CALENDARIO_NOTAS/INVERSIONES), que son más fiables que adivinar el PDF.
         nums = _re_ia.findall(r"nota[_\s]*(\d+)", pregunta.lower())
+        pdfs_sel = {}
         if nums:
             def _norm(s): return _re_ia.sub(r"[^a-z0-9]","",s.lower().replace(".pdf",""))
             pdfs_sel = {k:v for k,v in pdfs_b64.items() if any(_norm(k)==f"nota{n}" for n in nums)}
-            if not pdfs_sel: pdfs_sel = dict(list(pdfs_b64.items())[:2])
-        elif any(w in pregunta.lower() for w in ["call","cobro","pago","barrera","vencimiento","próximo","proximo"]):
-            pdfs_sel = dict(list(pdfs_b64.items())[:2])
-        else:
-            pdfs_sel = {}
+            if not pdfs_sel:
+                ctx += (
+                    f"\n\n[AVISO: la pregunta menciona la nota {', '.join(nums)} pero no hay un PDF "
+                    f"cargado con ese nombre (nota{nums[0]}.pdf) — si necesitas un detalle que solo está "
+                    f"en el documento oficial (condición exacta de call, cláusulas legales), dile a Yuri "
+                    f"que suba ese PDF en la pestaña de notas; no lo adivines con otro PDF.]"
+                )
 
         # Construir mensaje con PDFs + contexto
         contenido = []
@@ -10916,6 +11448,8 @@ Se eligió variación fija en vez de margen a la barrera de contingencia (que se
 27. NOTAS EN BORRADOR (sección "NOTAS EN BORRADOR" del contexto): son extracciones de PDF hechas por IA en el wizard "Notas estructuradas", que Yuri puede estar revisando y todavía NO están guardadas en CONTROL_NOTAS/CALENDARIO_NOTAS. Si te pregunta por una nota y solo la encuentras ahí (no en las fuentes oficiales), dile explícitamente que es un borrador sin guardar, con los datos que tengas, y avisa de que puede haber campos "REVISAR" sin corregir todavía. Puedes usarla para responder preguntas sobre esa nota en concreto, pero NUNCA la incluyas en cálculos de capital activo, cobros o beneficios del fondo — para eso solo cuentan las notas ya confirmadas en CONTROL_NOTAS.
 
 28. REGLA GENERAL DE PRECIOS (aplica a CUALQUIER pregunta sobre una nota o ticker, no solo a las de riesgo): cada vez que menciones un precio, un rango de precio o una variación % de un ticker —en un resumen de nota, en una tabla, en una frase de "situación actual", en una conclusión, donde sea—, tiene que ser EXACTAMENTE el número que ya viene calculado en el contexto (ESTADO DE RIESGO DE NOTAS / NOTAS EN RIESGO REAL), copiado tal cual, nunca un valor que hayas visto en un resultado de búsqueda web. Señal de alerta: si estás a punto de escribir un precio como rango (ej. "$79.80-$79.84") en vez de un número único, es casi seguro que lo sacaste de una búsqueda web y no del contexto — pará y usa el número exacto del contexto en su lugar. La búsqueda web sirve únicamente para texto cualitativo (noticias, motivo de un movimiento, eventos de la compañía, resultados trimestrales) — nunca como fuente de un precio, rango o variación % que vayas a mostrarle a Yuri. Si no tenés el precio de un ticker ya calculado en el contexto, no inventes uno ni lo completes con la web — decí que no lo tenés.
+
+29. REGLA GENERAL DE CUPÓN/TASA DE NOTA Y FECHAS DE CALENDARIO (misma lógica que la regla 28, aplicada a cupones y fechas): el cupón/tasa anual y el emisor de una nota SIEMPRE deben salir del bloque "NOTAS ACTIVAS: EMISOR Y CUPÓN ANUAL" del contexto, copiados tal cual — nunca un número parecido de memoria, ni el cupón de otra nota similar, ni un valor deducido del PDF si el bloque ya trae el dato (el PDF solo es fuente principal para condiciones de call, barreras y cláusulas legales, NO para el número de cupón si ya está en ese bloque). Igual con fechas de observación/pago/call: solo son válidas las que aparecen en los bloques CALENDARIO INTEGRADO / PRÓXIMA OBSERVACIÓN POR NOTA / PRÓXIMOS CALLS. Ese calendario solo cubre los próximos 180 días — si te preguntan por una fecha pasada, o más allá de ese rango, dilo explícitamente ("no tengo esa fecha en el rango de datos que manejo, de 180 días vista") en vez de estimarla o inventarla. Si para una nota concreta ves "N/D" en el cupón, dilo así de simple y sugiere revisar la columna interes_nota_anual en INVERSIONES — no lo completes con un valor aproximado.
 
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
@@ -11036,9 +11570,12 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         "Notas estructuradas", "Alertas y calendario", "Extractos",
         "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
     ]
-    # "Gestión de Excel" es acceso directo al Excel del fondo: solo Yuri debe verlo.
-    if str(st.session_state.usuario).strip().lower() == "yuri":
+    # "Gestión de Excel" y "➕ Nueva inversión" son acceso directo/de escritura al Excel del
+    # fondo: solo Yuri debe verlos.
+    _es_yuri = str(st.session_state.usuario).strip().lower() == "yuri"
+    if _es_yuri:
         menu_opciones.insert(5, "Gestión de Excel")
+        menu_opciones.insert(6, "➕ Nueva inversión")
 
     menu = st.sidebar.selectbox("Menú principal", menu_opciones)
 
@@ -11054,8 +11591,11 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
 
     elif menu == "Extractos":
         seccion_extractos()
-    elif menu == "Gestión de Excel" and str(st.session_state.usuario).strip().lower() == "yuri":
+    elif menu == "Gestión de Excel" and _es_yuri:
         seccion_gestion_excel()
+    elif menu == "➕ Nueva inversión" and _es_yuri:
+        _df_inv_ni, _df_cal_ni, _df_control_ni = cargar_excel_completo()
+        seccion_nueva_inversion(_df_inv_ni, _df_cal_ni, _df_control_ni)
     elif menu == "🏦 Deuda Jordi Chaparro":
         seccion_deuda_jordi()
     elif menu == "✨ Asistente IA":
