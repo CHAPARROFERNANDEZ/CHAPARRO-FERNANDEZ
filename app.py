@@ -1962,8 +1962,6 @@ def seccion_portal_inversor(nombre_inversor: str):
     hoy = pd.Timestamp.today().normalize()
 
     st.header(f"👋 Bienvenido/a, {nombre_inversor}")
-    if es_demo:
-        st.info("🧪 **Modo demo** — estos datos son ficticios, pensados para mostrar cómo funciona el portal a un inversor potencial. No corresponden a ninguna posición real.")
     st.caption("Este es tu portal personal — solo tú puedes ver esta información. Ningún otro inversor tiene acceso a tu posición.")
 
     datos = calcular_intereses_acumulados_inversor(df_inv, nombre_inversor, hoy)
