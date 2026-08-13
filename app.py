@@ -1980,11 +1980,24 @@ def seccion_portal_inversor(nombre_inversor: str):
 
     st.markdown("---")
     st.markdown("### 📄 Tu extracto")
+
+    # Solo se pueden consultar extractos de meses YA CERRADOS: el mes en curso queda
+    # excluido (aún no ha terminado). El último mes disponible es siempre el mes anterior
+    # al actual — el día 1 de cada mes, ese mes anterior ya está disponible.
+    if hoy.month == 1:
+        anio_max, mes_max = hoy.year - 1, 12
+    else:
+        anio_max, mes_max = hoy.year, hoy.month - 1
+
     col_mes, col_anio = st.columns(2)
-    with col_mes:
-        mes_extracto = st.selectbox("Mes", list(range(1, 13)), index=hoy.month - 1, format_func=lambda m: ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][m-1])
     with col_anio:
-        anio_extracto = st.number_input("Año", min_value=2024, max_value=hoy.year, value=hoy.year, step=1)
+        anio_extracto = st.selectbox("Año", list(range(2024, anio_max + 1)), index=anio_max - 2024)
+    with col_mes:
+        meses_disponibles = list(range(1, mes_max + 1)) if anio_extracto == anio_max else list(range(1, 13))
+        mes_extracto = st.selectbox(
+            "Mes", meses_disponibles, index=len(meses_disponibles) - 1,
+            format_func=lambda m: ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][m-1],
+        )
 
     if st.button("🔎 Ver mi extracto", type="primary"):
         archivos = generar_extractos(df_inv, "Un inversor", nombre_inversor, anio_extracto, mes_extracto)
