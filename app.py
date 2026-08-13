@@ -1099,6 +1099,9 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         "EVA CHAPARRO": "Eva2026Wealth!",
         "PAOLA CHAPARRO": "Paola2026Wealth!",
         "JAPAN JORDI": "JapanJ2026Wealth!",
+        # Usuario DEMO: portal con datos 100% ficticios para presentar a inversores potenciales.
+        # No corresponde a ningún inversor real ni toca el Excel del fondo (ver _construir_datos_demo_inversor).
+        "DEMO": "Demo2026Wealth!",
     }
 
     if "autenticado" not in st.session_state:
@@ -1152,7 +1155,8 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
 
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
-    formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
+    if str(st.session_state.usuario).strip().upper() != "DEMO":
+        formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.autenticado = False
         st.session_state.usuario = None
@@ -1876,12 +1880,90 @@ def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv):
             st.rerun()
 
 
+def _construir_datos_demo_inversor():
+    """
+    Genera un set de datos 100% ficticio con la misma forma exacta que produce
+    cargar_excel_completo(), para alimentar el portal de inversor en modo DEMO.
+
+    Objetivo: dejar hacer una demo comercial a un inversor potencial usando la interfaz
+    real del portal (mismos KPIs, extracto descargable, asistente IA...), sin tocar
+    nunca el Excel real ni exponer datos de ningún inversor existente. Las fechas se
+    calculan siempre relativas a "hoy" para que la demo no quede desfasada con el tiempo.
+    """
+    hoy = pd.Timestamp.today().normalize()
+    filas = [
+        {
+            "id_inversion": "DEMO-001", "inversor": "DEMO", "tipo_operacion": "cancelada",
+            "tipo_inversion": "nota", "subtipo_inversion": "ESTRUCTURADA",
+            "nombre_activo": "Nota estructurada — cesta bancaria EU",
+            "fecha_inversion": hoy - pd.DateOffset(months=14),
+            "fecha_final_inversion": hoy - pd.DateOffset(months=8),
+            "capital_invertido": 50000.0, "interes_inversor_anual": 0.10, "interes_nota_anual": 0.10,
+        },
+        {
+            "id_inversion": "DEMO-002", "inversor": "DEMO", "tipo_operacion": "cancelada",
+            "tipo_inversion": "nota", "subtipo_inversion": "ESTRUCTURADA",
+            "nombre_activo": "Nota estructurada — cesta tecnológica US",
+            "fecha_inversion": hoy - pd.DateOffset(months=12),
+            "fecha_final_inversion": hoy - pd.DateOffset(months=3),
+            "capital_invertido": 75000.0, "interes_inversor_anual": 0.10, "interes_nota_anual": 0.10,
+        },
+        {
+            "id_inversion": "DEMO-003", "inversor": "DEMO", "tipo_operacion": "nueva",
+            "tipo_inversion": "nota", "subtipo_inversion": "ESTRUCTURADA",
+            "nombre_activo": "Nota estructurada — cesta bancaria global",
+            "fecha_inversion": hoy - pd.DateOffset(months=5),
+            "fecha_final_inversion": pd.NaT,
+            "capital_invertido": 100000.0, "interes_inversor_anual": 0.10, "interes_nota_anual": 0.10,
+        },
+        {
+            "id_inversion": "DEMO-004", "inversor": "DEMO", "tipo_operacion": "nueva",
+            "tipo_inversion": "fijo", "subtipo_inversion": "ACTIVO FIJO",
+            "nombre_activo": "Activo fijo — desarrollo inmobiliario",
+            "fecha_inversion": hoy - pd.DateOffset(months=10),
+            "fecha_final_inversion": pd.NaT,
+            "capital_invertido": 30000.0, "interes_inversor_anual": 0.10, "interes_nota_anual": 0.0,
+        },
+        {
+            "id_inversion": "DEMO-005", "inversor": "DEMO", "tipo_operacion": "nueva",
+            "tipo_inversion": "fijo", "subtipo_inversion": "ACTIVO FIJO",
+            "nombre_activo": "Activo fijo — cripto",
+            "fecha_inversion": hoy - pd.DateOffset(months=4),
+            "fecha_final_inversion": pd.NaT,
+            "capital_invertido": 20000.0, "interes_inversor_anual": 0.10, "interes_nota_anual": 0.0,
+        },
+    ]
+    df_inv = pd.DataFrame(filas)
+    for col in ["id_inversion", "inversor", "tipo_operacion", "tipo_inversion", "subtipo_inversion",
+                "nombre_activo", "metodo_calculo", "activo_generador_interes", "capital_nuevo_real",
+                "cuenta_cobro", "motivo"]:
+        if col not in df_inv.columns:
+            df_inv[col] = ""
+        df_inv[col] = df_inv[col].fillna("").astype(str).str.strip()
+    df_inv["fecha_inversion"] = pd.to_datetime(df_inv["fecha_inversion"])
+    df_inv["fecha_final_inversion"] = pd.to_datetime(df_inv["fecha_final_inversion"])
+    for col in ["capital_invertido", "interes_inversor_anual", "interes_nota_anual"]:
+        df_inv[col] = pd.to_numeric(df_inv[col], errors="coerce").fillna(0)
+    df_inv["periodicidad_meses"] = 1
+    df_inv["pago_intereses"] = "REINVIERTE"
+
+    df_cal = pd.DataFrame(columns=["nota", "fecha", "tipo_evento"])
+    df_control = pd.DataFrame()
+    return df_inv, df_cal, df_control
+
+
 def seccion_portal_inversor(nombre_inversor: str):
     """Portal de acceso limitado para un inversor: solo ve su propia posición, nunca la de otros."""
-    df_inv, df_cal, df_control = cargar_excel_completo()
+    es_demo = str(nombre_inversor).strip().upper() == "DEMO"
+    if es_demo:
+        df_inv, df_cal, df_control = _construir_datos_demo_inversor()
+    else:
+        df_inv, df_cal, df_control = cargar_excel_completo()
     hoy = pd.Timestamp.today().normalize()
 
     st.header(f"👋 Bienvenido/a, {nombre_inversor}")
+    if es_demo:
+        st.info("🧪 **Modo demo** — estos datos son ficticios, pensados para mostrar cómo funciona el portal a un inversor potencial. No corresponden a ninguna posición real.")
     st.caption("Este es tu portal personal — solo tú puedes ver esta información. Ningún otro inversor tiene acceso a tu posición.")
 
     datos = calcular_intereses_acumulados_inversor(df_inv, nombre_inversor, hoy)
