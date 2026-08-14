@@ -2063,6 +2063,50 @@ def total_ingresado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa
     return float(total)
 
 
+def totales_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: float) -> dict:
+    """Recorre mes a mes, desde la primera inversión del activo hasta el mes actual incluido,
+    y devuelve el ingreso acumulado de la compañía y el pago acumulado a inversores, con
+    desglose por año.
+
+    Usa exactamente la misma fuente y la misma lógica que total_ingresado_activo_desde_inicio()
+    y total_pagado_activo_desde_inicio() (detalle_activo_mes), pero en UNA sola pasada en vez de
+    dos, y devolviendo además el detalle por año. Sirve para alimentar el contexto del asistente
+    IA sin duplicar el coste de cálculo."""
+    vacio = {"ingresado": 0.0, "pagado": 0.0, "beneficio": 0.0, "por_anio": {}, "desde": None}
+    df_activo = filtrar_activo(df_base, activo)
+    if df_activo.empty:
+        return vacio
+    fecha_min = df_activo["fecha_inversion"].dropna().min()
+    if pd.isna(fecha_min):
+        return vacio
+    hoy = pd.Timestamp.today().normalize()
+    ing_total = 0.0
+    pag_total = 0.0
+    por_anio = {}
+    anio, mes = int(fecha_min.year), int(fecha_min.month)
+    while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
+        detalle = detalle_activo_mes(df_base, activo, tasa_anual, anio, mes)
+        if not detalle.empty:
+            ing_mes = float(detalle["ingreso_bruto"].sum())
+            pag_mes = float(detalle["pago_inversor_mes"].sum())
+            ing_total += ing_mes
+            pag_total += pag_mes
+            acum = por_anio.setdefault(anio, {"ingresado": 0.0, "pagado": 0.0})
+            acum["ingresado"] += ing_mes
+            acum["pagado"] += pag_mes
+        mes += 1
+        if mes == 13:
+            mes = 1
+            anio += 1
+    return {
+        "ingresado": ing_total,
+        "pagado": pag_total,
+        "beneficio": ing_total - pag_total,
+        "por_anio": por_anio,
+        "desde": pd.Timestamp(fecha_min),
+    }
+
+
 # =========================
 # NOTAS
 # =========================
@@ -11381,18 +11425,56 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
                 st.code(_tb_texto, language="python")
 
     # ══════════════════════════════════════════════════════════════════════
-    # 5. TOTALES HISTÓRICOS POR ACTIVO (desde inicio)
+    # 5. TOTALES HISTÓRICOS POR ACTIVO FIJO (acumulado desde el inicio)
+    #    Va a su PROPIA lista (lineas_historicos) porque al final de la función se
+    #    inserta al PRINCIPIO del contexto, junto con riesgo y borradores. Antes se
+    #    añadía al final de `lineas`, después del calendario integrado de 180 días y
+    #    de los extractos: en cuanto el contexto crecía, el recorte de caracteres se
+    #    lo comía y el asistente contestaba "no tengo el histórico acumulado" a
+    #    preguntas tipo "¿cuánto ha cobrado la compañía de Paraguay desde el inicio?".
+    #    Es un bloque pequeño y muy consultado — nunca debe poder perderse.
     # ══════════════════════════════════════════════════════════════════════
+    lineas_historicos = []
     try:
-        lineas.append("\n=== TOTALES HISTÓRICOS POR ACTIVO (desde inicio, fuente: Dashboard) ===")
+        lineas_historicos.append("\n=== TOTALES HISTÓRICOS POR ACTIVO FIJO — ACUMULADO DESDE EL INICIO (fuente: Dashboard) ===")
+        lineas_historicos.append(
+            "  IMPORTANTE: estas cifras YA SON el acumulado histórico completo, calculado mes a mes desde la "
+            "primera inversión de cada activo hasta el mes actual incluido. Si te preguntan '¿cuánto ha cobrado "
+            "la compañía de [activo] desde el inicio?', la respuesta es el campo 'ingresado' de esa línea: dilo "
+            "directamente. NUNCA respondas que no tienes el histórico acumulado, y NUNCA lo estimes con "
+            "capital × tasa — el dato exacto está aquí."
+        )
+        tot_ing_fijos = 0.0
+        tot_pag_fijos = 0.0
         for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
                               ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
                               ("bitcoin",TASA_ANUAL_BITCOIN)]:
-            ing = total_ingresado_activo_desde_inicio(df_inv, activo, tasa)
-            pag = total_pagado_activo_desde_inicio(df_inv, activo, tasa)
-            lineas.append(f"  {activo}: ingresado ${ing:,.2f} | pagado inversores ${pag:,.2f} | beneficio empresa ${ing-pag:,.2f}")
+            t_hist = totales_activo_desde_inicio(df_inv, activo, tasa)
+            tot_ing_fijos += t_hist["ingresado"]
+            tot_pag_fijos += t_hist["pagado"]
+            desde_txt = t_hist["desde"].strftime("%m/%Y") if t_hist["desde"] is not None else "N/D"
+            lineas_historicos.append(
+                f"  {activo.upper()} (primera inversión {desde_txt}): "
+                f"ingresado por la compañía ${t_hist['ingresado']:,.2f} | "
+                f"pagado a inversores ${t_hist['pagado']:,.2f} | "
+                f"beneficio empresa ${t_hist['beneficio']:,.2f}"
+            )
+            for anio_h in sorted(t_hist["por_anio"]):
+                d_h = t_hist["por_anio"][anio_h]
+                lineas_historicos.append(
+                    f"      {anio_h}: ingresado ${d_h['ingresado']:,.2f} | "
+                    f"pagado ${d_h['pagado']:,.2f} | beneficio ${d_h['ingresado'] - d_h['pagado']:,.2f}"
+                )
+        lineas_historicos.append(
+            f"  >> TOTAL TODOS LOS ACTIVOS FIJOS desde el inicio: ingresado ${tot_ing_fijos:,.2f} | "
+            f"pagado a inversores ${tot_pag_fijos:,.2f} | beneficio empresa ${tot_ing_fijos - tot_pag_fijos:,.2f}"
+        )
+        lineas_historicos.append(
+            "  (Este bloque cubre SOLO activos fijos. El acumulado histórico de NOTAS ESTRUCTURADAS no está "
+            "en este bloque: si te lo piden, dilo explícitamente en vez de sumar cifras de otros bloques.)"
+        )
     except Exception as e:
-        lineas.append(f"[Error históricos: {e}]")
+        lineas_historicos.append(f"[Error históricos: {e}]")
 
     # ══════════════════════════════════════════════════════════════════════
     # 6. EXTRACTO ACUMULADO — PRE-CALCULADO Y FILTRADO POR INVERSOR
@@ -11568,7 +11650,7 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
     # Insertamos las secciones de riesgo y de notas en borrador al principio (justo tras la
     # cabecera de fecha/fuente), para que NUNCA puedan perderse por el recorte de caracteres al
     # final del contexto, sin importar cuánto crezca el resto (más inversores, más meses, más notas).
-    lineas_final = lineas[:2] + lineas_riesgo + lineas_borradores + lineas[2:]
+    lineas_final = lineas[:2] + lineas_riesgo + lineas_historicos + lineas_borradores + lineas[2:]
     return "\n".join(lineas_final)
 
 
@@ -11621,7 +11703,23 @@ def preguntar_asistente_ia_fondo(pregunta: str, df_inv, df_cal, df_control,
         contenido = []
         for nombre_pdf, pdf_b64 in pdfs_sel.items():
             contenido.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf_b64},"title":nombre_pdf.replace(".pdf","").upper()})
-        contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx[:60000]}\n\n---\nPREGUNTA: {pregunta}"})
+        # Límite de caracteres del contexto. Antes eran 60.000, y el contexto real ya los
+        # superaba (calendario integrado de 180 días + extractos acumulados por inversor),
+        # así que las últimas secciones se perdían de forma silenciosa. Se sube el límite y,
+        # además, si aun así hay recorte, se le dice EXPLÍCITAMENTE al modelo qué ha pasado
+        # para que avise en vez de afirmar que un dato "no existe".
+        LIMITE_CTX_IA = 150000
+        ctx_enviado = ctx[:LIMITE_CTX_IA]
+        aviso_recorte = ""
+        if len(ctx) > LIMITE_CTX_IA:
+            aviso_recorte = (
+                f"\n\n[AVISO INTERNO: el contexto se ha recortado ({len(ctx):,} caracteres reales, "
+                f"{LIMITE_CTX_IA:,} enviados). Las secciones de riesgo, totales históricos por activo y "
+                f"notas en borrador están al principio y SÍ están completas. Si un dato que esperabas "
+                f"encontrar no aparece, di que puede haberse quedado fuera por el recorte y que Yuri "
+                f"acote la pregunta — NO afirmes que ese dato no existe en el sistema.]"
+            )
+        contenido.append({"type":"text","text":f"DATOS DEL FONDO:\n\n{ctx_enviado}{aviso_recorte}\n\n---\nPREGUNTA: {pregunta}"})
 
         # Solo los últimos 2 turnos del historial (sin datos pesados)
         historial = []
@@ -11730,7 +11828,12 @@ Se eligió variación fija en vez de margen a la barrera de contingencia (que se
 
 29. REGLA GENERAL DE CUPÓN/TASA DE NOTA Y FECHAS DE CALENDARIO (misma lógica que la regla 28, aplicada a cupones y fechas): el cupón/tasa anual y el emisor de una nota SIEMPRE deben salir del bloque "NOTAS ACTIVAS: EMISOR Y CUPÓN ANUAL" del contexto, copiados tal cual — nunca un número parecido de memoria, ni el cupón de otra nota similar, ni un valor deducido del PDF si el bloque ya trae el dato (el PDF solo es fuente principal para condiciones de call, barreras y cláusulas legales, NO para el número de cupón si ya está en ese bloque). Igual con fechas de observación/pago/call: solo son válidas las que aparecen en los bloques CALENDARIO INTEGRADO / PRÓXIMA OBSERVACIÓN POR NOTA / PRÓXIMOS CALLS. Ese calendario solo cubre los próximos 180 días — si te preguntan por una fecha pasada, o más allá de ese rango, dilo explícitamente ("no tengo esa fecha en el rango de datos que manejo, de 180 días vista") en vez de estimarla o inventarla. Si para una nota concreta ves "N/D" en el cupón, dilo así de simple y sugiere revisar la columna interes_nota_anual en INVERSIONES — no lo completes con un valor aproximado.
 
+30. NUNCA USES LA BÚSQUEDA WEB PARA DATOS INTERNOS DEL FONDO. Los capitales, cobros, ingresos, beneficios, pagos a inversores, históricos acumulados, notas, calendarios y nombres de inversores de Chaparro Fernández son datos PRIVADOS que solo existen en el contexto que te paso — no están en internet y buscarlos ahí no puede devolver nada útil. Si un dato interno no lo encuentras en el contexto, la respuesta correcta es decir en una frase que no lo tienes en el contexto y qué haría falta para tenerlo; jamás lanzar una búsqueda web ni comentar que "la búsqueda web no encontró información sobre el fondo". La búsqueda web sirve EXCLUSIVAMENTE para información pública de mercado sobre los tickers subyacentes: noticias, motivo de un movimiento de precio, resultados trimestrales, rating de analistas. Nada más.
+
+31. ANTES DE DECIR "NO TENGO ESE DATO", RELEE EL CONTEXTO. En particular, el acumulado histórico de cada activo fijo (ingresado por la compañía, pagado a inversores y beneficio, total y por año) SIEMPRE viene en el bloque "TOTALES HISTÓRICOS POR ACTIVO FIJO — ACUMULADO DESDE EL INICIO", situado al principio del contexto. Preguntas como "¿cuánto ha cobrado la compañía de Paraguay desde el inicio?" se responden leyendo ese bloque, no estimando ni pidiendo permiso para calcular una aproximación.
+
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
+- TOTALES HISTÓRICOS POR ACTIVO FIJO: acumulado desde el inicio (ingresado, pagado a inversores y beneficio), total y desglosado por año, para Paraguay, MotoClick, Fútbol, Bolivia y Bitcoin. Es tu única fuente para cualquier pregunta de "desde el inicio" o "en total" sobre un activo fijo.
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
 - ESTADO DE RIESGO DE NOTAS: precio actual vs barrera, por nota y ticker.
 - INTERESES A PAGAR A INVERSORES / EXTRACTO: pagos ya calculados con la lógica de extractos (solo NUEVA/CANCELADA, reinversiones excluidas del pago pero no del capital activo).
