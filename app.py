@@ -914,6 +914,14 @@ def mostrar_hero(usuario=None):
 
 
 HOJA_USUARIOS = "USUARIOS"
+HOJA_LOG_IA = "LOG_IA_USO"
+# Precio por millón de tokens (USD) de cada modelo de IA usado en la app, para estimar el coste
+# de cada llamada al guardar el log de uso. Si cambia la tarifa de Anthropic o el modelo usado,
+# actualiza este diccionario — es la ÚNICA fuente del cálculo de coste en toda la app.
+PRECIOS_MODELOS_IA = {
+    "claude-sonnet-4-5": (3.0, 15.0),  # (precio input, precio output) por millón de tokens
+}
+PRECIO_MODELO_IA_POR_DEFECTO = (3.0, 15.0)
 # NOTA DE SEGURIDAD: por decisión explícita de Yuri, las contraseñas se guardan en TEXTO
 # PLANO (no cifradas) en la hoja USUARIOS del Excel del fondo, para que el equipo interno
 # pueda consultarlas directamente cuando lo necesite. Esto es intencionadamente menos seguro
@@ -1830,6 +1838,9 @@ Responde SIEMPRE en español, de forma cercana y clara. Sé conciso. Importes co
             timeout=60,
         )
         data = resp.json()
+        _uso = data.get("usage", {}) or {}
+        log_uso_ia(nombre_inversor, "inversor",
+                   _uso.get("input_tokens", 0), _uso.get("output_tokens", 0))
         if "content" in data:
             textos = [b.get("text", "") for b in data["content"] if b.get("type") == "text"]
             return "\n".join(t for t in textos if t).strip() or "No he podido generar una respuesta."
@@ -9334,6 +9345,112 @@ def guardar_excel_completo_desde_hojas(hojas: dict):
             )
 
 
+def log_uso_ia(usuario: str, tipo: str, tokens_input: int, tokens_output: int,
+                modelo: str = "claude-sonnet-4-5") -> None:
+    """
+    Registra una llamada al asistente de IA en la hoja LOG_IA_USO, para poder ver después
+    qué usuarios usan el asistente y estimar el gasto en dólares de cada uno.
+    'tipo' identifica el canal/función: 'fondo' (asistente interno), 'inversor' (portal del
+    inversor), etc.
+
+    Igual que guardar_borrador_nota, reescribe y sube todo el Excel — es el mismo patrón que
+    ya usa el resto de la app para persistir en Drive. Por eso NUNCA debe romper la conversación
+    si falla: se traga cualquier error en silencio (sin st.error), porque perder una fila de
+    log es mucho menos grave que cortar una respuesta del asistente al usuario.
+    """
+    try:
+        precio_in, precio_out = PRECIOS_MODELOS_IA.get(modelo, PRECIO_MODELO_IA_POR_DEFECTO)
+        coste = (tokens_input / 1_000_000) * precio_in + (tokens_output / 1_000_000) * precio_out
+
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas:
+            return
+        fila_nueva = pd.DataFrame([{
+            "USUARIO": usuario,
+            "TIPO": tipo,
+            "MODELO": modelo,
+            "FECHA_HORA": pd.Timestamp.now(),
+            "TOKENS_INPUT": int(tokens_input or 0),
+            "TOKENS_OUTPUT": int(tokens_output or 0),
+            "COSTE_ESTIMADO_USD": round(coste, 6),
+        }])
+        if HOJA_LOG_IA in hojas and not hojas[HOJA_LOG_IA].empty:
+            hojas[HOJA_LOG_IA] = pd.concat([hojas[HOJA_LOG_IA], fila_nueva], ignore_index=True)
+        else:
+            hojas[HOJA_LOG_IA] = fila_nueva
+
+        contenido = excel_hojas_a_bytes(hojas)
+        with open(ARCHIVO, "wb") as f:
+            f.write(contenido)
+        st.cache_data.clear()
+        if "gcp_service_account" in st.secrets:
+            subir_excel_a_drive(hojas)
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _leer_log_ia_cached() -> pd.DataFrame:
+    """Versión cacheada (2 min) de la lectura de LOG_IA_USO para el panel de 'Uso IA' —
+    evita releer/descargar el Excel en cada rerun de Streamlit."""
+    df = leer_hoja_excel(HOJA_LOG_IA)
+    if df.empty:
+        return df
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if "fecha_hora" in df.columns:
+        df["fecha_hora"] = pd.to_datetime(df["fecha_hora"], errors="coerce")
+    for col in ["tokens_input", "tokens_output", "coste_estimado_usd"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
+def seccion_uso_ia():
+    """Panel de administrador: qué usuarios usan el asistente de IA y cuánto gasto estimado
+    (en dólares) genera cada uno, a partir del log guardado en LOG_IA_USO."""
+    st.markdown("## 📊 Uso del asistente de IA")
+    st.caption(
+        "Gasto estimado a partir de los tokens reales que devuelve la API de Anthropic en cada "
+        "llamada. Es una estimación (tarifa configurada en el código) — para el gasto exacto, "
+        "consulta la consola de facturación de Anthropic."
+    )
+    df = _leer_log_ia_cached()
+    if df.empty:
+        st.info("Todavía no hay ningún uso registrado del asistente de IA desde que se activó este log.")
+        return
+
+    c1, c2 = st.columns(2)
+    fecha_min = df["fecha_hora"].min().date()
+    fecha_max = df["fecha_hora"].max().date()
+    desde = c1.date_input("Desde", value=fecha_min, key="uso_ia_desde")
+    hasta = c2.date_input("Hasta", value=fecha_max, key="uso_ia_hasta")
+
+    mask = (df["fecha_hora"].dt.date >= desde) & (df["fecha_hora"].dt.date <= hasta)
+    df_f = df[mask]
+    if df_f.empty:
+        st.warning("No hay uso registrado en ese rango de fechas.")
+        return
+
+    mostrar_metricas("Total del periodo", [
+        ("Mensajes", f"{len(df_f):,}"),
+        ("Tokens totales", f"{int(df_f['tokens_input'].sum() + df_f['tokens_output'].sum()):,}"),
+        ("Coste estimado", f"${df_f['coste_estimado_usd'].sum():,.2f}"),
+    ])
+
+    st.markdown("### Por usuario")
+    resumen = (
+        df_f.groupby("usuario")
+        .agg(mensajes=("usuario", "count"),
+             tokens_input=("tokens_input", "sum"),
+             tokens_output=("tokens_output", "sum"),
+             coste_estimado_usd=("coste_estimado_usd", "sum"))
+        .reset_index()
+        .sort_values("coste_estimado_usd", ascending=False)
+    )
+    resumen["coste_estimado_usd"] = resumen["coste_estimado_usd"].map(lambda v: f"${v:,.4f}")
+    st.dataframe(resumen, use_container_width=True, hide_index=True)
+
+
 def guardar_borrador_nota(tipo_wizard: str, numero_nota: int, datos: dict) -> bool:
     """
     Guarda automáticamente (sin que el usuario tenga que pulsar nada) el resultado de una
@@ -9592,7 +9709,9 @@ def seccion_gestion_excel():
     st.markdown("## Gestión de Excel")
     st.caption("Sube, edita, calcula, guarda y descarga la base de datos directamente desde la app.")
 
-    tab_subir, tab_editar, tab_descargar = st.tabs(["Subir Excel", "Editar y calcular", "Descargar copia"])
+    tab_subir, tab_editar, tab_usuarios, tab_descargar = st.tabs(
+        ["Subir Excel", "Editar y calcular", "Usuarios y contraseñas", "Descargar copia"]
+    )
 
     with tab_subir:
         st.subheader("Recargar Excel desde Google Drive")
@@ -9702,6 +9821,30 @@ def seccion_gestion_excel():
             file_name=ARCHIVO,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+    with tab_usuarios:
+        st.subheader("Usuarios y contraseñas actuales")
+        st.caption(
+            "Incluye tanto usuarios internos como inversores. La contraseña mostrada es la "
+            "que está en vigor ahora mismo — si un inversor la cambió desde su portal, aquí "
+            "verás la nueva, no la original."
+        )
+        df_u = _leer_hoja_usuarios()
+        if df_u.empty:
+            st.info(
+                "Todavía no hay nadie en la hoja USUARIOS (nadie ha cambiado su contraseña "
+                "desde el portal) — esos usuarios siguen con la contraseña inicial definida en el código."
+            )
+        else:
+            st.dataframe(
+                df_u[["usuario", "tipo_usuario", "password"]].rename(columns={
+                    "usuario": "Usuario", "tipo_usuario": "Tipo", "password": "Contraseña actual",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+        if st.button("🔄 Recargar desde Drive", key="btn_recargar_usuarios"):
+            st.cache_data.clear()
+            st.rerun()
 
     with tab_descargar:
         st.subheader("Descargar copia actual")
@@ -11658,7 +11801,7 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
 # Llamada al modelo (mismo modelo/prompt/criterio para web y WhatsApp)
 # ═══════════════════════════════════════════════════════════════════════════
 def preguntar_asistente_ia_fondo(pregunta: str, df_inv, df_cal, df_control,
-                                   historial_previo=None, pdfs_b64=None) -> str:
+                                   historial_previo=None, pdfs_b64=None, usuario: str = "desconocido") -> str:
     """Llama al asistente IA del fondo: mismo modelo, mismo system prompt, mismo criterio
     de riesgo y misma función de contexto (construir_contexto_ia_fondo) que usa la pestaña
     'Asistente IA' de la app web. La reutiliza también el servicio de WhatsApp, para que
@@ -11861,6 +12004,8 @@ JORDI ESPECIAL: 10% | EVA CHAPARRO: 15% | PAOLA CHAPARRO: 15% | JAPAN JORDI: 15%
 Responde SIEMPRE en español. Sé conciso cuando el dato es directo; desarrolla el razonamiento cuando la pregunta lo requiera. Fechas DD/MM/YYYY, importes con $ y 2 decimales.""",
                   "messages":historial},timeout=60)
         data = resp.json()
+        _uso = data.get("usage", {}) or {}
+        log_uso_ia(usuario, "fondo", _uso.get("input_tokens", 0), _uso.get("output_tokens", 0))
         respuesta = "".join(b.get("text","") for b in data.get("content",[]) if b.get("type")=="text")
         if not respuesta:
             respuesta = f"Error API: {data.get('error',{}).get('message',str(data))}"
@@ -11930,6 +12075,7 @@ def seccion_asistente_ia_fondo():
                     respuesta = preguntar_asistente_ia_fondo(
                         ultima, df_inv, df_cal, df_control,
                         historial_previo=mensajes_prev, pdfs_b64=pdfs_b64,
+                        usuario=str(st.session_state.get("usuario", "desconocido")),
                     )
                 except Exception as e:
                     respuesta = f"Error: {e}"
@@ -11958,6 +12104,7 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
     if _es_yuri:
         menu_opciones.insert(5, "Gestión de Excel")
         menu_opciones.insert(6, "➕ Nueva inversión")
+        menu_opciones.insert(7, "📊 Uso IA")
 
     menu = st.sidebar.selectbox("Menú principal", menu_opciones)
 
@@ -11978,6 +12125,8 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
     elif menu == "➕ Nueva inversión" and _es_yuri:
         _df_inv_ni, _df_cal_ni, _df_control_ni = cargar_excel_completo()
         seccion_nueva_inversion(_df_inv_ni, _df_cal_ni, _df_control_ni)
+    elif menu == "📊 Uso IA" and _es_yuri:
+        seccion_uso_ia()
     elif menu == "🏦 Deuda Jordi Chaparro":
         seccion_deuda_jordi()
     elif menu == "✨ Asistente IA":
