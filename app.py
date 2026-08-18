@@ -5789,6 +5789,31 @@ def _leer_gastos_plataforma_cached() -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+TASAS_USD_RESPALDO = {"EUR": 1.08, "GBP": 1.27, "USD": 1.0}  # respaldo si la API de cambio falla
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _obtener_tasas_cambio_a_usd() -> dict:
+    """Tipo de cambio de cada moneda a USD, actualizado cada 6h. Si la API externa falla
+    (sin conexión, caída, etc.) usa un valor de respaldo fijo para no romper la app."""
+    tasas = dict(TASAS_USD_RESPALDO)
+    try:
+        resp = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD,GBP", timeout=8)
+        datos = resp.json().get("rates", {})
+        if "USD" in datos:
+            tasas["EUR"] = datos["USD"]
+        if "GBP" in datos and datos["GBP"] > 0:
+            tasas["GBP"] = datos["USD"] / datos["GBP"]  # EUR->USD entre EUR->GBP = GBP->USD
+    except Exception:
+        pass
+    return tasas
+
+
+def convertir_a_usd(importe: float, moneda: str) -> float:
+    tasas = _obtener_tasas_cambio_a_usd()
+    return importe * tasas.get(str(moneda).upper(), 1.0)
+
+
 def seccion_gastos_plataforma():
     """Panel de administrador (solo Yuri): sube una factura en PDF, la IA extrae los datos
     clave, y se guarda en la hoja GASTOS_PLATAFORMA — con vista mensual del total gastado
@@ -5885,16 +5910,23 @@ def seccion_gastos_plataforma():
     meses_disponibles = sorted(df_g["mes"].dropna().unique(), reverse=True)
     mes_sel = st.selectbox("Mes", ["Todos"] + list(meses_disponibles))
     df_f = df_g if mes_sel == "Todos" else df_g[df_g["mes"] == mes_sel]
+    df_f = df_f.copy()
+    df_f["importe_usd"] = df_f.apply(lambda r: convertir_a_usd(r["importe"], r.get("moneda", "USD")), axis=1)
 
-    mostrar_metricas("Resumen", [
-        ("Total", f"{df_f['importe'].sum():,.2f} €"),
+    mostrar_metricas("Resumen (en USD)", [
+        ("Total", f"${df_f['importe_usd'].sum():,.2f}"),
         ("Facturas", f"{len(df_f)}"),
-        ("Media por factura", f"{(df_f['importe'].sum() / len(df_f)) if len(df_f) else 0:,.2f} €"),
+        ("Media por factura", f"${(df_f['importe_usd'].sum() / len(df_f)) if len(df_f) else 0:,.2f}"),
     ])
+    st.caption(
+        "Los importes originales en EUR/GBP se convierten a USD con el tipo de cambio del "
+        "día (actualizado cada 6h). El importe original se conserva y se muestra en el detalle."
+    )
 
     st.markdown("#### Por categoría")
-    resumen_cat = df_f.groupby("categoria")["importe"].sum().reset_index().sort_values("importe", ascending=False)
-    resumen_cat["importe"] = resumen_cat["importe"].map(lambda v: f"{v:,.2f} €")
+    resumen_cat = df_f.groupby("categoria")["importe_usd"].sum().reset_index().sort_values("importe_usd", ascending=False)
+    resumen_cat = resumen_cat.rename(columns={"importe_usd": "importe"})
+    resumen_cat["importe"] = resumen_cat["importe"].map(lambda v: f"${v:,.2f}")
     st.dataframe(resumen_cat, use_container_width=True, hide_index=True)
 
     st.markdown("#### Detalle")
@@ -5904,7 +5936,12 @@ def seccion_gastos_plataforma():
         c1.write(fila["proveedor"])
         c2.write(fila["concepto"])
         c3.write(fila["categoria"])
-        c4.write(f"{fila['importe']:,.2f} {fila.get('moneda', 'EUR')}")
+        moneda_original = str(fila.get("moneda", "USD"))
+        if moneda_original == "USD":
+            c4.write(f"${fila['importe']:,.2f}")
+        else:
+            c4.write(f"${fila['importe_usd']:,.2f}")
+            c4.caption(f"({fila['importe']:,.2f} {moneda_original} orig.)")
         nombre_pdf = str(fila.get("archivo_pdf", "") or "")
         ruta_pdf = os.path.join(CARPETA_FACTURAS, nombre_pdf) if nombre_pdf else None
         if ruta_pdf and os.path.isfile(ruta_pdf):
