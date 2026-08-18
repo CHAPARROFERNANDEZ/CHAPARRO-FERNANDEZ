@@ -1,4 +1,5 @@
 import calendar
+import json
 import os
 import re
 import smtplib
@@ -5626,14 +5627,16 @@ REGLAS:
         return {"error": f"No se pudo interpretar la respuesta de la IA como JSON: {e}", "respuesta_cruda": texto}
 
 
-CARPETA_FACTURAS = "/data/facturas"  # ruta del volumen persistente de Railway (mount path: /data)
+CARPETA_DATOS = "/data"  # volumen persistente de Railway (mount path: /data)
+CARPETA_FACTURAS = "/data/facturas"
+ARCHIVO_GASTOS_JSON = "/data/gastos_plataforma.json"
 
 
 def _guardar_pdf_factura(pdf_bytes: bytes, nombre_sugerido: str) -> Optional[str]:
     """Guarda el PDF en el volumen persistente de Railway (/data/facturas) y devuelve el
     nombre de archivo guardado, o None si el volumen no está montado (por ejemplo en local
     o si Railway todavía no tiene el volumen configurado) — en ese caso no falla, solo
-    guarda los datos sin el PDF, igual que antes."""
+    guarda los datos sin el PDF."""
     try:
         os.makedirs(CARPETA_FACTURAS, exist_ok=True)
         marca = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -5646,81 +5649,77 @@ def _guardar_pdf_factura(pdf_bytes: bytes, nombre_sugerido: str) -> Optional[str
         return None
 
 
-def guardar_gasto_plataforma(gasto: dict, pdf_bytes: Optional[bytes] = None) -> tuple[bool, str]:
-    """Añade una fila a la hoja GASTOS_PLATAFORMA. Mismo patrón que log_uso_ia: reescribe
-    y sube todo el Excel, igual que el resto de la app para persistir en Drive.
-    Si se pasa el PDF original, lo guarda también en el volumen persistente de Railway."""
+def _leer_gastos_json() -> list:
+    """Lee la lista de gastos guardada en el volumen persistente (/data/gastos_plataforma.json).
+    Si el archivo no existe todavía (primer uso), devuelve una lista vacía sin fallar."""
     try:
-        hojas = leer_todas_las_hojas_excel()
-        if not hojas:
-            return False, "No se pudo leer el Excel."
+        if not os.path.isfile(ARCHIVO_GASTOS_JSON):
+            return []
+        with open(ARCHIVO_GASTOS_JSON, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
 
+
+def _escribir_gastos_json(lista: list) -> None:
+    os.makedirs(CARPETA_DATOS, exist_ok=True)
+    with open(ARCHIVO_GASTOS_JSON, "w", encoding="utf-8") as f:
+        json.dump(lista, f, ensure_ascii=False, indent=2)
+
+
+def guardar_gasto_plataforma(gasto: dict, pdf_bytes: Optional[bytes] = None) -> tuple[bool, str]:
+    """Guarda el gasto directamente en el volumen persistente de Railway (/data), como un
+    archivo JSON — totalmente independiente del Excel/Google Drive, para no depender de la
+    credencial de servicio. Si se pasa el PDF original, también se guarda ahí mismo."""
+    try:
         nombre_pdf_guardado = ""
         if pdf_bytes:
             nombre_pdf_guardado = _guardar_pdf_factura(pdf_bytes, gasto.get("proveedor", "factura")) or ""
 
-        fila_nueva = pd.DataFrame([{
-            "FECHA": gasto.get("fecha"),
-            "PROVEEDOR": gasto.get("proveedor"),
-            "CONCEPTO": gasto.get("concepto"),
-            "CATEGORIA": gasto.get("categoria"),
-            "IMPORTE": gasto.get("importe"),
-            "MONEDA": gasto.get("moneda", "EUR"),
-            "ARCHIVO_PDF": nombre_pdf_guardado,
-            "REGISTRADO_POR": gasto.get("registrado_por", ""),
-            "REGISTRADO_EN": pd.Timestamp.now(),
-        }])
-        if HOJA_GASTOS_PLATAFORMA in hojas and not hojas[HOJA_GASTOS_PLATAFORMA].empty:
-            hojas[HOJA_GASTOS_PLATAFORMA] = pd.concat([hojas[HOJA_GASTOS_PLATAFORMA], fila_nueva], ignore_index=True)
-        else:
-            hojas[HOJA_GASTOS_PLATAFORMA] = fila_nueva
+        lista = _leer_gastos_json()
+        nuevo_id = (max((g.get("id", 0) for g in lista), default=0)) + 1
+        lista.append({
+            "id": nuevo_id,
+            "fecha": gasto.get("fecha"),
+            "proveedor": gasto.get("proveedor"),
+            "concepto": gasto.get("concepto"),
+            "categoria": gasto.get("categoria"),
+            "importe": gasto.get("importe"),
+            "moneda": gasto.get("moneda", "EUR"),
+            "archivo_pdf": nombre_pdf_guardado,
+            "registrado_por": gasto.get("registrado_por", ""),
+            "registrado_en": datetime.now().isoformat(),
+        })
+        _escribir_gastos_json(lista)
 
-        contenido = excel_hojas_a_bytes(hojas)
-        with open(ARCHIVO, "wb") as f:
-            f.write(contenido)
-        st.cache_data.clear()
-        if "gcp_service_account" in st.secrets:
-            exito, mensaje = subir_excel_a_drive(hojas)
-        else:
-            exito, mensaje = True, "Guardado localmente (sin credenciales de Drive)."
+        mensaje = "Guardado en el disco persistente de la app."
         if pdf_bytes and not nombre_pdf_guardado:
             mensaje += " (El PDF no se pudo guardar — ¿está creado el volumen /data en Railway?)"
-        return exito, mensaje
+        return True, mensaje
     except Exception as e:
-        return False, f"Error al guardar: {e}"
+        return False, f"Error al guardar: {type(e).__name__}: {e}"
 
 
-def eliminar_gasto_plataforma(indice_fila: int) -> tuple[bool, str]:
-    """Elimina una fila de GASTOS_PLATAFORMA por su índice dentro del DataFrame ya cargado."""
+def eliminar_gasto_plataforma(id_gasto: int) -> tuple[bool, str]:
+    """Elimina un gasto por su id dentro de /data/gastos_plataforma.json."""
     try:
-        hojas = leer_todas_las_hojas_excel()
-        if not hojas or HOJA_GASTOS_PLATAFORMA not in hojas:
-            return False, "No hay gastos guardados."
-        df_g = hojas[HOJA_GASTOS_PLATAFORMA].reset_index(drop=True)
-        if indice_fila not in df_g.index:
+        lista = _leer_gastos_json()
+        nueva_lista = [g for g in lista if g.get("id") != id_gasto]
+        if len(nueva_lista) == len(lista):
             return False, "Ese gasto ya no existe (puede que la lista se haya actualizado)."
-        hojas[HOJA_GASTOS_PLATAFORMA] = df_g.drop(index=indice_fila).reset_index(drop=True)
-        contenido = excel_hojas_a_bytes(hojas)
-        with open(ARCHIVO, "wb") as f:
-            f.write(contenido)
-        st.cache_data.clear()
-        if "gcp_service_account" in st.secrets:
-            return subir_excel_a_drive(hojas)
-        return True, "Eliminado localmente (sin credenciales de Drive)."
+        _escribir_gastos_json(nueva_lista)
+        return True, "Eliminado."
     except Exception as e:
-        return False, f"Error al eliminar: {e}"
+        return False, f"Error al eliminar: {type(e).__name__}: {e}"
 
 
-@st.cache_data(ttl=120, show_spinner=False)
 def _leer_gastos_plataforma_cached() -> pd.DataFrame:
-    df = leer_hoja_excel(HOJA_GASTOS_PLATAFORMA)
-    if df.empty:
-        return df
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    if "fecha" in df.columns:
-        df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
-    if "importe" in df.columns:
-        df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
+    lista = _leer_gastos_json()
+    if not lista:
+        return pd.DataFrame(columns=["id", "fecha", "proveedor", "concepto", "categoria", "importe", "moneda", "archivo_pdf"])
+    df = pd.DataFrame(lista)
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+    df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
     return df.reset_index(drop=True)
 
 
@@ -5819,7 +5818,7 @@ def seccion_gastos_plataforma():
     st.dataframe(resumen_cat, use_container_width=True, hide_index=True)
 
     st.markdown("#### Detalle")
-    detalle = df_f.sort_values("fecha", ascending=False).reset_index()
+    detalle = df_f.sort_values("fecha", ascending=False).reset_index(drop=True)
     for _, fila in detalle.iterrows():
         c1, c2, c3, c4, c5, c6 = st.columns([2, 3, 2, 2, 1, 1])
         c1.write(fila["proveedor"])
@@ -5830,13 +5829,12 @@ def seccion_gastos_plataforma():
         ruta_pdf = os.path.join(CARPETA_FACTURAS, nombre_pdf) if nombre_pdf else None
         if ruta_pdf and os.path.isfile(ruta_pdf):
             with open(ruta_pdf, "rb") as f_pdf:
-                c5.download_button("📄", data=f_pdf.read(), file_name=nombre_pdf, mime="application/pdf", key=f"dl_gasto_{fila['index']}")
+                c5.download_button("📄", data=f_pdf.read(), file_name=nombre_pdf, mime="application/pdf", key=f"dl_gasto_{fila['id']}")
         else:
             c5.write("—")
-        if c6.button("🗑️", key=f"del_gasto_{fila['index']}"):
-            exito, mensaje = eliminar_gasto_plataforma(int(fila["index"]))
+        if c6.button("🗑️", key=f"del_gasto_{fila['id']}"):
+            exito, mensaje = eliminar_gasto_plataforma(int(fila["id"]))
             if exito:
-                st.cache_data.clear()
                 st.rerun()
             else:
                 st.warning(mensaje)
