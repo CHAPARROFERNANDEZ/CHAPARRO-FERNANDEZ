@@ -1,4 +1,5 @@
 import calendar
+import os
 import re
 import smtplib
 import ssl
@@ -5625,13 +5626,39 @@ REGLAS:
         return {"error": f"No se pudo interpretar la respuesta de la IA como JSON: {e}", "respuesta_cruda": texto}
 
 
-def guardar_gasto_plataforma(gasto: dict) -> tuple[bool, str]:
+CARPETA_FACTURAS = "/data/facturas"  # ruta del volumen persistente de Railway (mount path: /data)
+
+
+def _guardar_pdf_factura(pdf_bytes: bytes, nombre_sugerido: str) -> Optional[str]:
+    """Guarda el PDF en el volumen persistente de Railway (/data/facturas) y devuelve el
+    nombre de archivo guardado, o None si el volumen no está montado (por ejemplo en local
+    o si Railway todavía no tiene el volumen configurado) — en ese caso no falla, solo
+    guarda los datos sin el PDF, igual que antes."""
+    try:
+        os.makedirs(CARPETA_FACTURAS, exist_ok=True)
+        marca = datetime.now().strftime("%Y%m%d%H%M%S")
+        nombre_limpio = re.sub(r"[^a-zA-Z0-9_.-]", "_", nombre_sugerido)[:60]
+        nombre_archivo = f"{marca}_{nombre_limpio}.pdf"
+        with open(os.path.join(CARPETA_FACTURAS, nombre_archivo), "wb") as f:
+            f.write(pdf_bytes)
+        return nombre_archivo
+    except Exception:
+        return None
+
+
+def guardar_gasto_plataforma(gasto: dict, pdf_bytes: Optional[bytes] = None) -> tuple[bool, str]:
     """Añade una fila a la hoja GASTOS_PLATAFORMA. Mismo patrón que log_uso_ia: reescribe
-    y sube todo el Excel, igual que el resto de la app para persistir en Drive."""
+    y sube todo el Excel, igual que el resto de la app para persistir en Drive.
+    Si se pasa el PDF original, lo guarda también en el volumen persistente de Railway."""
     try:
         hojas = leer_todas_las_hojas_excel()
         if not hojas:
             return False, "No se pudo leer el Excel."
+
+        nombre_pdf_guardado = ""
+        if pdf_bytes:
+            nombre_pdf_guardado = _guardar_pdf_factura(pdf_bytes, gasto.get("proveedor", "factura")) or ""
+
         fila_nueva = pd.DataFrame([{
             "FECHA": gasto.get("fecha"),
             "PROVEEDOR": gasto.get("proveedor"),
@@ -5639,6 +5666,7 @@ def guardar_gasto_plataforma(gasto: dict) -> tuple[bool, str]:
             "CATEGORIA": gasto.get("categoria"),
             "IMPORTE": gasto.get("importe"),
             "MONEDA": gasto.get("moneda", "EUR"),
+            "ARCHIVO_PDF": nombre_pdf_guardado,
             "REGISTRADO_POR": gasto.get("registrado_por", ""),
             "REGISTRADO_EN": pd.Timestamp.now(),
         }])
@@ -5652,8 +5680,12 @@ def guardar_gasto_plataforma(gasto: dict) -> tuple[bool, str]:
             f.write(contenido)
         st.cache_data.clear()
         if "gcp_service_account" in st.secrets:
-            return subir_excel_a_drive(hojas)
-        return True, "Guardado localmente (sin credenciales de Drive)."
+            exito, mensaje = subir_excel_a_drive(hojas)
+        else:
+            exito, mensaje = True, "Guardado localmente (sin credenciales de Drive)."
+        if pdf_bytes and not nombre_pdf_guardado:
+            mensaje += " (El PDF no se pudo guardar — ¿está creado el volumen /data en Railway?)"
+        return exito, mensaje
     except Exception as e:
         return False, f"Error al guardar: {e}"
 
@@ -5738,11 +5770,14 @@ def seccion_gastos_plataforma():
         fecha = st.date_input("Fecha de la factura", value=fecha_dt)
 
         if st.button("✅ Guardar gasto", key="btn_guardar_gasto"):
-            exito, mensaje = guardar_gasto_plataforma({
-                "proveedor": proveedor, "concepto": concepto, "importe": importe,
-                "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
-                "registrado_por": str(st.session_state.get("usuario", "")),
-            })
+            exito, mensaje = guardar_gasto_plataforma(
+                {
+                    "proveedor": proveedor, "concepto": concepto, "importe": importe,
+                    "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
+                    "registrado_por": str(st.session_state.get("usuario", "")),
+                },
+                pdf_bytes=pdf_subido.getvalue() if pdf_subido is not None else None,
+            )
             if exito:
                 st.success(f"Gasto guardado. {mensaje}")
                 del st.session_state["gasto_extraido"]
@@ -5777,12 +5812,19 @@ def seccion_gastos_plataforma():
     st.markdown("#### Detalle")
     detalle = df_f.sort_values("fecha", ascending=False).reset_index()
     for _, fila in detalle.iterrows():
-        c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 2, 1])
+        c1, c2, c3, c4, c5, c6 = st.columns([2, 3, 2, 2, 1, 1])
         c1.write(fila["proveedor"])
         c2.write(fila["concepto"])
         c3.write(fila["categoria"])
         c4.write(f"{fila['importe']:,.2f} {fila.get('moneda', 'EUR')}")
-        if c5.button("🗑️", key=f"del_gasto_{fila['index']}"):
+        nombre_pdf = str(fila.get("archivo_pdf", "") or "")
+        ruta_pdf = os.path.join(CARPETA_FACTURAS, nombre_pdf) if nombre_pdf else None
+        if ruta_pdf and os.path.isfile(ruta_pdf):
+            with open(ruta_pdf, "rb") as f_pdf:
+                c5.download_button("📄", data=f_pdf.read(), file_name=nombre_pdf, mime="application/pdf", key=f"dl_gasto_{fila['index']}")
+        else:
+            c5.write("—")
+        if c6.button("🗑️", key=f"del_gasto_{fila['index']}"):
             exito, mensaje = eliminar_gasto_plataforma(int(fila["index"]))
             if exito:
                 st.cache_data.clear()
