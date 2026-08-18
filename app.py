@@ -5586,11 +5586,13 @@ Devuelve ÚNICAMENTE un JSON válido, sin texto antes ni después, sin backticks
   "concepto": "string corto (máx 8 palabras) describiendo qué se pagó (ej. 'Plan Hobby - agosto 2026', 'Registro de dominio .com 3 años')",
   "importe": number, el importe TOTAL pagado (el que el cliente realmente paga, con impuestos incluidos si los hay), sin símbolo de moneda,
   "moneda": "string, código de 3 letras: EUR, USD, etc.",
-  "fecha": "YYYY-MM-DD, la fecha de la factura o del cargo"
+  "fecha": "YYYY-MM-DD, la fecha de la factura o del cargo",
+  "numero_factura": "string, el número/identificador único de factura o recibo tal como aparece en el documento (ej. 'INV-2026-08-1234', 'Receipt #8-8348'). Si no aparece ninguno, usa 'REVISAR'"
 }
 
 REGLAS:
 - "importe" es SIEMPRE el total final pagado, no un subtotal ni una tarifa de lista.
+- "numero_factura" cópialo EXACTAMENTE tal como aparece en el documento (incluyendo prefijos, guiones, #, etc.) — se usa para detectar facturas duplicadas, así que la exactitud importa más que la limpieza.
 - Si algún dato no aparece en el documento o no estás seguro, usa el string "REVISAR" en ese campo (o -1 para importe si no se puede determinar) en vez de inventar.
 - No añadas ningún campo que no esté en el esquema. No expliques nada, solo el JSON."""
 
@@ -5667,6 +5669,69 @@ def _escribir_gastos_json(lista: list) -> None:
         json.dump(lista, f, ensure_ascii=False, indent=2)
 
 
+def _hash_pdf(pdf_bytes: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(pdf_bytes).hexdigest()
+
+
+def detectar_gastos_duplicados(gasto: dict, pdf_bytes: Optional[bytes] = None) -> list:
+    """Compara un gasto (todavía sin guardar) contra los ya guardados y devuelve una lista
+    de avisos de posible duplicado, de más a menos fiable:
+      - 'exacto': el PDF es byte a byte idéntico a uno ya guardado (mismo archivo subido 2 veces)
+      - 'numero_factura': mismo proveedor + mismo número de factura ya registrado
+      - 'probable': mismo proveedor + mismo importe + misma fecha (podría ser coincidencia,
+        pero es raro que dos facturas distintas cuadren exacto en los tres campos)
+    No bloquea el guardado — solo informa, la decisión final es de quien lo guarda."""
+    avisos = []
+    lista = _leer_gastos_json()
+    if not lista:
+        return avisos
+
+    hash_nuevo = _hash_pdf(pdf_bytes) if pdf_bytes else None
+    numero_nuevo = str(gasto.get("numero_factura", "")).strip()
+    proveedor_nuevo = str(gasto.get("proveedor", "")).strip().lower()
+    importe_nuevo = gasto.get("importe")
+    fecha_nueva = str(gasto.get("fecha", "")).strip()
+
+    for g in lista:
+        proveedor_existente = str(g.get("proveedor", "")).strip().lower()
+
+        if hash_nuevo:
+            nombre_pdf = g.get("archivo_pdf", "")
+            ruta = os.path.join(CARPETA_FACTURAS, nombre_pdf) if nombre_pdf else None
+            if ruta and os.path.isfile(ruta):
+                try:
+                    with open(ruta, "rb") as f:
+                        if _hash_pdf(f.read()) == hash_nuevo:
+                            avisos.append({
+                                "tipo": "exacto",
+                                "mensaje": f"Este PDF ya está guardado tal cual — factura de {g.get('proveedor')} del {g.get('fecha')} por {g.get('importe')} {g.get('moneda', 'EUR')}.",
+                            })
+                            continue
+                except Exception:
+                    pass
+
+        if (numero_nuevo and numero_nuevo != "REVISAR"
+                and proveedor_existente == proveedor_nuevo
+                and str(g.get("numero_factura", "")).strip() == numero_nuevo):
+            avisos.append({
+                "tipo": "numero_factura",
+                "mensaje": f"Ya hay una factura de {g.get('proveedor')} con el mismo número ({numero_nuevo}), del {g.get('fecha')}.",
+            })
+            continue
+
+        if (proveedor_existente == proveedor_nuevo
+                and g.get("importe") == importe_nuevo
+                and str(g.get("fecha", "")).strip() == fecha_nueva
+                and proveedor_nuevo):
+            avisos.append({
+                "tipo": "probable",
+                "mensaje": f"Ya hay un gasto de {g.get('proveedor')} con el mismo importe ({importe_nuevo} {g.get('moneda', 'EUR')}) y la misma fecha ({fecha_nueva}).",
+            })
+
+    return avisos
+
+
 def guardar_gasto_plataforma(gasto: dict, pdf_bytes: Optional[bytes] = None) -> tuple[bool, str]:
     """Guarda el gasto directamente en el volumen persistente de Railway (/data), como un
     archivo JSON — totalmente independiente del Excel/Google Drive, para no depender de la
@@ -5686,6 +5751,7 @@ def guardar_gasto_plataforma(gasto: dict, pdf_bytes: Optional[bytes] = None) -> 
             "categoria": gasto.get("categoria"),
             "importe": gasto.get("importe"),
             "moneda": gasto.get("moneda", "EUR"),
+            "numero_factura": gasto.get("numero_factura", ""),
             "archivo_pdf": nombre_pdf_guardado,
             "registrado_por": gasto.get("registrado_por", ""),
             "registrado_en": datetime.now().isoformat(),
@@ -5770,16 +5836,30 @@ def seccion_gastos_plataforma():
         except Exception:
             fecha_dt = datetime.now().date()
         fecha = st.date_input("Fecha de la factura", value=fecha_dt)
+        numero_factura = st.text_input("Nº de factura (opcional, ayuda a detectar duplicados)", value=str(ext.get("numero_factura", "")) if ext.get("numero_factura") != "REVISAR" else "")
+        gasto_actual = {
+            "proveedor": proveedor, "concepto": concepto, "importe": importe,
+            "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
+            "numero_factura": numero_factura,
+        }
+        avisos_duplicado = detectar_gastos_duplicados(gasto_actual, pdf_bytes=pdf_subido.getvalue() if pdf_subido is not None else None)
+        if avisos_duplicado:
+            for aviso in avisos_duplicado:
+                if aviso["tipo"] == "exacto":
+                    st.error(f"🔁 Posible duplicado exacto: {aviso['mensaje']}")
+                elif aviso["tipo"] == "numero_factura":
+                    st.error(f"🔁 Posible duplicado (mismo nº de factura): {aviso['mensaje']}")
+                else:
+                    st.warning(f"⚠️ Podría ser un duplicado: {aviso['mensaje']}")
+            confirmar_duplicado = st.checkbox("Sé que puede ser un duplicado, guárdalo de todas formas", key="check_confirmar_duplicado")
+        else:
+            confirmar_duplicado = True
 
-        if st.button("✅ Guardar gasto", key="btn_guardar_gasto"):
+        if st.button("✅ Guardar gasto", key="btn_guardar_gasto", disabled=bool(avisos_duplicado) and not confirmar_duplicado):
             try:
-                with st.spinner("Guardando y subiendo a Google Drive... puede tardar unos segundos."):
+                with st.spinner("Guardando..."):
                     exito, mensaje = guardar_gasto_plataforma(
-                        {
-                            "proveedor": proveedor, "concepto": concepto, "importe": importe,
-                            "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
-                            "registrado_por": str(st.session_state.get("usuario", "")),
-                        },
+                        gasto_actual | {"registrado_por": str(st.session_state.get("usuario", ""))},
                         pdf_bytes=pdf_subido.getvalue() if pdf_subido is not None else None,
                     )
                 if exito:
