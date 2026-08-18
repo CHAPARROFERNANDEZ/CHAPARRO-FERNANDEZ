@@ -5735,6 +5735,9 @@ def seccion_gastos_plataforma():
         "— solo los datos; conserva tú el archivo original en tu propia carpeta."
     )
 
+    if st.session_state.get("gasto_guardado_ok"):
+        st.success(st.session_state.pop("gasto_guardado_ok"))
+
     pdf_subido = st.file_uploader("Factura en PDF", type=["pdf"], key="uploader_gasto_pdf")
 
     if pdf_subido is not None:
@@ -5770,16 +5773,17 @@ def seccion_gastos_plataforma():
         fecha = st.date_input("Fecha de la factura", value=fecha_dt)
 
         if st.button("✅ Guardar gasto", key="btn_guardar_gasto"):
-            exito, mensaje = guardar_gasto_plataforma(
-                {
-                    "proveedor": proveedor, "concepto": concepto, "importe": importe,
-                    "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
-                    "registrado_por": str(st.session_state.get("usuario", "")),
-                },
-                pdf_bytes=pdf_subido.getvalue() if pdf_subido is not None else None,
-            )
+            with st.spinner("Guardando y subiendo a Google Drive... puede tardar unos segundos."):
+                exito, mensaje = guardar_gasto_plataforma(
+                    {
+                        "proveedor": proveedor, "concepto": concepto, "importe": importe,
+                        "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
+                        "registrado_por": str(st.session_state.get("usuario", "")),
+                    },
+                    pdf_bytes=pdf_subido.getvalue() if pdf_subido is not None else None,
+                )
             if exito:
-                st.success(f"Gasto guardado. {mensaje}")
+                st.session_state["gasto_guardado_ok"] = f"✅ Gasto guardado. {mensaje}"
                 del st.session_state["gasto_extraido"]
                 st.cache_data.clear()
                 st.rerun()
