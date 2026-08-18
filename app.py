@@ -31,6 +31,7 @@ import requests
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
+import bcrypt
 
 if __name__ == "__main__":  # page config: solo se ejecuta con `streamlit run`, no al importar
     st.set_page_config(
@@ -915,6 +916,7 @@ def mostrar_hero(usuario=None):
 
 HOJA_USUARIOS = "USUARIOS"
 HOJA_LOG_IA = "LOG_IA_USO"
+HOJA_GASTOS_PLATAFORMA = "GASTOS_PLATAFORMA"
 # Precio por millón de tokens (USD) de cada modelo de IA usado en la app, para estimar el coste
 # de cada llamada al guardar el log de uso. Si cambia la tarifa de Anthropic o el modelo usado,
 # actualiza este diccionario — es la ÚNICA fuente del cálculo de coste en toda la app.
@@ -1015,11 +1017,39 @@ def _guardar_hoja_usuarios(df_usuarios: pd.DataFrame) -> tuple[bool, str]:
         return False, f"Se guardó localmente pero no se pudo sincronizar con Drive: {e}"
 
 
+def _hash_password(password_plano: str) -> str:
+    """Genera un hash bcrypt de una contraseña en texto plano, listo para guardar."""
+    return bcrypt.hashpw(password_plano.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _es_hash_bcrypt(valor: str) -> bool:
+    """Los hashes bcrypt siempre empiezan por $2a$, $2b$ o $2y$ — así distinguimos una
+    contraseña ya hasheada de una todavía en texto plano (fila antigua sin migrar)."""
+    return isinstance(valor, str) and valor.startswith(("$2a$", "$2b$", "$2y$"))
+
+
+def _verificar_password(password_input: str, valor_guardado: str) -> bool:
+    """Compara una contraseña introducida contra lo guardado, sea hash bcrypt o texto plano
+    (para las filas todavía no migradas)."""
+    valor_guardado = str(valor_guardado)
+    if _es_hash_bcrypt(valor_guardado):
+        try:
+            return bcrypt.checkpw(password_input.encode("utf-8"), valor_guardado.encode("utf-8"))
+        except ValueError:
+            return False
+    return password_input == valor_guardado
+
+
 def _verificar_credencial(usuario_input: str, password_input: str, tipo: str, usuarios_codigo: dict) -> Optional[str]:
     """Comprueba usuario+contraseña para tipo 'admin' o 'inversor'.
     Prioridad: hoja USUARIOS en Drive (contraseñas que el propio usuario ha cambiado).
     Si el usuario no está migrado ahí todavía, cae a las contraseñas iniciales del código.
-    Devuelve el nombre canónico del usuario si es correcto, o None."""
+    Devuelve el nombre canónico del usuario si es correcto, o None.
+
+    Las contraseñas de la hoja USUARIOS se guardan hasheadas con bcrypt (ya no en texto
+    plano). Para no romper el acceso de nadie que tuviera la contraseña antigua en texto
+    plano, si encontramos una fila todavía sin migrar y la contraseña es correcta, la
+    volvemos a guardar ya hasheada en el mismo momento (migración silenciosa y transparente)."""
     df_u = _leer_hoja_usuarios()
     if not df_u.empty and {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
         fila = df_u[
@@ -1028,7 +1058,18 @@ def _verificar_credencial(usuario_input: str, password_input: str, tipo: str, us
         ]
         if not fila.empty:
             fila = fila.iloc[0]
-            if str(password_input) == str(fila["password"]):
+            valor_guardado = str(fila["password"])
+            if _verificar_password(password_input, valor_guardado):
+                if not _es_hash_bcrypt(valor_guardado):
+                    try:
+                        df_u.loc[
+                            (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_input.strip().lower())
+                            & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo),
+                            "password",
+                        ] = _hash_password(password_input)
+                        _guardar_hoja_usuarios(df_u)
+                    except Exception:
+                        pass  # si la migración silenciosa falla, el login ya validó igualmente
                 return str(fila["usuario"])
             return None  # ya migrado a Drive: la contraseña del código queda obsoleta para este usuario
 
@@ -1071,7 +1112,7 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
                 # antigua si existía y añadimos la fila nueva — evita por completo el problema
                 # de tipos, igual de robusto y más simple.
                 df_u = df_u[~mascara]
-                fila_nueva = pd.DataFrame([{"usuario": usuario_actual, "tipo_usuario": tipo, "password": str(pw_nueva)}])
+                fila_nueva = pd.DataFrame([{"usuario": usuario_actual, "tipo_usuario": tipo, "password": _hash_password(pw_nueva)}])
                 df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
                 exito, mensaje = _guardar_hoja_usuarios(df_u)
                 if exito:
@@ -5512,6 +5553,244 @@ REGLAS:
         return {"error": f"No se pudo interpretar la respuesta de la IA como JSON: {e}", "respuesta_cruda": texto}
 
 
+def extraer_datos_gasto_con_ia(pdf_bytes: bytes) -> dict:
+    """
+    Envía una factura/recibo en PDF (Railway, GoDaddy, Anthropic, Twilio, etc.) a Claude
+    y le pide que devuelva ÚNICAMENTE JSON con los datos clave: proveedor, concepto,
+    importe, moneda y fecha. Si algún dato no se puede determinar, usa "REVISAR" para
+    que el usuario lo revise a mano en vez de que la IA invente un número.
+    """
+    import base64
+    import json as _json
+
+    if pdf_bytes and not pdf_bytes.startswith(b"%PDF-"):
+        _inicio = pdf_bytes.find(b"%PDF-")
+        _fin = pdf_bytes.rfind(b"%%EOF")
+        if _inicio != -1 and _fin != -1 and _fin > _inicio:
+            pdf_bytes = pdf_bytes[_inicio:_fin + len(b"%%EOF")]
+
+    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
+        return {"error": "El archivo no parece ser un PDF válido (no empieza con la firma %PDF-)."}
+
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+
+    system = """Extraes datos de una factura o recibo en PDF (de proveedores tecnológicos como Railway,
+GoDaddy, Anthropic, Twilio, Google, Microsoft, etc.).
+
+Devuelve ÚNICAMENTE un JSON válido, sin texto antes ni después, sin backticks de markdown, con este esquema exacto:
+
+{
+  "proveedor": "string, nombre del proveedor/empresa que emite la factura (ej. Railway, GoDaddy, Anthropic)",
+  "concepto": "string corto (máx 8 palabras) describiendo qué se pagó (ej. 'Plan Hobby - agosto 2026', 'Registro de dominio .com 3 años')",
+  "importe": number, el importe TOTAL pagado (el que el cliente realmente paga, con impuestos incluidos si los hay), sin símbolo de moneda,
+  "moneda": "string, código de 3 letras: EUR, USD, etc.",
+  "fecha": "YYYY-MM-DD, la fecha de la factura o del cargo"
+}
+
+REGLAS:
+- "importe" es SIEMPRE el total final pagado, no un subtotal ni una tarifa de lista.
+- Si algún dato no aparece en el documento o no estás seguro, usa el string "REVISAR" en ese campo (o -1 para importe si no se puede determinar) en vez de inventar.
+- No añadas ningún campo que no esté en el esquema. No expliques nada, solo el JSON."""
+
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    contenido = [
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}, "title": "FACTURA_PDF"},
+        {"type": "text", "text": "Extrae los datos de esta factura según el esquema JSON indicado."},
+    ]
+
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        json={
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1000,
+            "system": system,
+            "messages": [{"role": "user", "content": contenido}],
+        },
+        timeout=90,
+    )
+    data = resp.json()
+    texto = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    if not texto:
+        return {"error": data.get("error", {}).get("message", "La IA no devolvió ninguna respuesta.")}
+
+    texto_limpio = texto.strip()
+    if texto_limpio.startswith("```"):
+        texto_limpio = texto_limpio.strip("`")
+        if texto_limpio.lower().startswith("json"):
+            texto_limpio = texto_limpio[4:]
+    try:
+        return _json.loads(texto_limpio)
+    except Exception as e:
+        return {"error": f"No se pudo interpretar la respuesta de la IA como JSON: {e}", "respuesta_cruda": texto}
+
+
+def guardar_gasto_plataforma(gasto: dict) -> tuple[bool, str]:
+    """Añade una fila a la hoja GASTOS_PLATAFORMA. Mismo patrón que log_uso_ia: reescribe
+    y sube todo el Excel, igual que el resto de la app para persistir en Drive."""
+    try:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas:
+            return False, "No se pudo leer el Excel."
+        fila_nueva = pd.DataFrame([{
+            "FECHA": gasto.get("fecha"),
+            "PROVEEDOR": gasto.get("proveedor"),
+            "CONCEPTO": gasto.get("concepto"),
+            "CATEGORIA": gasto.get("categoria"),
+            "IMPORTE": gasto.get("importe"),
+            "MONEDA": gasto.get("moneda", "EUR"),
+            "REGISTRADO_POR": gasto.get("registrado_por", ""),
+            "REGISTRADO_EN": pd.Timestamp.now(),
+        }])
+        if HOJA_GASTOS_PLATAFORMA in hojas and not hojas[HOJA_GASTOS_PLATAFORMA].empty:
+            hojas[HOJA_GASTOS_PLATAFORMA] = pd.concat([hojas[HOJA_GASTOS_PLATAFORMA], fila_nueva], ignore_index=True)
+        else:
+            hojas[HOJA_GASTOS_PLATAFORMA] = fila_nueva
+
+        contenido = excel_hojas_a_bytes(hojas)
+        with open(ARCHIVO, "wb") as f:
+            f.write(contenido)
+        st.cache_data.clear()
+        if "gcp_service_account" in st.secrets:
+            return subir_excel_a_drive(hojas)
+        return True, "Guardado localmente (sin credenciales de Drive)."
+    except Exception as e:
+        return False, f"Error al guardar: {e}"
+
+
+def eliminar_gasto_plataforma(indice_fila: int) -> tuple[bool, str]:
+    """Elimina una fila de GASTOS_PLATAFORMA por su índice dentro del DataFrame ya cargado."""
+    try:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas or HOJA_GASTOS_PLATAFORMA not in hojas:
+            return False, "No hay gastos guardados."
+        df_g = hojas[HOJA_GASTOS_PLATAFORMA].reset_index(drop=True)
+        if indice_fila not in df_g.index:
+            return False, "Ese gasto ya no existe (puede que la lista se haya actualizado)."
+        hojas[HOJA_GASTOS_PLATAFORMA] = df_g.drop(index=indice_fila).reset_index(drop=True)
+        contenido = excel_hojas_a_bytes(hojas)
+        with open(ARCHIVO, "wb") as f:
+            f.write(contenido)
+        st.cache_data.clear()
+        if "gcp_service_account" in st.secrets:
+            return subir_excel_a_drive(hojas)
+        return True, "Eliminado localmente (sin credenciales de Drive)."
+    except Exception as e:
+        return False, f"Error al eliminar: {e}"
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _leer_gastos_plataforma_cached() -> pd.DataFrame:
+    df = leer_hoja_excel(HOJA_GASTOS_PLATAFORMA)
+    if df.empty:
+        return df
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if "fecha" in df.columns:
+        df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+    if "importe" in df.columns:
+        df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
+    return df.reset_index(drop=True)
+
+
+def seccion_gastos_plataforma():
+    """Panel de administrador (solo Yuri): sube una factura en PDF, la IA extrae los datos
+    clave, y se guarda en la hoja GASTOS_PLATAFORMA — con vista mensual del total gastado
+    en mantener la plataforma (Railway, dominio, Anthropic, etc.)."""
+    st.markdown("## 💰 Gastos de la plataforma")
+    st.caption(
+        "Sube la factura en PDF (Railway, GoDaddy, Anthropic, Twilio...) y la IA extrae "
+        "proveedor, importe y fecha automáticamente. El PDF en sí no se guarda en la app "
+        "— solo los datos; conserva tú el archivo original en tu propia carpeta."
+    )
+
+    pdf_subido = st.file_uploader("Factura en PDF", type=["pdf"], key="uploader_gasto_pdf")
+
+    if pdf_subido is not None:
+        if st.button("🔍 Extraer datos con IA", key="btn_extraer_gasto"):
+            with st.spinner("Leyendo la factura..."):
+                extraido = extraer_datos_gasto_con_ia(pdf_subido.getvalue())
+            if "error" in extraido:
+                st.error(extraido["error"])
+            else:
+                st.session_state["gasto_extraido"] = extraido
+                st.success("Datos extraídos — revísalos abajo antes de guardar.")
+
+    if "gasto_extraido" in st.session_state:
+        ext = st.session_state["gasto_extraido"]
+        st.markdown("#### Revisa y confirma")
+        c1, c2 = st.columns(2)
+        proveedor = c1.text_input("Proveedor", value=str(ext.get("proveedor", "")))
+        concepto = c2.text_input("Concepto", value=str(ext.get("concepto", "")))
+        c3, c4, c5 = st.columns(3)
+        importe_val = ext.get("importe", 0)
+        try:
+            importe_val = float(importe_val)
+        except (TypeError, ValueError):
+            importe_val = 0.0
+        importe = c3.number_input("Importe", value=importe_val, step=0.01, min_value=0.0)
+        moneda = c4.selectbox("Moneda", ["EUR", "USD", "GBP"], index=0 if ext.get("moneda") != "USD" else 1)
+        categoria = c5.selectbox("Categoría", ["Hosting", "Dominio", "IA", "Email", "Telefonía", "Otros"])
+        fecha_val = ext.get("fecha")
+        try:
+            fecha_dt = pd.to_datetime(fecha_val).date()
+        except Exception:
+            fecha_dt = datetime.now().date()
+        fecha = st.date_input("Fecha de la factura", value=fecha_dt)
+
+        if st.button("✅ Guardar gasto", key="btn_guardar_gasto"):
+            exito, mensaje = guardar_gasto_plataforma({
+                "proveedor": proveedor, "concepto": concepto, "importe": importe,
+                "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
+                "registrado_por": str(st.session_state.get("usuario", "")),
+            })
+            if exito:
+                st.success(f"Gasto guardado. {mensaje}")
+                del st.session_state["gasto_extraido"]
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.warning(mensaje)
+
+    st.divider()
+    st.markdown("### Historial por mes")
+    df_g = _leer_gastos_plataforma_cached()
+    if df_g.empty:
+        st.info("Todavía no hay ningún gasto registrado.")
+        return
+
+    df_g["mes"] = df_g["fecha"].dt.strftime("%Y-%m")
+    meses_disponibles = sorted(df_g["mes"].dropna().unique(), reverse=True)
+    mes_sel = st.selectbox("Mes", ["Todos"] + list(meses_disponibles))
+    df_f = df_g if mes_sel == "Todos" else df_g[df_g["mes"] == mes_sel]
+
+    mostrar_metricas("Resumen", [
+        ("Total", f"{df_f['importe'].sum():,.2f} €"),
+        ("Facturas", f"{len(df_f)}"),
+        ("Media por factura", f"{(df_f['importe'].sum() / len(df_f)) if len(df_f) else 0:,.2f} €"),
+    ])
+
+    st.markdown("#### Por categoría")
+    resumen_cat = df_f.groupby("categoria")["importe"].sum().reset_index().sort_values("importe", ascending=False)
+    resumen_cat["importe"] = resumen_cat["importe"].map(lambda v: f"{v:,.2f} €")
+    st.dataframe(resumen_cat, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Detalle")
+    detalle = df_f.sort_values("fecha", ascending=False).reset_index()
+    for _, fila in detalle.iterrows():
+        c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 2, 1])
+        c1.write(fila["proveedor"])
+        c2.write(fila["concepto"])
+        c3.write(fila["categoria"])
+        c4.write(f"{fila['importe']:,.2f} {fila.get('moneda', 'EUR')}")
+        if c5.button("🗑️", key=f"del_gasto_{fila['index']}"):
+            exito, mensaje = eliminar_gasto_plataforma(int(fila["index"]))
+            if exito:
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.warning(mensaje)
+
+
 def _reconstruir_extraido_desde_tablas(extraido: dict, df_control_editado: pd.DataFrame, df_cal_editado: pd.DataFrame, df_calls_editado: pd.DataFrame) -> dict:
     """
     Reconstruye la estructura 'extraido' (la misma que devuelve la IA) tomando como
@@ -9823,11 +10102,12 @@ def seccion_gestion_excel():
         )
 
     with tab_usuarios:
-        st.subheader("Usuarios y contraseñas actuales")
+        st.subheader("Usuarios y contraseñas")
         st.caption(
-            "Incluye tanto usuarios internos como inversores. La contraseña mostrada es la "
-            "que está en vigor ahora mismo — si un inversor la cambió desde su portal, aquí "
-            "verás la nueva, no la original."
+            "Por seguridad, las contraseñas ya NO se guardan en texto plano — se guardan "
+            "hasheadas (bcrypt), así que ni siquiera nosotros podemos ver la contraseña real "
+            "de nadie. Si alguien la olvida, resetéala aquí y comunícale la nueva por un canal "
+            "seguro (nunca por email sin cifrar)."
         )
         df_u = _leer_hoja_usuarios()
         if df_u.empty:
@@ -9836,12 +10116,32 @@ def seccion_gestion_excel():
                 "desde el portal) — esos usuarios siguen con la contraseña inicial definida en el código."
             )
         else:
-            st.dataframe(
-                df_u[["usuario", "tipo_usuario", "password"]].rename(columns={
-                    "usuario": "Usuario", "tipo_usuario": "Tipo", "password": "Contraseña actual",
-                }),
-                use_container_width=True, hide_index=True,
+            tabla = df_u[["usuario", "tipo_usuario"]].rename(columns={"usuario": "Usuario", "tipo_usuario": "Tipo"})
+            tabla["Estado"] = df_u["password"].apply(
+                lambda v: "🔒 Hasheada (segura)" if _es_hash_bcrypt(str(v)) else "⚠️ Texto plano (pendiente de migrar)"
             )
+            st.dataframe(tabla, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Resetear una contraseña")
+            usuario_reset = st.selectbox(
+                "Usuario", options=df_u["usuario"].astype(str).tolist(), key="select_usuario_reset_pw"
+            )
+            nueva_pw_reset = st.text_input(
+                "Nueva contraseña temporal", type="password", key="input_nueva_pw_reset",
+                help="Compártela con el usuario por un canal seguro (no email sin cifrar). Que la cambie él mismo en cuanto entre.",
+            )
+            if st.button("Resetear contraseña", key="btn_resetear_pw") and usuario_reset and nueva_pw_reset:
+                if len(nueva_pw_reset) < 6:
+                    st.error("La nueva contraseña debe tener al menos 6 caracteres.")
+                else:
+                    idx = df_u[df_u["usuario"].astype(str) == usuario_reset].index
+                    df_u.loc[idx, "password"] = _hash_password(nueva_pw_reset)
+                    exito, mensaje = _guardar_hoja_usuarios(df_u)
+                    if exito:
+                        st.success(f"✅ Contraseña de {usuario_reset} reseteada. {mensaje}")
+                    else:
+                        st.warning(f"⚠️ Reseteada localmente. {mensaje}")
+
         if st.button("🔄 Recargar desde Drive", key="btn_recargar_usuarios"):
             st.cache_data.clear()
             st.rerun()
@@ -12105,6 +12405,7 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         menu_opciones.insert(5, "Gestión de Excel")
         menu_opciones.insert(6, "➕ Nueva inversión")
         menu_opciones.insert(7, "📊 Uso IA")
+        menu_opciones.insert(8, "💰 Gastos")
 
     menu = st.sidebar.selectbox("Menú principal", menu_opciones)
 
@@ -12127,6 +12428,8 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         seccion_nueva_inversion(_df_inv_ni, _df_cal_ni, _df_control_ni)
     elif menu == "📊 Uso IA" and _es_yuri:
         seccion_uso_ia()
+    elif menu == "💰 Gastos" and _es_yuri:
+        seccion_gastos_plataforma()
     elif menu == "🏦 Deuda Jordi Chaparro":
         seccion_deuda_jordi()
     elif menu == "✨ Asistente IA":
