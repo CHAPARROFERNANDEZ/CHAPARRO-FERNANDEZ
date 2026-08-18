@@ -5773,22 +5773,27 @@ def seccion_gastos_plataforma():
         fecha = st.date_input("Fecha de la factura", value=fecha_dt)
 
         if st.button("✅ Guardar gasto", key="btn_guardar_gasto"):
-            with st.spinner("Guardando y subiendo a Google Drive... puede tardar unos segundos."):
-                exito, mensaje = guardar_gasto_plataforma(
-                    {
-                        "proveedor": proveedor, "concepto": concepto, "importe": importe,
-                        "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
-                        "registrado_por": str(st.session_state.get("usuario", "")),
-                    },
-                    pdf_bytes=pdf_subido.getvalue() if pdf_subido is not None else None,
-                )
-            if exito:
-                st.session_state["gasto_guardado_ok"] = f"✅ Gasto guardado. {mensaje}"
-                del st.session_state["gasto_extraido"]
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.warning(mensaje)
+            try:
+                with st.spinner("Guardando y subiendo a Google Drive... puede tardar unos segundos."):
+                    exito, mensaje = guardar_gasto_plataforma(
+                        {
+                            "proveedor": proveedor, "concepto": concepto, "importe": importe,
+                            "moneda": moneda, "categoria": categoria, "fecha": str(fecha),
+                            "registrado_por": str(st.session_state.get("usuario", "")),
+                        },
+                        pdf_bytes=pdf_subido.getvalue() if pdf_subido is not None else None,
+                    )
+                if exito:
+                    st.session_state["gasto_guardado_ok"] = f"✅ Gasto guardado. {mensaje}"
+                    del st.session_state["gasto_extraido"]
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"No se pudo guardar: {mensaje}")
+            except Exception as e:
+                st.error(f"Fallo inesperado al guardar (esto no debería pasar — copia este mensaje si le escribes a soporte): {type(e).__name__}: {e}")
+                import traceback
+                st.code(traceback.format_exc())
 
     st.divider()
     st.markdown("### Historial por mes")
