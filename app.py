@@ -741,7 +741,9 @@ def aplicar_estilo_profesional():
         }
         div[data-testid="stMetricValue"] { color: #16324f; font-weight: 800; }
 
-        .stButton > button, .stDownloadButton > button, button[kind="primary"] {
+        .stButton > button, .stDownloadButton > button, button[kind="primary"],
+        [data-testid="stAppViewContainer"] .stFormSubmitButton button,
+        section[data-testid="stSidebar"] .stFormSubmitButton button {
             border-radius: 10px !important;
             background: #1e3a5f !important;
             color: white !important;
@@ -751,7 +753,9 @@ def aplicar_estilo_profesional():
             box-shadow: none;
             transition: background 0.15s ease;
         }
-        .stButton > button:hover, .stDownloadButton > button:hover, button[kind="primary"]:hover {
+        .stButton > button:hover, .stDownloadButton > button:hover, button[kind="primary"]:hover,
+        [data-testid="stAppViewContainer"] .stFormSubmitButton button:hover,
+        section[data-testid="stSidebar"] .stFormSubmitButton button:hover {
             background: #2a4d78 !important;
         }
 
@@ -1109,6 +1113,17 @@ def _debe_cambiar_password(usuario: str, tipo: str) -> bool:
     return str(fila.iloc[0].get("debe_cambiar_password", "NO")).strip().upper() == "SI"
 
 
+def _debe_cambiar_password_login(usuario: str, tipo: str) -> bool:
+    """Como _debe_cambiar_password, pero además obliga el cambio en el PRIMER login de una
+    cuenta de equipo interno (admin) que todavía no tiene fila propia en USUARIOS — es decir,
+    que sigue entrando con la contraseña temporal definida en el código. Los inversores no se
+    ven afectados por esta regla adicional: solo se obliga el cambio si su fila lo marca."""
+    fila = _fila_usuario(_leer_hoja_usuarios(), usuario, tipo)
+    if fila is None:
+        return tipo == "admin"
+    return str(fila.get("debe_cambiar_password", "NO")).strip().upper() == "SI"
+
+
 # =========================
 # VERIFICACIÓN EN DOS PASOS (TOTP — Google Authenticator / Authy)
 # =========================
@@ -1246,7 +1261,7 @@ def _completar_login(usuario_match: str, tipo: str):
         st.session_state.mostrar_aviso_pw_temporal = not _ya_migrado
     else:
         st.session_state.mostrar_aviso_pw_temporal = False
-    st.session_state.forzar_cambio_password = _debe_cambiar_password(usuario_match, tipo)
+    st.session_state.forzar_cambio_password = _debe_cambiar_password_login(usuario_match, tipo)
     st.session_state.totp_pendiente = None
 
 
@@ -1474,9 +1489,8 @@ def formulario_cambio_obligatorio_password(usuario_actual: str, tipo: str):
 
 def seccion_configurar_totp(usuario_actual: str, tipo: str):
     """Panel de autoservicio para activar/desactivar la verificación en dos pasos por EMAIL.
-    Por ahora solo se muestra para Yuri — ver la llamada condicional en el bloque de sidebar
-    más abajo. Mucho más simple que TOTP con app: no requiere instalar nada ni sincronizar
-    relojes, solo reutiliza el email que ya recibe extractos."""
+    Disponible para todo el equipo interno (admin: Yuri, Jordi, Alan). Mucho más simple que
+    TOTP con app: no requiere instalar nada ni sincronizar relojes, solo reutiliza el email."""
     activo = _2fa_activo(usuario_actual, tipo)
     with st.sidebar.expander(f"🔐 Verificación en dos pasos ({'activada' if activo else 'desactivada'})"):
         # Blindaje: si el usuario todavía no tiene fila propia en la hoja USUARIOS (nunca ha
@@ -1628,10 +1642,10 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
             st.info(f"🔐 Hola {_pend['usuario']}. Te hemos enviado un código a **{_email_oculto}**. Revisa tu correo (y la carpeta de spam).")
             with st.form("form_totp_login"):
                 codigo_totp = st.text_input("Código de 6 dígitos", key="input_codigo_totp_login")
-                c1, c2, c3 = st.columns(3)
-                confirmar_totp = c1.form_submit_button("Verificar")
-                reenviar_totp = c2.form_submit_button("Reenviar código")
-                cancelar_totp = c3.form_submit_button("Cancelar")
+                confirmar_totp = st.form_submit_button("Verificar", use_container_width=True, type="primary")
+                c1, c2 = st.columns(2)
+                reenviar_totp = c1.form_submit_button("Reenviar código", use_container_width=True)
+                cancelar_totp = c2.form_submit_button("Cancelar", use_container_width=True)
             if cancelar_totp:
                 st.session_state.totp_pendiente = None
                 st.rerun()
@@ -1744,8 +1758,8 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     if str(st.session_state.usuario).strip().upper() != "DEMO":
         formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
-    # Verificación en dos pasos (TOTP): de momento, solo disponible para Yuri.
-    if str(st.session_state.usuario).strip().lower() == "yuri" and st.session_state.tipo_usuario == "admin":
+    # Verificación en dos pasos por email: disponible para todo el equipo interno (admin).
+    if st.session_state.tipo_usuario == "admin":
         seccion_configurar_totp(st.session_state.usuario, st.session_state.tipo_usuario)
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.autenticado = False
