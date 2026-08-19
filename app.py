@@ -921,6 +921,18 @@ def mostrar_hero(usuario=None):
     )
 
 
+# Excepciones puntuales: inversores que, desde su propio portal, también pueden consultar la
+# posición de otro inversor concreto (a petición expresa de Yuri). El titular sigue viendo
+# SIEMPRE primero su propia información — esto solo añade acceso extra, nunca lo quita.
+INVERSORES_ADICIONALES_VISIBLES = {
+    "EVA CHAPARRO": ["JEP"],
+    "JORDI CHAPARRO": ["PAM", "2012 JACC GROUP", "JR REAL ESTATE", "JORDI ESPECIAL"],
+    "PEDRO MAGAÑA": ["PAM", "2012 JACC GROUP"],
+}
+
+# Inversores piloto con verificación en dos pasos por email disponible en su portal.
+INVERSORES_CON_2FA = {"EVA CHAPARRO", "JORDI CHAPARRO", "PEDRO MAGAÑA"}
+
 HOJA_USUARIOS = "USUARIOS"
 HOJA_LOG_IA = "LOG_IA_USO"
 HOJA_GASTOS_PLATAFORMA = "GASTOS_PLATAFORMA"
@@ -1763,7 +1775,6 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     if str(st.session_state.usuario).strip().upper() != "DEMO":
         formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
     # Verificación en dos pasos por email: equipo interno (admin) + inversores piloto autorizados.
-    INVERSORES_CON_2FA = {"EVA CHAPARRO", "JORDI CHAPARRO", "PEDRO MAGAÑA"}
     if st.session_state.tipo_usuario == "admin" or str(st.session_state.usuario).strip().upper() in INVERSORES_CON_2FA:
         seccion_configurar_totp(st.session_state.usuario, st.session_state.tipo_usuario)
     if st.sidebar.button("Cerrar sesión"):
@@ -2622,16 +2633,6 @@ def _construir_datos_demo_inversor():
     return df_inv, df_cal, df_control
 
 
-# Excepciones puntuales: inversores que, desde su propio portal, también pueden consultar la
-# posición de otro inversor concreto (a petición expresa de Yuri). El titular sigue viendo
-# SIEMPRE primero su propia información — esto solo añade acceso extra, nunca lo quita.
-INVERSORES_ADICIONALES_VISIBLES = {
-    "EVA CHAPARRO": ["JEP"],
-    "JORDI CHAPARRO": ["PAM", "2012 JACC GROUP", "JR REAL ESTATE", "JORDI ESPECIAL"],
-    "PEDRO MAGAÑA": ["PAM", "2012 JACC GROUP"],
-}
-
-
 def _inversores_visibles_para(nombre_inversor: str) -> list:
     """Devuelve la lista de inversores cuya posición puede consultar este login: siempre el
     propio titular primero, más cualquier inversor adicional autorizado explícitamente."""
@@ -2641,6 +2642,47 @@ def _inversores_visibles_para(nombre_inversor: str) -> list:
         if n not in vistos:
             vistos.append(n)
     return vistos
+
+
+def _mostrar_aviso_seguridad_pendiente_inversor(nombre_inversor: str):
+    """Aviso grande y persistente arriba del portal para los inversores piloto con 2FA
+    disponible: no bloquea nada (siguen viendo todo su portal con normalidad), pero deja bien
+    claro qué les falta hacer hasta que completen los dos pasos (cambiar contraseña + activar
+    verificación en dos pasos)."""
+    nombre_up = str(nombre_inversor).strip().upper()
+    if nombre_up not in INVERSORES_CON_2FA:
+        return
+
+    ya_cambio_password = _fila_usuario(_leer_hoja_usuarios(), nombre_inversor, "inversor") is not None
+    tiene_2fa_activo = _2fa_activo(nombre_inversor, "inversor")
+
+    if ya_cambio_password and tiene_2fa_activo:
+        return  # ya hizo los dos pasos: no se muestra nada más
+
+    pasos_pendientes = []
+    if not ya_cambio_password:
+        pasos_pendientes.append("**1. Cambia tu contraseña** — despliega '🔑 Cambiar mi contraseña' en el menú de la izquierda.")
+    if not tiene_2fa_activo:
+        numero = "2" if pasos_pendientes else "1"
+        pasos_pendientes.append(f"**{numero}. Activa la verificación en dos pasos** — despliega '🔐 Verificación en dos pasos' en el menú de la izquierda y sigue los pasos con tu email.")
+
+    st.markdown(
+        f"""
+        <div style="background:linear-gradient(135deg,#fff4e0,#ffe4d6);border:2px solid #e8862c;
+                    border-radius:16px;padding:20px 24px;margin-bottom:24px;">
+            <div style="font-size:17px;font-weight:800;color:#7a3a00;margin-bottom:10px;">
+                ⚠️ Antes de nada — completa la configuración de seguridad de tu cuenta
+            </div>
+            <div style="font-size:14px;color:#7a3a00;line-height:1.7;">
+                {"<br>".join(pasos_pendientes)}
+            </div>
+            <div style="font-size:13px;color:#9a5a1a;margin-top:10px;">
+                El resto de tu portal ya funciona con normalidad — esto es solo un recordatorio hasta que lo completes.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def seccion_portal_inversor(nombre_inversor: str):
@@ -2657,6 +2699,8 @@ def seccion_portal_inversor(nombre_inversor: str):
     inversores_visibles = _inversores_visibles_para(nombre_inversor)
 
     st.header(f"👋 Bienvenido/a, {nombre_inversor}")
+    if not es_demo:
+        _mostrar_aviso_seguridad_pendiente_inversor(nombre_inversor)
     if len(inversores_visibles) > 1:
         st.caption("Este es tu portal personal. Tienes acceso adicional autorizado a otra posición concreta — nadie más puede ver esta información.")
         inversor_activo = st.selectbox(
