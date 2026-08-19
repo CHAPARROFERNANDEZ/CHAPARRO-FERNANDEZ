@@ -5460,6 +5460,12 @@ def dashboard_financiero():
         else:
             st.caption(f"No hay interés corrido de notas para {nombre_mes_es(mes_dashboard)} {anio_dashboard}.")
 
+    # ── Cobros semanales: justo debajo de las tarjetas de ingresos/gastos/beneficio, visible
+    # sin tener que desplegar nada más abajo. Siempre usa el dataframe completo (df_inv), sin
+    # aplicar el filtro del checkbox "Incluir Chaparro Fernández" — ver nota más abajo.
+    if vista_dashboard in ["General", "Notas"]:
+        mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
+
     st.markdown("### Rentabilidad del mes")
     r1, r2, r3, r4 = st.columns(4)
     with r1:
@@ -5487,11 +5493,6 @@ def dashboard_financiero():
             anio_dashboard,
             mes_dashboard,
         )
-        # El cobro de notas es dinero que entra a la empresa (venga o no de una posición de
-        # Chaparro Fernández) — por eso aquí SIEMPRE se usa el dataframe completo (df_inv),
-        # sin aplicar el filtro del checkbox. El checkbox "Incluir Chaparro Fernández" solo debe
-        # afectar al capital activo, pagos y beneficio mostrados en las tarjetas de arriba.
-        mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
