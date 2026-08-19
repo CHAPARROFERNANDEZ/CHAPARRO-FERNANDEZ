@@ -34,8 +34,6 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 import bcrypt
-import pyotp
-import qrcode
 
 if __name__ == "__main__":  # page config: solo se ejecuta con `streamlit run`, no al importar
     st.set_page_config(
@@ -1125,33 +1123,101 @@ def _fila_usuario(df_u: pd.DataFrame, usuario: str, tipo: str):
     return fila.iloc[0] if not fila.empty else None
 
 
-def _totp_activo(usuario: str, tipo: str) -> bool:
-    """Comprueba si este usuario tiene la verificación en dos pasos activada."""
+def _2fa_activo(usuario: str, tipo: str) -> bool:
+    """Comprueba si este usuario tiene la verificación en dos pasos (código por email) activada."""
     fila = _fila_usuario(_leer_hoja_usuarios(), usuario, tipo)
     if fila is None:
         return False
     return str(fila.get("totp_activo", "NO")).strip().upper() == "SI"
 
 
-def _totp_secreto_de(usuario: str, tipo: str) -> str:
+def _2fa_email_de(usuario: str, tipo: str) -> str:
+    """Devuelve el email al que se envía el código de verificación (reutiliza la columna
+    'totp_secret' de la hoja USUARIOS, que ahora guarda el email en vez de un secreto TOTP)."""
     fila = _fila_usuario(_leer_hoja_usuarios(), usuario, tipo)
     if fila is None:
         return ""
     return str(fila.get("totp_secret", "") or "")
 
 
-def _verificar_codigo_totp(secreto: str, codigo: str) -> bool:
-    if not secreto or not codigo:
-        return False
+@st.cache_resource
+def _estado_codigos_2fa_email() -> dict:
+    """Códigos de un solo uso pendientes de verificar, en memoria (no en Excel — son efímeros,
+    caducan solos a los 10 minutos). Compartido entre reruns gracias a st.cache_resource."""
+    return {}
+
+
+def _clave_2fa(usuario: str, tipo: str) -> str:
+    return f"{tipo}:{usuario.strip().lower()}"
+
+
+def _generar_y_enviar_codigo_2fa(usuario: str, tipo: str, smtp_sender: str, smtp_password: str,
+                                  display_name: str = "Chaparro Fernández Wealth") -> tuple:
+    """Genera un código de 6 dígitos, lo guarda en memoria con caducidad de 10 minutos, y lo
+    envía por email a la dirección configurada para este usuario."""
+    import secrets as _secrets
+    email_destino = _2fa_email_de(usuario, tipo)
+    if not email_destino:
+        return False, "No hay ningún email configurado para la verificación en dos pasos."
+    codigo = f"{_secrets.randbelow(1_000_000):06d}"
+    estado = _estado_codigos_2fa_email()
+    estado[_clave_2fa(usuario, tipo)] = (codigo, time.time() + 10 * 60)
     try:
-        return pyotp.TOTP(secreto).verify(codigo.strip(), valid_window=1)
-    except Exception:
+        destinatarios = _parse_lista_emails(email_destino)
+        if not destinatarios:
+            return False, "El email configurado no es válido."
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = f"Tu código de acceso — {display_name}"
+        msg["From"] = f"{display_name} <{smtp_sender}>"
+        msg["To"] = ", ".join(destinatarios)
+        cuerpo = f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="460" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(7,20,37,0.14);">
+        <tr><td style="background:linear-gradient(135deg,#0e2338 0%,#173b5c 60%,#bf9a5f 100%);padding:28px 40px;text-align:center;">
+          <div style="color:#ffffff;font-size:18px;font-weight:800;">{display_name}</div>
+        </td></tr>
+        <tr><td style="padding:32px 40px;text-align:center;">
+          <p style="color:#334155;font-size:14px;margin:0 0 18px;">Tu código de acceso es:</p>
+          <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#0e2338;font-family:monospace;margin-bottom:18px;">{codigo}</div>
+          <p style="color:#94a3b8;font-size:12px;">Caduca en 10 minutos. Si no has sido tú quien ha intentado entrar, ignora este correo.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
+        msg.attach(MIMEText(cuerpo, "html", "utf-8"))
+        contexto = ssl.create_default_context()
+        with smtplib.SMTP("smtp.gmail.com", 587) as servidor:
+            servidor.ehlo()
+            servidor.starttls(context=contexto)
+            servidor.login(smtp_sender, smtp_password)
+            servidor.sendmail(smtp_sender, destinatarios, msg.as_bytes())
+        return True, email_destino
+    except Exception as e:
+        return False, str(e)
+
+
+def _verificar_codigo_2fa(usuario: str, tipo: str, codigo_input: str) -> bool:
+    estado = _estado_codigos_2fa_email()
+    clave = _clave_2fa(usuario, tipo)
+    par = estado.get(clave)
+    if not par:
         return False
+    codigo_guardado, expira = par
+    if time.time() > expira:
+        estado.pop(clave, None)
+        return False
+    if (codigo_input or "").strip() == codigo_guardado:
+        estado.pop(clave, None)
+        return True
+    return False
 
 
-def _guardar_totp(usuario: str, tipo: str, secreto: str, activo: bool):
-    """Activa/desactiva el TOTP de un usuario, preservando el resto de sus datos (password,
-    debe_cambiar_password) intactos — nunca se tocan al activar 2FA."""
+def _guardar_2fa(usuario: str, tipo: str, email: str, activo: bool):
+    """Activa/desactiva la verificación en dos pasos de un usuario, preservando el resto de sus
+    datos (password, debe_cambiar_password) intactos — nunca se tocan al activar/desactivar."""
     df_u = _leer_hoja_usuarios()
     for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
         if col not in df_u.columns:
@@ -1161,7 +1227,7 @@ def _guardar_totp(usuario: str, tipo: str, secreto: str, activo: bool):
         (df_u["usuario"].astype(str).str.strip().str.lower() == usuario.strip().lower())
         & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
     ].index
-    df_u.loc[idx, "totp_secret"] = secreto
+    df_u.loc[idx, "totp_secret"] = email
     df_u.loc[idx, "totp_activo"] = "SI" if activo else "NO"
     return _guardar_hoja_usuarios(df_u)
 
@@ -1407,13 +1473,15 @@ def formulario_cambio_obligatorio_password(usuario_actual: str, tipo: str):
 
 
 def seccion_configurar_totp(usuario_actual: str, tipo: str):
-    """Panel de autoservicio para activar/desactivar la verificación en dos pasos (TOTP) con
-    una app autenticadora (Google Authenticator, Authy, etc.). Por ahora solo se muestra para
-    Yuri — ver la llamada condicional en el bloque de sidebar más abajo."""
-    activo = _totp_activo(usuario_actual, tipo)
+    """Panel de autoservicio para activar/desactivar la verificación en dos pasos por EMAIL.
+    Por ahora solo se muestra para Yuri — ver la llamada condicional en el bloque de sidebar
+    más abajo. Mucho más simple que TOTP con app: no requiere instalar nada ni sincronizar
+    relojes, solo reutiliza el email que ya recibe extractos."""
+    activo = _2fa_activo(usuario_actual, tipo)
     with st.sidebar.expander(f"🔐 Verificación en dos pasos ({'activada' if activo else 'desactivada'})"):
         if activo:
-            st.success("Activada. Se te pedirá un código al iniciar sesión.")
+            email_actual = _2fa_email_de(usuario_actual, tipo)
+            st.success(f"Activada. Se te enviará un código a **{email_actual}** al iniciar sesión.")
             with st.form(f"form_desactivar_totp_{tipo}_{usuario_actual}"):
                 st.caption("Para desactivarla, confirma con tu contraseña actual.")
                 pw_confirmar = st.text_input("Contraseña actual", type="password", key=f"pw_desactivar_totp_{tipo}")
@@ -1423,36 +1491,63 @@ def seccion_configurar_totp(usuario_actual: str, tipo: str):
                 if _verificar_credencial(usuario_actual, pw_confirmar, tipo, usuarios_codigo_local) is None:
                     st.error("Contraseña incorrecta.")
                 else:
-                    exito, mensaje = _guardar_totp(usuario_actual, tipo, "", False)
+                    exito, mensaje = _guardar_2fa(usuario_actual, tipo, "", False)
                     if exito:
                         st.success(f"Verificación en dos pasos desactivada. {mensaje}")
                     else:
                         st.warning(f"Desactivada localmente. {mensaje}")
-        else:
-            if f"totp_secreto_pendiente_{usuario_actual}" not in st.session_state:
-                st.session_state[f"totp_secreto_pendiente_{usuario_actual}"] = pyotp.random_base32()
-            secreto_pendiente = st.session_state[f"totp_secreto_pendiente_{usuario_actual}"]
-            uri = pyotp.TOTP(secreto_pendiente).provisioning_uri(name=usuario_actual, issuer_name="Chaparro Fernández Wealth")
-            qr_img = qrcode.make(uri)
-            buf_qr = BytesIO()
-            qr_img.save(buf_qr, format="PNG")
-            st.caption("Escanea este código con Google Authenticator, Authy o similar:")
-            st.image(buf_qr.getvalue(), width=180)
-            st.caption(f"O introduce la clave manualmente: `{secreto_pendiente}`")
-            with st.form(f"form_activar_totp_{tipo}_{usuario_actual}"):
-                codigo_confirmar = st.text_input("Código de 6 dígitos de la app", key=f"codigo_activar_totp_{tipo}")
+            return
+
+        try:
+            _smtp_sender_2fa = st.secrets["email"]["sender"]
+            _smtp_password_2fa = st.secrets["email"]["password"]
+            _display_name_2fa = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+            _email_ok_2fa = True
+        except Exception:
+            _smtp_sender_2fa = _smtp_password_2fa = _display_name_2fa = ""
+            _email_ok_2fa = False
+
+        if not _email_ok_2fa:
+            st.warning("Configura el email de envío (Secrets → [email]) para poder activar esto.")
+            return
+
+        clave_pendiente = f"email_2fa_pendiente_{usuario_actual}"
+        st.caption("Recibirás un código de 6 dígitos por email cada vez que inicies sesión. Sin apps, sin QR.")
+        email_2fa = st.text_input(
+            "Email al que enviar el código", key=f"input_email_2fa_{tipo}_{usuario_actual}",
+            value=st.session_state.get(clave_pendiente, ""),
+        )
+        if st.button("Enviar código de prueba", key=f"btn_probar_2fa_{tipo}_{usuario_actual}"):
+            if not email_2fa or "@" not in email_2fa:
+                st.error("Introduce un email válido.")
+            else:
+                # Guardamos temporalmente el email en la hoja para poder reutilizar
+                # _generar_y_enviar_codigo_2fa tal cual (lee el email desde ahí).
+                _guardar_2fa(usuario_actual, tipo, email_2fa, False)
+                st.session_state[clave_pendiente] = email_2fa
+                env_ok, env_msg = _generar_y_enviar_codigo_2fa(
+                    usuario_actual, tipo, _smtp_sender_2fa, _smtp_password_2fa, _display_name_2fa,
+                )
+                if env_ok:
+                    st.success(f"Código enviado a {email_2fa}. Revisa tu bandeja e introdúcelo abajo.")
+                else:
+                    st.error(f"No se pudo enviar el código: {env_msg}")
+
+        if st.session_state.get(clave_pendiente):
+            with st.form(f"form_activar_2fa_{tipo}_{usuario_actual}"):
+                codigo_confirmar = st.text_input("Código de 6 dígitos recibido por email", key=f"codigo_activar_2fa_{tipo}")
                 activar = st.form_submit_button("Activar verificación en dos pasos")
             if activar:
-                if _verificar_codigo_totp(secreto_pendiente, codigo_confirmar):
-                    exito, mensaje = _guardar_totp(usuario_actual, tipo, secreto_pendiente, True)
-                    del st.session_state[f"totp_secreto_pendiente_{usuario_actual}"]
+                if _verificar_codigo_2fa(usuario_actual, tipo, codigo_confirmar):
+                    exito, mensaje = _guardar_2fa(usuario_actual, tipo, st.session_state[clave_pendiente], True)
+                    del st.session_state[clave_pendiente]
                     if exito:
                         st.success(f"✅ Verificación en dos pasos activada. {mensaje}")
                         st.rerun()
                     else:
                         st.warning(f"Activada localmente. {mensaje}")
                 else:
-                    st.error("Código incorrecto. Revisa la hora de tu móvil y vuelve a intentarlo.")
+                    st.error("Código incorrecto o caducado (10 min). Pulsa 'Enviar código de prueba' otra vez si hace falta.")
 
 
 if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit run`, no al importar
@@ -1519,31 +1614,45 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
             unsafe_allow_html=True,
         )
 
-        # ── Paso 2: código de la app autenticadora (solo si el usuario ya superó el paso 1) ──
+        # ── Paso 2: código recibido por email (solo si el usuario ya superó el paso 1) ──
         if st.session_state.totp_pendiente:
             _pend = st.session_state.totp_pendiente
-            st.info(f"🔐 Hola {_pend['usuario']}. Introduce el código de tu app autenticadora.")
+            _email_2fa_pend = _2fa_email_de(_pend["usuario"], _pend["tipo"])
+            _email_oculto = (_email_2fa_pend[:2] + "***@" + _email_2fa_pend.split("@")[-1]) if "@" in _email_2fa_pend else _email_2fa_pend
+            st.info(f"🔐 Hola {_pend['usuario']}. Te hemos enviado un código a **{_email_oculto}**. Revisa tu correo (y la carpeta de spam).")
             with st.form("form_totp_login"):
                 codigo_totp = st.text_input("Código de 6 dígitos", key="input_codigo_totp_login")
-                c1, c2 = st.columns(2)
+                c1, c2, c3 = st.columns(3)
                 confirmar_totp = c1.form_submit_button("Verificar")
-                cancelar_totp = c2.form_submit_button("Cancelar")
+                reenviar_totp = c2.form_submit_button("Reenviar código")
+                cancelar_totp = c3.form_submit_button("Cancelar")
             if cancelar_totp:
                 st.session_state.totp_pendiente = None
                 st.rerun()
+            if reenviar_totp:
+                try:
+                    _smtp_sender_l = st.secrets["email"]["sender"]
+                    _smtp_password_l = st.secrets["email"]["password"]
+                    _display_name_l = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+                    env_ok, env_msg = _generar_y_enviar_codigo_2fa(_pend["usuario"], _pend["tipo"], _smtp_sender_l, _smtp_password_l, _display_name_l)
+                    if env_ok:
+                        st.success("Código reenviado.")
+                    else:
+                        st.error(f"No se pudo reenviar: {env_msg}")
+                except Exception:
+                    st.error("El email de envío no está configurado (Secrets → [email]).")
             if confirmar_totp:
                 _bloqueado, _min_restantes = _login_bloqueado("totp", _pend["usuario"])
                 if _bloqueado:
                     st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {_min_restantes} minuto(s).")
                 else:
-                    secreto = _totp_secreto_de(_pend["usuario"], _pend["tipo"])
-                    if _verificar_codigo_totp(secreto, codigo_totp):
+                    if _verificar_codigo_2fa(_pend["usuario"], _pend["tipo"], codigo_totp):
                         _resetear_intentos_login("totp", _pend["usuario"])
                         _completar_login(_pend["usuario"], _pend["tipo"])
                         st.rerun()
                     else:
                         _registrar_intento_fallido("totp", _pend["usuario"])
-                        st.error("Código incorrecto.")
+                        st.error("Código incorrecto o caducado. Puedes pedir uno nuevo con 'Reenviar código'.")
             st.stop()
 
         tipo_acceso = st.radio("Tipo de acceso", ["Equipo interno", "Portal de inversor"], horizontal=True, label_visibility="collapsed")
@@ -1560,7 +1669,14 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
                     usuario_match = _verificar_credencial(usuario_txt, password, "admin", USUARIOS)
                     if usuario_match:
                         _resetear_intentos_login("admin", usuario_txt)
-                        if _totp_activo(usuario_match, "admin"):
+                        if _2fa_activo(usuario_match, "admin"):
+                            try:
+                                _smtp_sender_l = st.secrets["email"]["sender"]
+                                _smtp_password_l = st.secrets["email"]["password"]
+                                _display_name_l = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+                                _generar_y_enviar_codigo_2fa(usuario_match, "admin", _smtp_sender_l, _smtp_password_l, _display_name_l)
+                            except Exception:
+                                pass
                             st.session_state.totp_pendiente = {"usuario": usuario_match, "tipo": "admin"}
                         else:
                             _completar_login(usuario_match, "admin")
@@ -1581,7 +1697,14 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
                     usuario_inv_match = _verificar_credencial(usuario_inv_txt, password_inv, "inversor", USUARIOS_INVERSORES)
                     if usuario_inv_match:
                         _resetear_intentos_login("inversor", usuario_inv_txt)
-                        if _totp_activo(usuario_inv_match, "inversor"):
+                        if _2fa_activo(usuario_inv_match, "inversor"):
+                            try:
+                                _smtp_sender_l = st.secrets["email"]["sender"]
+                                _smtp_password_l = st.secrets["email"]["password"]
+                                _display_name_l = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+                                _generar_y_enviar_codigo_2fa(usuario_inv_match, "inversor", _smtp_sender_l, _smtp_password_l, _display_name_l)
+                            except Exception:
+                                pass
                             st.session_state.totp_pendiente = {"usuario": usuario_inv_match, "tipo": "inversor"}
                         else:
                             _completar_login(usuario_inv_match, "inversor")
