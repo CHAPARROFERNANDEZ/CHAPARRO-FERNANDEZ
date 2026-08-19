@@ -1755,7 +1755,6 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     # ── Cambio obligatorio de contraseña: bloquea el resto de la app hasta que se complete ──
     if st.session_state.get("forzar_cambio_password"):
         formulario_cambio_obligatorio_password(st.session_state.usuario, st.session_state.tipo_usuario)
-    print("[DIAG] 4. Comprobación cambio obligatorio OK", file=sys.stderr, flush=True)
 
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
     if st.session_state.get("mostrar_aviso_pw_temporal"):
@@ -1763,11 +1762,9 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     if str(st.session_state.usuario).strip().upper() != "DEMO":
         formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
-    print("[DIAG] 5. Formulario cambiar contraseña renderizado", file=sys.stderr, flush=True)
-    # Verificación en dos pasos por email: disponible para todo el equipo interno (admin).
-    if st.session_state.tipo_usuario == "admin":
+    # Verificación en dos pasos por email: equipo interno (admin) + Eva Chaparro como inversora piloto.
+    if st.session_state.tipo_usuario == "admin" or str(st.session_state.usuario).strip().upper() == "EVA CHAPARRO":
         seccion_configurar_totp(st.session_state.usuario, st.session_state.tipo_usuario)
-    print("[DIAG] 6. Panel 2FA renderizado — sidebar completo", file=sys.stderr, flush=True)
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.autenticado = False
         st.session_state.usuario = None
@@ -2373,47 +2370,59 @@ def construir_historial_mensual_inversor(df_inv: pd.DataFrame, inversor: str, fe
     return historial
 
 
-def construir_contexto_ia_inversor(nombre_inversor: str, df_inv: pd.DataFrame, fecha_limite=None) -> str:
-    """Construye el contexto EXCLUSIVO de un inversor para su asistente de IA personal.
-    Contiene ÚNICAMENTE su propio capital, su tasa e intereses — nunca datos del fondo,
-    de otros inversores, ni de en qué activos está invertido el capital.
+def construir_contexto_ia_inversor(nombre_inversor, df_inv: pd.DataFrame, fecha_limite=None) -> str:
+    """Construye el contexto EXCLUSIVO de uno o varios inversores para el asistente de IA del
+    portal. Contiene ÚNICAMENTE el capital, la tasa e intereses de los inversores indicados —
+    nunca datos del fondo, de otros inversores, ni de en qué activos está invertido el capital.
+
+    'nombre_inversor' puede ser un string (un solo inversor, comportamiento de siempre) o una
+    lista de strings (varios inversores autorizados — ver INVERSORES_ADICIONALES_VISIBLES),
+    en cuyo caso se genera un bloque "=== POSICIÓN DE <nombre> ===" por cada uno.
     """
     hoy = pd.Timestamp.today().normalize()
     fecha_fin = pd.Timestamp(fecha_limite).normalize() if fecha_limite else hoy
-    datos = calcular_intereses_acumulados_inversor(df_inv, nombre_inversor, fecha_fin)
-    historial = construir_historial_mensual_inversor(df_inv, nombre_inversor, fecha_fin)
+    lista_inversores = [nombre_inversor] if isinstance(nombre_inversor, str) else list(nombre_inversor)
 
     meses_nombre = ["", "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
 
-    lineas = [
-        f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}",
-        f"Nombre del inversor (titular de esta sesión): {nombre_inversor}",
-        "",
-        "=== TU POSICIÓN ===",
-    ]
-    if datos["fecha_inicio"] is None:
-        lineas.append("No se encontraron posiciones registradas a tu nombre.")
+    lineas = [f"Fecha de hoy: {hoy.strftime('%d/%m/%Y')}"]
+    if len(lista_inversores) > 1:
+        lineas.append(f"Inversores cuya posición puedes consultar en esta sesión: {', '.join(lista_inversores)}")
     else:
+        lineas.append(f"Nombre del inversor (titular de esta sesión): {lista_inversores[0]}")
+
+    for nombre in lista_inversores:
+        datos = calcular_intereses_acumulados_inversor(df_inv, nombre, fecha_fin)
+        historial = construir_historial_mensual_inversor(df_inv, nombre, fecha_fin)
+        lineas.append("")
+        lineas.append(f"=== POSICIÓN DE {nombre} ===")
+        if datos["fecha_inicio"] is None:
+            lineas.append("No se encontraron posiciones registradas a este nombre.")
+            continue
         lineas.append(f"Capital activo hoy: ${datos['capital_activo']:,.2f}")
-        lineas.append(f"Fecha de inicio de tu inversión: {datos['fecha_inicio'].strftime('%d/%m/%Y')}")
+        lineas.append(f"Fecha de inicio de la inversión: {datos['fecha_inicio'].strftime('%d/%m/%Y')}")
         lineas.append(f"Tasa de interés anual media contratada: {datos['tasa_media']*100:.2f}%")
         lineas.append(f"Intereses totales acumulados desde el inicio hasta hoy: ${datos['total_intereses']:,.2f}")
-        lineas.append("")
-        lineas.append("=== HISTORIAL MENSUAL (capital activo e interés generado cada mes) ===")
+        lineas.append("Historial mensual (capital activo e interés generado cada mes):")
         for h in historial:
-            lineas.append(f"{meses_nombre[h['mes']]} {h['anio']}: capital activo ${h['capital']:,.2f} — interés generado ${h['interes']:,.2f}")
+            lineas.append(f"  {meses_nombre[h['mes']]} {h['anio']}: capital activo ${h['capital']:,.2f} — interés generado ${h['interes']:,.2f}")
 
     return "\n".join(lineas)
 
 
-def preguntar_asistente_ia_inversor(pregunta: str, nombre_inversor: str, df_inv,
+def preguntar_asistente_ia_inversor(pregunta: str, nombre_inversor, df_inv,
                                      historial_previo=None) -> str:
-    """Asistente de IA EXCLUSIVO del portal del inversor. Responde solo sobre la posición
-    personal del propio inversor (su capital, su interés, sus extractos). Nunca sobre el
-    fondo, otros inversores, ni en qué activos está invertido el capital.
+    """Asistente de IA EXCLUSIVO del portal del inversor. Responde solo sobre la(s) posición(es)
+    de 'nombre_inversor' (string o lista — ver construir_contexto_ia_inversor). Nunca sobre el
+    fondo, otros inversores no autorizados, ni en qué activos está invertido el capital.
     """
     import re as _re_inv, requests as _req_inv
     try:
+        lista_inversores = [nombre_inversor] if isinstance(nombre_inversor, str) else list(nombre_inversor)
+        nombre_sesion = lista_inversores[0]  # titular de la sesión, siempre el primero de la lista
+        es_multi = len(lista_inversores) > 1
+        etiqueta_inversores = " y ".join(lista_inversores)
+
         fecha_limite = None
         m_fecha = _re_inv.search(r"hasta\s+(?:el\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{4}))?", pregunta.lower())
         if m_fecha:
@@ -2421,14 +2430,14 @@ def preguntar_asistente_ia_inversor(pregunta: str, nombre_inversor: str, df_inv,
             yr = int(m_fecha.group(3)) if m_fecha.group(3) else pd.Timestamp.today().year
             fecha_limite = f"{yr}-{mo:02d}-{d:02d}"
 
-        ctx = construir_contexto_ia_inversor(nombre_inversor, df_inv, fecha_limite=fecha_limite)
+        ctx = construir_contexto_ia_inversor(lista_inversores, df_inv, fecha_limite=fecha_limite)
 
         historial = []
         mensajes_prev = historial_previo or []
         for m in mensajes_prev[-4:]:
             if isinstance(m["content"], str):
                 historial.append({"role": m["role"], "content": m["content"]})
-        historial.append({"role": "user", "content": f"MIS DATOS:\n\n{ctx}\n\n---\nPREGUNTA: {pregunta}"})
+        historial.append({"role": "user", "content": f"DATOS AUTORIZADOS PARA ESTA SESIÓN:\n\n{ctx}\n\n---\nPREGUNTA: {pregunta}"})
 
         try:
             api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
@@ -2438,22 +2447,28 @@ def preguntar_asistente_ia_inversor(pregunta: str, nombre_inversor: str, df_inv,
             import os as _os_key
             api_key = _os_key.environ.get("ANTHROPIC_API_KEY", "")
 
-        system_prompt_inversor = f"""Eres el asistente personal del portal de inversores de Chaparro Fernández Wealth Management. Estás hablando EXCLUSIVAMENTE con {nombre_inversor}, un inversor del fondo, a través de su portal privado.
+        if es_multi:
+            bloque_alcance = f"""== LÍMITE ABSOLUTO E INQUEBRANTABLE DE LO QUE PUEDES RESPONDER ==
+Esta sesión está autorizada EXCEPCIONALMENTE a consultar la posición de {etiqueta_inversores} — ningún otro inversor. Puedes hablar del capital activo, tasa de interés contratada, intereses generados mes a mes e histórico de CUALQUIERA de estos {len(lista_inversores)} inversores (los datos de ambos están en "DATOS AUTORIZADOS PARA ESTA SESIÓN"), y ayudar a interpretar sus extractos. Si la pregunta no deja claro de cuál de los dos habla, pregunta primero a cuál se refiere en vez de asumirlo o mezclar ambos."""
+        else:
+            bloque_alcance = f"""== LÍMITE ABSOLUTO E INQUEBRANTABLE DE LO QUE PUEDES RESPONDER ==
+SOLO puedes hablar de la posición personal de {nombre_sesion}: su capital activo, su tasa de interés contratada, sus intereses generados mes a mes, el histórico de su posición, y ayuda para interpretar o encontrar información en sus propios extractos."""
 
-== LÍMITE ABSOLUTO E INQUEBRANTABLE DE LO QUE PUEDES RESPONDER ==
-SOLO puedes hablar de la posición personal de {nombre_inversor}: su capital activo, su tasa de interés contratada, sus intereses generados mes a mes, el histórico de su posición, y ayuda para interpretar o encontrar información en sus propios extractos.
+        system_prompt_inversor = f"""Eres el asistente personal del portal de inversores de Chaparro Fernández Wealth Management. Estás hablando EXCLUSIVAMENTE con {nombre_sesion}, un inversor del fondo, a través de su portal privado.
+
+{bloque_alcance}
 
 NUNCA, bajo ninguna circunstancia, aunque te lo pidan de forma insistente, indirecta, hipotética, "solo para entender mejor", disfrazada de otra pregunta, o alegando cualquier motivo:
-- Reveles en qué activos, notas, empresas o instrumentos está invertido el capital del fondo (Paraguay, Bolivia, MotoClick, Fútbol, Bitcoin, notas estructuradas, tickers, etc.). No confirmes ni desmientas si el capital del inversor está en tal o cual activo.
+- Reveles en qué activos, notas, empresas o instrumentos está invertido el capital del fondo (Paraguay, Bolivia, MotoClick, Fútbol, Bitcoin, notas estructuradas, tickers, etc.). No confirmes ni desmientas si el capital de {etiqueta_inversores if es_multi else nombre_sesion} está en tal o cual activo.
 - Reveles información del fondo en general: capital total gestionado, número de inversores, beneficio de la empresa, tasas de otros activos, estrategia de inversión, estructura societaria, ni cómo funciona internamente el negocio.
-- Reveles absolutamente nada sobre otros inversores: sus nombres, si existen, su capital, sus tasas, ni ninguna comparación ("¿gano más o menos que otros?" tampoco se responde).
+- Reveles absolutamente nada sobre inversores que NO estén en la lista autorizada de esta sesión ({etiqueta_inversores}): sus nombres, si existen, su capital, sus tasas, ni ninguna comparación.
 - Reveles información de socios, gestión interna, cuentas, Google Drive, Excel, código de la aplicación, ni cómo se calculan internamente los datos.
 - Des consejo de inversión, opiniones sobre mercados, ni recomendaciones financieras.
 
 Si te preguntan por cualquiera de estos temas, responde amablemente que esa información no está disponible en el portal del inversor y que, si lo necesita, contacte directamente con Chaparro Fernández Wealth Management. No des pistas ni respuestas parciales que insinúen la respuesta.
 
 == LO QUE SÍ PUEDES HACER ==
-Con los datos que se te entregan en "MIS DATOS" (que son exclusivamente los de {nombre_inversor}), puedes:
+Con los datos que se te entregan en "DATOS AUTORIZADOS PARA ESTA SESIÓN" (exclusivamente los de {etiqueta_inversores}), para cada uno de ellos puedes:
 - Decir su capital activo actual.
 - Decir su tasa de interés contratada.
 - Decir cuánto interés ha generado en total o en un mes/periodo concreto.
@@ -2475,7 +2490,7 @@ Responde SIEMPRE en español, de forma cercana y clara. Sé conciso. Importes co
         )
         data = resp.json()
         _uso = data.get("usage", {}) or {}
-        log_uso_ia(nombre_inversor, "inversor",
+        log_uso_ia(nombre_sesion, "inversor",
                    _uso.get("input_tokens", 0), _uso.get("output_tokens", 0))
         if "content" in data:
             textos = [b.get("text", "") for b in data["content"] if b.get("type") == "text"]
@@ -2485,10 +2500,17 @@ Responde SIEMPRE en español, de forma cercana y clara. Sé conciso. Importes co
         return f"Error: {e}"
 
 
-def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv):
-    """Chat del asistente de IA personal dentro del portal del inversor."""
+def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv, inversores_visibles=None):
+    """Chat del asistente de IA personal dentro del portal del inversor.
+    'inversores_visibles' es la lista completa de inversores que esta sesión puede consultar
+    (normalmente solo [nombre_inversor]; para casos autorizados, ver INVERSORES_ADICIONALES_VISIBLES)."""
+    lista_inversores = inversores_visibles if inversores_visibles else [nombre_inversor]
+    es_multi = len(lista_inversores) > 1
     st.markdown("### 💬 Tu asistente personal")
-    st.caption("Pregunta sobre tu capital, tu interés o tus extractos. Este asistente solo conoce tu propia posición — no tiene acceso a información del fondo ni de otros inversores.")
+    if es_multi:
+        st.caption(f"Pregunta sobre el capital, el interés o los extractos de {' o '.join(lista_inversores)}. Este asistente solo conoce estas posiciones — no tiene acceso a información del fondo ni de ningún otro inversor.")
+    else:
+        st.caption("Pregunta sobre tu capital, tu interés o tus extractos. Este asistente solo conoce tu propia posición — no tiene acceso a información del fondo ni de otros inversores.")
 
     key_chat = f"chat_ia_inversor_{nombre_inversor}"
     if key_chat not in st.session_state:
@@ -2517,7 +2539,7 @@ def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv):
         with st.chat_message("assistant"):
             with st.spinner("Consultando tu posición..."):
                 mensajes_prev = st.session_state[key_chat][:-1]
-                respuesta = preguntar_asistente_ia_inversor(ultima, nombre_inversor, df_inv, historial_previo=mensajes_prev)
+                respuesta = preguntar_asistente_ia_inversor(ultima, lista_inversores, df_inv, historial_previo=mensajes_prev)
                 st.markdown(_md_seguro(respuesta))
         st.session_state[key_chat].append({"role": "assistant", "content": respuesta})
 
@@ -2599,8 +2621,29 @@ def _construir_datos_demo_inversor():
     return df_inv, df_cal, df_control
 
 
+# Excepciones puntuales: inversores que, desde su propio portal, también pueden consultar la
+# posición de otro inversor concreto (a petición expresa de Yuri). El titular sigue viendo
+# SIEMPRE primero su propia información — esto solo añade acceso extra, nunca lo quita.
+INVERSORES_ADICIONALES_VISIBLES = {
+    "EVA CHAPARRO": ["JEP"],
+}
+
+
+def _inversores_visibles_para(nombre_inversor: str) -> list:
+    """Devuelve la lista de inversores cuya posición puede consultar este login: siempre el
+    propio titular primero, más cualquier inversor adicional autorizado explícitamente."""
+    extra = INVERSORES_ADICIONALES_VISIBLES.get(str(nombre_inversor).strip().upper(), [])
+    vistos = []
+    for n in [nombre_inversor] + list(extra):
+        if n not in vistos:
+            vistos.append(n)
+    return vistos
+
+
 def seccion_portal_inversor(nombre_inversor: str):
-    """Portal de acceso limitado para un inversor: solo ve su propia posición, nunca la de otros."""
+    """Portal de acceso limitado para un inversor: solo ve su propia posición y, en casos
+    excepcionales autorizados explícitamente (ver INVERSORES_ADICIONALES_VISIBLES), la de otro
+    inversor concreto adicional — nunca la de nadie más."""
     es_demo = str(nombre_inversor).strip().upper() == "DEMO"
     if es_demo:
         df_inv, df_cal, df_control = _construir_datos_demo_inversor()
@@ -2608,13 +2651,22 @@ def seccion_portal_inversor(nombre_inversor: str):
         df_inv, df_cal, df_control = cargar_excel_completo()
     hoy = pd.Timestamp.today().normalize()
 
-    st.header(f"👋 Bienvenido/a, {nombre_inversor}")
-    st.caption("Este es tu portal personal — solo tú puedes ver esta información. Ningún otro inversor tiene acceso a tu posición.")
+    inversores_visibles = _inversores_visibles_para(nombre_inversor)
 
-    datos = calcular_intereses_acumulados_inversor(df_inv, nombre_inversor, hoy)
+    st.header(f"👋 Bienvenido/a, {nombre_inversor}")
+    if len(inversores_visibles) > 1:
+        st.caption("Este es tu portal personal. Tienes acceso adicional autorizado a otra posición concreta — nadie más puede ver esta información.")
+        inversor_activo = st.selectbox(
+            "Viendo la información de:", inversores_visibles, key="portal_inversor_activo_selector",
+        )
+    else:
+        st.caption("Este es tu portal personal — solo tú puedes ver esta información. Ningún otro inversor tiene acceso a tu posición.")
+        inversor_activo = nombre_inversor
+
+    datos = calcular_intereses_acumulados_inversor(df_inv, inversor_activo, hoy)
 
     if datos["fecha_inicio"] is None:
-        st.warning("No se encontraron posiciones registradas a tu nombre.")
+        st.warning(f"No se encontraron posiciones registradas a nombre de {inversor_activo}.")
         return
 
     c1, c2, c3 = st.columns(3)
@@ -2626,7 +2678,7 @@ def seccion_portal_inversor(nombre_inversor: str):
         tarjeta_kpi("🎯 Tu rentabilidad contratada", fmt_pct(datos["tasa_media"]), "Tasa anual media ponderada", "positivo")
 
     st.markdown("---")
-    st.markdown("### 📄 Tu extracto")
+    st.markdown(f"### 📄 Extracto de {inversor_activo}" if len(inversores_visibles) > 1 else "### 📄 Tu extracto")
 
     # Solo se pueden consultar extractos de meses YA CERRADOS: el mes en curso queda
     # excluido (aún no ha terminado). El último mes disponible es siempre el mes anterior
@@ -2646,10 +2698,10 @@ def seccion_portal_inversor(nombre_inversor: str):
             format_func=lambda m: ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][m-1],
         )
 
-    if st.button("🔎 Ver mi extracto", type="primary"):
-        archivos = generar_extractos(df_inv, "Un inversor", nombre_inversor, anio_extracto, mes_extracto)
+    if st.button("🔎 Ver extracto", type="primary"):
+        archivos = generar_extractos(df_inv, "Un inversor", inversor_activo, anio_extracto, mes_extracto)
         if not archivos:
-            st.warning("No se encontró extracto para ese mes — puede que no tuvieras capital activo entonces.")
+            st.warning("No se encontró extracto para ese mes — puede que no hubiera capital activo entonces.")
         else:
             nombre_archivo, contenido, _ = archivos[0]
             contenido_privado = preparar_extracto_privado_inversor(contenido)
@@ -2659,12 +2711,12 @@ def seccion_portal_inversor(nombre_inversor: str):
     extracto_actual = st.session_state.get("portal_extracto_actual")
     if extracto_actual:
         nombre_archivo, contenido = extracto_actual
-        st.download_button("⬇️ Descargar mi extracto (Excel)", contenido, file_name=nombre_archivo,
+        st.download_button("⬇️ Descargar extracto (Excel)", contenido, file_name=nombre_archivo,
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary")
 
     st.markdown("---")
-    seccion_asistente_ia_inversor(nombre_inversor, df_inv)
+    seccion_asistente_ia_inversor(nombre_inversor, df_inv, inversores_visibles=inversores_visibles)
 
 
 
