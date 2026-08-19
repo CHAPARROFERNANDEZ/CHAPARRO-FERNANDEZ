@@ -34,6 +34,8 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 import bcrypt
+import pyotp
+import qrcode
 
 if __name__ == "__main__":  # page config: solo se ejecuta con `streamlit run`, no al importar
     st.set_page_config(
@@ -926,10 +928,11 @@ PRECIOS_MODELOS_IA = {
     "claude-sonnet-4-5": (3.0, 15.0),  # (precio input, precio output) por millón de tokens
 }
 PRECIO_MODELO_IA_POR_DEFECTO = (3.0, 15.0)
-# NOTA DE SEGURIDAD: por decisión explícita de Yuri, las contraseñas se guardan en TEXTO
-# PLANO (no cifradas) en la hoja USUARIOS del Excel del fondo, para que el equipo interno
-# pueda consultarlas directamente cuando lo necesite. Esto es intencionadamente menos seguro
-# que un hash — cualquiera con acceso al Excel (Drive) o a los Secrets de la app puede leerlas.
+# NOTA DE SEGURIDAD: las contraseñas se guardan hasheadas con bcrypt en la hoja USUARIOS del
+# Excel del fondo (ver _hash_password / _verificar_password más abajo). Las filas antiguas que
+# aún estuvieran en texto plano se migran a hash de forma silenciosa y transparente en el
+# primer login correcto (ver _verificar_credencial). Nadie, ni con acceso al Excel, puede leer
+# la contraseña real de un usuario ya migrado — solo comprobar si una contraseña dada coincide.
 
 
 def _descargar_excel_para_credenciales():
@@ -959,19 +962,26 @@ def _texto_seguro_excel(valor) -> str:
 
 
 def _leer_hoja_usuarios() -> pd.DataFrame:
-    """Lee la hoja USUARIOS (usuario, tipo_usuario, password) del Excel del fondo.
-    Si la hoja aún no existe (primera vez), devuelve un DataFrame vacío con las columnas
-    correctas y el sistema cae automáticamente en las contraseñas iniciales del código."""
+    """Lee la hoja USUARIOS (usuario, tipo_usuario, password, debe_cambiar_password, totp_secret,
+    totp_activo) del Excel del fondo. Si la hoja aún no existe (primera vez), devuelve un
+    DataFrame vacío con las columnas correctas y el sistema cae automáticamente en las
+    contraseñas iniciales del código."""
     _descargar_excel_para_credenciales()
     try:
         df = pd.read_excel(ARCHIVO, sheet_name=HOJA_USUARIOS)
         df.columns = [str(c).strip().lower() for c in df.columns]
-        for col in ["usuario", "tipo_usuario", "password"]:
+        for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
             if col in df.columns:
                 df[col] = df[col].apply(_texto_seguro_excel)
+        if "debe_cambiar_password" not in df.columns:
+            df["debe_cambiar_password"] = "NO"
+        if "totp_secret" not in df.columns:
+            df["totp_secret"] = ""
+        if "totp_activo" not in df.columns:
+            df["totp_activo"] = "NO"
         return df
     except Exception:
-        return pd.DataFrame(columns=["usuario", "tipo_usuario", "password"])
+        return pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"])
 
 
 def _guardar_hoja_usuarios(df_usuarios: pd.DataFrame) -> tuple[bool, str]:
@@ -1019,9 +1029,214 @@ def _guardar_hoja_usuarios(df_usuarios: pd.DataFrame) -> tuple[bool, str]:
         return False, f"Se guardó localmente pero no se pudo sincronizar con Drive: {e}"
 
 
+# =========================
+# PROTECCIÓN CONTRA FUERZA BRUTA EN EL LOGIN
+# =========================
+# Estado compartido entre todas las sesiones del mismo proceso (cacheado con st.cache_resource
+# para que sobreviva a los reruns de Streamlit, que si no reinician cualquier variable de módulo
+# en cada interacción). No es persistente entre redeploys de Railway — es una protección básica
+# en memoria, suficiente para frenar intentos automatizados de adivinar contraseñas.
+MAX_INTENTOS_LOGIN = 5
+BLOQUEO_LOGIN_SEGUNDOS = 15 * 60  # 15 minutos de bloqueo tras agotar los intentos
+
+
+@st.cache_resource
+def _estado_intentos_login() -> dict:
+    return {}
+
+
+def _clave_intentos(tipo: str, usuario: str) -> str:
+    return f"{tipo}:{usuario.strip().lower()}"
+
+
+def _login_bloqueado(tipo: str, usuario: str) -> tuple[bool, int]:
+    """Devuelve (bloqueado, minutos_restantes) para este usuario+tipo."""
+    estado = _estado_intentos_login()
+    clave = _clave_intentos(tipo, usuario)
+    intentos, bloqueado_hasta = estado.get(clave, (0, 0.0))
+    ahora = time.time()
+    if bloqueado_hasta and ahora < bloqueado_hasta:
+        return True, int((bloqueado_hasta - ahora) // 60) + 1
+    if bloqueado_hasta and ahora >= bloqueado_hasta:
+        estado[clave] = (0, 0.0)  # el bloqueo ya expiró: reseteamos contador
+    return False, 0
+
+
+def _registrar_intento_fallido(tipo: str, usuario: str):
+    estado = _estado_intentos_login()
+    clave = _clave_intentos(tipo, usuario)
+    intentos, _bloqueado_hasta = estado.get(clave, (0, 0.0))
+    intentos += 1
+    bloqueado_hasta = time.time() + BLOQUEO_LOGIN_SEGUNDOS if intentos >= MAX_INTENTOS_LOGIN else 0.0
+    estado[clave] = (intentos, bloqueado_hasta)
+
+
+def _resetear_intentos_login(tipo: str, usuario: str):
+    estado = _estado_intentos_login()
+    estado.pop(_clave_intentos(tipo, usuario), None)
+
+
 def _hash_password(password_plano: str) -> str:
     """Genera un hash bcrypt de una contraseña en texto plano, listo para guardar."""
     return bcrypt.hashpw(password_plano.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _generar_password_temporal(longitud: int = 14) -> str:
+    """Genera una contraseña temporal aleatoria y criptográficamente segura (módulo `secrets`,
+    no `random`). Se usa una sola vez para enviarla por email; nunca se guarda en texto plano
+    en ningún sitio — solo su hash bcrypt."""
+    import secrets as _secrets
+    import string as _string
+    alfabeto = _string.ascii_letters + _string.digits + "!@#$%&*-_"
+    while True:
+        pw = "".join(_secrets.choice(alfabeto) for _ in range(longitud))
+        # Nos aseguramos de que tenga al menos una mayúscula, una minúscula, un dígito y un símbolo.
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw) and any(c in "!@#$%&*-_" for c in pw)):
+            return pw
+
+
+def _debe_cambiar_password(usuario: str, tipo: str) -> bool:
+    """Comprueba si este usuario tiene pendiente el cambio obligatorio de contraseña (recién
+    creado con una contraseña temporal enviada por email, aún sin personalizar)."""
+    df_u = _leer_hoja_usuarios()
+    if df_u.empty or not {"usuario", "tipo_usuario", "debe_cambiar_password"}.issubset(df_u.columns):
+        return False
+    fila = df_u[
+        (df_u["usuario"].astype(str).str.strip().str.lower() == usuario.strip().lower())
+        & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+    ]
+    if fila.empty:
+        return False
+    return str(fila.iloc[0].get("debe_cambiar_password", "NO")).strip().upper() == "SI"
+
+
+# =========================
+# VERIFICACIÓN EN DOS PASOS (TOTP — Google Authenticator / Authy)
+# =========================
+def _fila_usuario(df_u: pd.DataFrame, usuario: str, tipo: str):
+    """Devuelve la fila (Series) de un usuario+tipo en la hoja USUARIOS, o None si no existe."""
+    if df_u.empty or not {"usuario", "tipo_usuario"}.issubset(df_u.columns):
+        return None
+    fila = df_u[
+        (df_u["usuario"].astype(str).str.strip().str.lower() == usuario.strip().lower())
+        & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+    ]
+    return fila.iloc[0] if not fila.empty else None
+
+
+def _totp_activo(usuario: str, tipo: str) -> bool:
+    """Comprueba si este usuario tiene la verificación en dos pasos activada."""
+    fila = _fila_usuario(_leer_hoja_usuarios(), usuario, tipo)
+    if fila is None:
+        return False
+    return str(fila.get("totp_activo", "NO")).strip().upper() == "SI"
+
+
+def _totp_secreto_de(usuario: str, tipo: str) -> str:
+    fila = _fila_usuario(_leer_hoja_usuarios(), usuario, tipo)
+    if fila is None:
+        return ""
+    return str(fila.get("totp_secret", "") or "")
+
+
+def _verificar_codigo_totp(secreto: str, codigo: str) -> bool:
+    if not secreto or not codigo:
+        return False
+    try:
+        return pyotp.TOTP(secreto).verify(codigo.strip(), valid_window=1)
+    except Exception:
+        return False
+
+
+def _guardar_totp(usuario: str, tipo: str, secreto: str, activo: bool):
+    """Activa/desactiva el TOTP de un usuario, preservando el resto de sus datos (password,
+    debe_cambiar_password) intactos — nunca se tocan al activar 2FA."""
+    df_u = _leer_hoja_usuarios()
+    for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
+        if col not in df_u.columns:
+            df_u[col] = "" if col in ("totp_secret",) else ("NO" if col in ("debe_cambiar_password", "totp_activo") else "")
+        df_u[col] = df_u[col].astype(object)
+    idx = df_u[
+        (df_u["usuario"].astype(str).str.strip().str.lower() == usuario.strip().lower())
+        & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+    ].index
+    df_u.loc[idx, "totp_secret"] = secreto
+    df_u.loc[idx, "totp_activo"] = "SI" if activo else "NO"
+    return _guardar_hoja_usuarios(df_u)
+
+
+def _completar_login(usuario_match: str, tipo: str):
+    """Centraliza qué pasa cuando un login se da por bueno (con o sin segundo factor de por
+    medio): arranca la sesión, calcula los avisos pendientes y limpia el estado de TOTP."""
+    st.session_state.autenticado = True
+    st.session_state.usuario = usuario_match
+    st.session_state.tipo_usuario = tipo
+    st.session_state.login_timestamp = time.time()
+    st.session_state.ultima_actividad = time.time()
+    if tipo == "admin":
+        _df_u_check = _leer_hoja_usuarios()
+        _ya_migrado = _fila_usuario(_df_u_check, usuario_match, "admin") is not None
+        st.session_state.mostrar_aviso_pw_temporal = not _ya_migrado
+    else:
+        st.session_state.mostrar_aviso_pw_temporal = False
+    st.session_state.forzar_cambio_password = _debe_cambiar_password(usuario_match, tipo)
+    st.session_state.totp_pendiente = None
+
+
+def enviar_email_credenciales_nuevas(destinatario: str, usuario: str, password_temporal: str,
+                                      tipo: str, smtp_sender: str, smtp_password: str,
+                                      display_name: str = "Chaparro Fernández Wealth") -> tuple:
+    """Envía por email la contraseña temporal de un acceso recién creado. Esta es la ÚNICA vez
+    que la contraseña en texto plano existe en algún sitio (en este correo) — ni se muestra en
+    pantalla al admin que la crea, ni se guarda así en ningún fichero; solo se persiste su hash
+    bcrypt en la hoja USUARIOS."""
+    destinatarios = _parse_lista_emails(destinatario)
+    if not destinatarios:
+        return False, "No hay ninguna dirección de email válida."
+    portal_str = "equipo interno" if tipo == "admin" else "portal de inversor"
+    try:
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = f"Tu acceso a {display_name}"
+        msg["From"] = f"{display_name} <{smtp_sender}>"
+        msg["To"] = ", ".join(destinatarios)
+        cuerpo = f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(7,20,37,0.14);">
+        <tr><td style="background:linear-gradient(135deg,#0e2338 0%,#173b5c 60%,#bf9a5f 100%);padding:32px 40px;text-align:center;">
+          <div style="color:#ffffff;font-size:20px;font-weight:800;">{display_name}</div>
+          <div style="color:rgba(255,255,255,0.75);font-size:13px;margin-top:6px;">Acceso al {portal_str}</div>
+        </td></tr>
+        <tr><td style="padding:32px 40px;">
+          <p style="color:#334155;font-size:14px;line-height:1.6;">Se ha creado un acceso para ti. Estos son tus datos de entrada:</p>
+          <table width="100%" cellpadding="10" cellspacing="0" style="background:#f5f0e8;border-radius:10px;margin:18px 0;">
+            <tr><td style="font-size:13px;color:#64748b;">Usuario</td><td style="font-size:14px;color:#0e2338;font-weight:700;">{usuario}</td></tr>
+            <tr><td style="font-size:13px;color:#64748b;">Contraseña temporal</td><td style="font-size:14px;color:#0e2338;font-weight:700;font-family:monospace;">{password_temporal}</td></tr>
+          </table>
+          <p style="color:#475569;font-size:13px;line-height:1.6;">Por seguridad, <strong>se te pedirá cambiarla</strong> obligatoriamente en cuanto inicies sesión por primera vez. Esta contraseña temporal solo existe en este correo — nadie más, ni siquiera el equipo de administración, puede volver a consultarla.</p>
+          <p style="color:#94a3b8;font-size:12px;margin-top:22px;">🔒 Correo confidencial. Si no esperabas este acceso, ignóralo y contacta con nosotros.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
+        msg.attach(MIMEText(cuerpo, "html", "utf-8"))
+        contexto = ssl.create_default_context()
+        with smtplib.SMTP("smtp.gmail.com", 587) as servidor:
+            servidor.ehlo()
+            servidor.starttls(context=contexto)
+            servidor.login(smtp_sender, smtp_password)
+            servidor.sendmail(smtp_sender, destinatarios, msg.as_bytes())
+        return True, ""
+    except smtplib.SMTPAuthenticationError:
+        return False, "Error de autenticación Gmail. Usa una contraseña de aplicación (no tu contraseña normal)."
+    except smtplib.SMTPRecipientsRefused:
+        return False, f"Alguna(s) de estas direcciones fue(ron) rechazada(s): {', '.join(destinatarios)}."
+    except Exception as e:
+        return False, str(e)
 
 
 def _es_hash_bcrypt(valor: str) -> bool:
@@ -1076,7 +1291,7 @@ def _verificar_credencial(usuario_input: str, password_input: str, tipo: str, us
             return None  # ya migrado a Drive: la contraseña del código queda obsoleta para este usuario
 
     match = next((u for u in usuarios_codigo if u.strip().lower() == usuario_input.strip().lower()), None)
-    if match and usuarios_codigo.get(match) == password_input:
+    if match and _verificar_password(password_input, usuarios_codigo.get(match, "")):
         return match
     return None
 
@@ -1100,12 +1315,19 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
             else:
                 df_u = _leer_hoja_usuarios()
                 if df_u.empty or not {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
-                    df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password"])
+                    df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"])
                 # Todas las columnas como texto: si la hoja se creó vacía, pandas puede haberlas
                 # inferido como float64 (todo NaN), y asignar un string ahí con .loc revienta con
                 # TypeError en pandas 3.x (ya no hace upcast silencioso). Forzamos texto primero.
-                for col in ["usuario", "tipo_usuario", "password"]:
+                for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
+                    if col not in df_u.columns:
+                        df_u[col] = "NO" if col in ("debe_cambiar_password", "totp_activo") else ""
                     df_u[col] = df_u[col].astype(object)
+                # Conservamos el secreto TOTP y si está activo — cambiar la contraseña NUNCA debe
+                # desactivar la verificación en dos pasos de nadie.
+                _fila_previa = _fila_usuario(df_u, usuario_actual, tipo)
+                _totp_secret_prev = str(_fila_previa.get("totp_secret", "") or "") if _fila_previa is not None else ""
+                _totp_activo_prev = str(_fila_previa.get("totp_activo", "NO") or "NO") if _fila_previa is not None else "NO"
                 mascara = (
                     (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_actual.strip().lower())
                     & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
@@ -1114,13 +1336,123 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
                 # antigua si existía y añadimos la fila nueva — evita por completo el problema
                 # de tipos, igual de robusto y más simple.
                 df_u = df_u[~mascara]
-                fila_nueva = pd.DataFrame([{"usuario": usuario_actual, "tipo_usuario": tipo, "password": _hash_password(pw_nueva)}])
+                fila_nueva = pd.DataFrame([{
+                    "usuario": usuario_actual, "tipo_usuario": tipo,
+                    "password": _hash_password(pw_nueva), "debe_cambiar_password": "NO",
+                    "totp_secret": _totp_secret_prev, "totp_activo": _totp_activo_prev,
+                }])
                 df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
                 exito, mensaje = _guardar_hoja_usuarios(df_u)
                 if exito:
+                    st.session_state.forzar_cambio_password = False
                     st.success(f"✅ Contraseña actualizada. {mensaje}")
                 else:
                     st.warning(f"⚠️ Contraseña actualizada localmente. {mensaje}")
+
+
+def formulario_cambio_obligatorio_password(usuario_actual: str, tipo: str):
+    """Pantalla BLOQUEANTE (no se puede saltar) para usuarios recién creados con una contraseña
+    temporal enviada por email. No pide la contraseña actual (ya la usaron para entrar) — solo
+    obliga a fijar una nueva antes de dejar pasar al resto de la aplicación."""
+    st.markdown(
+        """
+        <div class="login-card">
+            <div class="login-logo">CF</div>
+            <div class="login-title">Elige tu contraseña</div>
+            <div class="login-subtitle">Por seguridad, debes personalizar tu contraseña temporal antes de continuar</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.form(f"form_cambio_obligatorio_{tipo}_{usuario_actual}"):
+        pw_nueva = st.text_input("Nueva contraseña", type="password", key=f"pw_obl_nueva_{tipo}")
+        pw_nueva2 = st.text_input("Repite la nueva contraseña", type="password", key=f"pw_obl_nueva2_{tipo}")
+        enviar = st.form_submit_button("Guardar y continuar")
+    if enviar:
+        if len(pw_nueva) < 8:
+            st.error("La nueva contraseña debe tener al menos 8 caracteres.")
+        elif pw_nueva != pw_nueva2:
+            st.error("Las dos contraseñas no coinciden.")
+        else:
+            df_u = _leer_hoja_usuarios()
+            if df_u.empty or not {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
+                df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"])
+            for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
+                if col not in df_u.columns:
+                    df_u[col] = "NO" if col in ("debe_cambiar_password", "totp_activo") else ""
+                df_u[col] = df_u[col].astype(object)
+            _fila_previa = _fila_usuario(df_u, usuario_actual, tipo)
+            _totp_secret_prev = str(_fila_previa.get("totp_secret", "") or "") if _fila_previa is not None else ""
+            _totp_activo_prev = str(_fila_previa.get("totp_activo", "NO") or "NO") if _fila_previa is not None else "NO"
+            mascara = (
+                (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_actual.strip().lower())
+                & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+            )
+            df_u = df_u[~mascara]
+            fila_nueva = pd.DataFrame([{
+                "usuario": usuario_actual, "tipo_usuario": tipo,
+                "password": _hash_password(pw_nueva), "debe_cambiar_password": "NO",
+                "totp_secret": _totp_secret_prev, "totp_activo": _totp_activo_prev,
+            }])
+            df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
+            exito, mensaje = _guardar_hoja_usuarios(df_u)
+            if exito:
+                st.session_state.forzar_cambio_password = False
+                st.session_state.mostrar_aviso_pw_temporal = False
+                st.success("✅ Contraseña guardada. Entrando...")
+                st.rerun()
+            else:
+                st.warning(f"⚠️ Contraseña guardada localmente pero no sincronizada con Drive. {mensaje} Vuelve a intentarlo antes de continuar.")
+    st.stop()
+
+
+def seccion_configurar_totp(usuario_actual: str, tipo: str):
+    """Panel de autoservicio para activar/desactivar la verificación en dos pasos (TOTP) con
+    una app autenticadora (Google Authenticator, Authy, etc.). Por ahora solo se muestra para
+    Yuri — ver la llamada condicional en el bloque de sidebar más abajo."""
+    activo = _totp_activo(usuario_actual, tipo)
+    with st.sidebar.expander(f"🔐 Verificación en dos pasos ({'activada' if activo else 'desactivada'})"):
+        if activo:
+            st.success("Activada. Se te pedirá un código al iniciar sesión.")
+            with st.form(f"form_desactivar_totp_{tipo}_{usuario_actual}"):
+                st.caption("Para desactivarla, confirma con tu contraseña actual.")
+                pw_confirmar = st.text_input("Contraseña actual", type="password", key=f"pw_desactivar_totp_{tipo}")
+                desactivar = st.form_submit_button("Desactivar verificación en dos pasos")
+            if desactivar:
+                usuarios_codigo_local = USUARIOS if tipo == "admin" else USUARIOS_INVERSORES
+                if _verificar_credencial(usuario_actual, pw_confirmar, tipo, usuarios_codigo_local) is None:
+                    st.error("Contraseña incorrecta.")
+                else:
+                    exito, mensaje = _guardar_totp(usuario_actual, tipo, "", False)
+                    if exito:
+                        st.success(f"Verificación en dos pasos desactivada. {mensaje}")
+                    else:
+                        st.warning(f"Desactivada localmente. {mensaje}")
+        else:
+            if f"totp_secreto_pendiente_{usuario_actual}" not in st.session_state:
+                st.session_state[f"totp_secreto_pendiente_{usuario_actual}"] = pyotp.random_base32()
+            secreto_pendiente = st.session_state[f"totp_secreto_pendiente_{usuario_actual}"]
+            uri = pyotp.TOTP(secreto_pendiente).provisioning_uri(name=usuario_actual, issuer_name="Chaparro Fernández Wealth")
+            qr_img = qrcode.make(uri)
+            buf_qr = BytesIO()
+            qr_img.save(buf_qr, format="PNG")
+            st.caption("Escanea este código con Google Authenticator, Authy o similar:")
+            st.image(buf_qr.getvalue(), width=180)
+            st.caption(f"O introduce la clave manualmente: `{secreto_pendiente}`")
+            with st.form(f"form_activar_totp_{tipo}_{usuario_actual}"):
+                codigo_confirmar = st.text_input("Código de 6 dígitos de la app", key=f"codigo_activar_totp_{tipo}")
+                activar = st.form_submit_button("Activar verificación en dos pasos")
+            if activar:
+                if _verificar_codigo_totp(secreto_pendiente, codigo_confirmar):
+                    exito, mensaje = _guardar_totp(usuario_actual, tipo, secreto_pendiente, True)
+                    del st.session_state[f"totp_secreto_pendiente_{usuario_actual}"]
+                    if exito:
+                        st.success(f"✅ Verificación en dos pasos activada. {mensaje}")
+                        st.rerun()
+                    else:
+                        st.warning(f"Activada localmente. {mensaje}")
+                else:
+                    st.error("Código incorrecto. Revisa la hora de tu móvil y vuelve a intentarlo.")
 
 
 if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit run`, no al importar
@@ -1131,28 +1463,39 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     # =========================
     # LOGIN
     # =========================
-    USUARIOS = {"Yuri": "1234", "Jordi": "12345", "Alan": "123456"}
+    # Contraseñas TEMPORALES del equipo interno — guardadas aquí como HASH bcrypt, no en texto
+    # plano: ni siquiera leyendo este código se puede recuperar la contraseña real. Solo se usan
+    # si el usuario todavía no ha cambiado su contraseña desde el portal (formulario "Cambiar mi
+    # contraseña" del sidebar, que la re-hashea y la guarda en la hoja USUARIOS de Drive). En
+    # cuanto Yuri, Alan y Jordi la cambien una vez cada uno, estos hashes dejan de tener efecto.
+    USUARIOS = {
+        "Yuri": "$2b$12$zMHrZeMDoZHdO6uCtIIFEOhsbnM5PvqjkaSyQ/58s.QqwKwfihdcu",
+        "Jordi": "$2b$12$YetePZJ1Zh0mvAJ8hMai9eIUJaGhh30bo4/R18zUfp2KjxyYrnQR.",
+        "Alan": "$2b$12$I3PbU6.DklNw4bLulPfdVePmVDxZGARbTxTJ/pCxlU5G..TdHOOum",
+    }
     # Portal de inversores: acceso limitado, solo ven su propia posición.
     # El "usuario" debe coincidir exactamente (en mayúsculas) con el valor de la columna 'inversor' en INVERSIONES.
+    # Guardadas como HASH bcrypt (no texto plano) — mismo motivo que USUARIOS arriba: ni siquiera
+    # leyendo el código se puede recuperar la contraseña real de ningún inversor.
     USUARIOS_INVERSORES = {
-        "PAM": "Pam2026Wealth!",
-        "LEO": "Leo2026Wealth!",
-        "JORDI CHAPARRO": "Jordi2026Wealth!",
-        "ROBERTO VISCAFE": "Roberto2026Wealth!",
-        "CROWE BOLIVIA": "Crowe2026Wealth!",
-        "JR REAL ESTATE": "JRreal2026Wealth!",
-        "2012 JACC GROUP": "Jacc2026Wealth!",
-        "PEDRO MAGAÑA": "Pedro2026Wealth!",
-        "GOLDEN BRICKS": "Golden2026Wealth!",
-        "TERESA": "Teresa2026Wealth!",
-        "JEP": "Jep2026Wealth!",
-        "JORDI ESPECIAL": "JordiE2026Wealth!",
-        "EVA CHAPARRO": "Eva2026Wealth!",
-        "PAOLA CHAPARRO": "Paola2026Wealth!",
-        "JAPAN JORDI": "JapanJ2026Wealth!",
+        "PAM": "$2b$12$JtXQhdVOtAUIaswhBIY/S.kcevThLgAPe6S6dJ0sf0x2ss2WaAdqi",
+        "LEO": "$2b$12$3RLi8kGMlGzLj94BPk0WQOLZFky1RJbngeUazi8sUEiQPnn74i/da",
+        "JORDI CHAPARRO": "$2b$12$lWEmQAL5XI01O7tJjNkmwOoy0hYHuJ6oyb63rr2KVEI.mgI0VZNpG",
+        "ROBERTO VISCAFE": "$2b$12$47ZgRROusfgRqn4NGaNofOeSJmMtJr97nN1wznNSnolyBDEIulUnO",
+        "CROWE BOLIVIA": "$2b$12$2AUnwWCBSqGEJCqR.68wrOD0EMmbpuOqfV6WzF0G6aaWxC6TDB2CW",
+        "JR REAL ESTATE": "$2b$12$2Wnhe4CpwAe2YDUDYWYzPOwb3YQbEGjmQCho0VRLAmrAz.vfoNk7a",
+        "2012 JACC GROUP": "$2b$12$qzESlhy/kWWzyMnHtp4o2e0YjQaX8roQ148zj1.djF4CexFL6FlS.",
+        "PEDRO MAGAÑA": "$2b$12$e7YD2CCtAg.jK1gnMtG6rulTJuB5FyKBkuG.1wvrfr8u.TuhwfbMS",
+        "GOLDEN BRICKS": "$2b$12$mN2hcF9UHn8YfLglwFbl7uHn7S7jeuYvrUeJuwsF11JSrRjZG5NYG",
+        "TERESA": "$2b$12$zQoopWqN.5g/VL1Q6E/i5eBOXezLOXPACn8G/P/Ga6hzPx6bzr03u",
+        "JEP": "$2b$12$yvHDFYNuEVpVnPdYaRW1fO8tNaO0DvJMu4OKuDOXY7ZCR9OEbOFjS",
+        "JORDI ESPECIAL": "$2b$12$1WgxEK3N4BF2a8wfl/SxX.6bW5i4ZtBWy8k/t.9eSewdcn00A3XoS",
+        "EVA CHAPARRO": "$2b$12$X3Fmv6uEXN4m/xuBJbvfDO8Nm9.xAz/4ks7kLVUGPCaYF85ad9dCm",
+        "PAOLA CHAPARRO": "$2b$12$C7sfiEt5NDO6SniNixFTfOKVGXuV.k1xs5HU.Wuio/dImv7ZFN/dC",
+        "JAPAN JORDI": "$2b$12$sZ1ry3OZmJFoDC5.isu.AOqMWgEKJs7Wu9eU7JSSsChXH0Qn9BmMu",
         # Usuario DEMO: portal con datos 100% ficticios para presentar a inversores potenciales.
         # No corresponde a ningún inversor real ni toca el Excel del fondo (ver _construir_datos_demo_inversor).
-        "DEMO": "Demo2026Wealth!",
+        "DEMO": "$2b$12$2xF3csT1htw4f1N20nZgb.F8/LN7MtfWAp5eynYlYdAZyMlYn9LLa",
     }
 
     if "autenticado" not in st.session_state:
@@ -1161,6 +1504,8 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         st.session_state.usuario = None
     if "tipo_usuario" not in st.session_state:
         st.session_state.tipo_usuario = None  # "admin" o "inversor"
+    if "totp_pendiente" not in st.session_state:
+        st.session_state.totp_pendiente = None
 
     if not st.session_state.autenticado:
         st.markdown(
@@ -1173,6 +1518,34 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
             """,
             unsafe_allow_html=True,
         )
+
+        # ── Paso 2: código de la app autenticadora (solo si el usuario ya superó el paso 1) ──
+        if st.session_state.totp_pendiente:
+            _pend = st.session_state.totp_pendiente
+            st.info(f"🔐 Hola {_pend['usuario']}. Introduce el código de tu app autenticadora.")
+            with st.form("form_totp_login"):
+                codigo_totp = st.text_input("Código de 6 dígitos", key="input_codigo_totp_login")
+                c1, c2 = st.columns(2)
+                confirmar_totp = c1.form_submit_button("Verificar")
+                cancelar_totp = c2.form_submit_button("Cancelar")
+            if cancelar_totp:
+                st.session_state.totp_pendiente = None
+                st.rerun()
+            if confirmar_totp:
+                _bloqueado, _min_restantes = _login_bloqueado("totp", _pend["usuario"])
+                if _bloqueado:
+                    st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {_min_restantes} minuto(s).")
+                else:
+                    secreto = _totp_secreto_de(_pend["usuario"], _pend["tipo"])
+                    if _verificar_codigo_totp(secreto, codigo_totp):
+                        _resetear_intentos_login("totp", _pend["usuario"])
+                        _completar_login(_pend["usuario"], _pend["tipo"])
+                        st.rerun()
+                    else:
+                        _registrar_intento_fallido("totp", _pend["usuario"])
+                        st.error("Código incorrecto.")
+            st.stop()
+
         tipo_acceso = st.radio("Tipo de acceso", ["Equipo interno", "Portal de inversor"], horizontal=True, label_visibility="collapsed")
         if tipo_acceso == "Equipo interno":
             with st.form("login_form"):
@@ -1180,34 +1553,71 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
                 password = st.text_input("Contraseña", type="password")
                 entrar = st.form_submit_button("Entrar")
             if entrar:
-                usuario_match = _verificar_credencial(usuario_txt, password, "admin", USUARIOS)
-                if usuario_match:
-                    st.session_state.autenticado = True
-                    st.session_state.usuario = usuario_match
-                    st.session_state.tipo_usuario = "admin"
-                    st.rerun()
+                _bloqueado, _min_restantes = _login_bloqueado("admin", usuario_txt or "")
+                if _bloqueado:
+                    st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {_min_restantes} minuto(s).")
                 else:
-                    st.error("Usuario o contraseña incorrectos")
+                    usuario_match = _verificar_credencial(usuario_txt, password, "admin", USUARIOS)
+                    if usuario_match:
+                        _resetear_intentos_login("admin", usuario_txt)
+                        if _totp_activo(usuario_match, "admin"):
+                            st.session_state.totp_pendiente = {"usuario": usuario_match, "tipo": "admin"}
+                        else:
+                            _completar_login(usuario_match, "admin")
+                        st.rerun()
+                    else:
+                        _registrar_intento_fallido("admin", usuario_txt or "")
+                        st.error("Usuario o contraseña incorrectos")
         else:
             with st.form("login_form_inversor"):
                 usuario_inv_txt = st.text_input("Usuario")
                 password_inv = st.text_input("Contraseña", type="password", key="pwd_inversor")
                 entrar_inv = st.form_submit_button("Entrar")
             if entrar_inv:
-                usuario_inv_match = _verificar_credencial(usuario_inv_txt, password_inv, "inversor", USUARIOS_INVERSORES)
-                if usuario_inv_match:
-                    st.session_state.autenticado = True
-                    st.session_state.usuario = usuario_inv_match
-                    st.session_state.tipo_usuario = "inversor"
-                    st.rerun()
+                _bloqueado, _min_restantes = _login_bloqueado("inversor", usuario_inv_txt or "")
+                if _bloqueado:
+                    st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {_min_restantes} minuto(s).")
                 else:
-                    st.error("Usuario o contraseña incorrectos")
+                    usuario_inv_match = _verificar_credencial(usuario_inv_txt, password_inv, "inversor", USUARIOS_INVERSORES)
+                    if usuario_inv_match:
+                        _resetear_intentos_login("inversor", usuario_inv_txt)
+                        if _totp_activo(usuario_inv_match, "inversor"):
+                            st.session_state.totp_pendiente = {"usuario": usuario_inv_match, "tipo": "inversor"}
+                        else:
+                            _completar_login(usuario_inv_match, "inversor")
+                        st.rerun()
+                    else:
+                        _registrar_intento_fallido("inversor", usuario_inv_txt or "")
+                        st.error("Usuario o contraseña incorrectos")
         st.stop()
 
+    # ── Timeout de sesión: expira por inactividad o por duración máxima absoluta ──
+    SESION_INACTIVIDAD_SEGUNDOS = 30 * 60   # 30 minutos sin ninguna interacción
+    SESION_MAXIMA_SEGUNDOS = 12 * 3600      # 12 horas desde el login, aunque haya actividad
+    _ahora = time.time()
+    _login_ts = st.session_state.get("login_timestamp", _ahora)
+    _ultima_act = st.session_state.get("ultima_actividad", _ahora)
+    if (_ahora - _ultima_act > SESION_INACTIVIDAD_SEGUNDOS) or (_ahora - _login_ts > SESION_MAXIMA_SEGUNDOS):
+        st.session_state.autenticado = False
+        st.session_state.usuario = None
+        st.session_state.tipo_usuario = None
+        st.warning("⏱️ Tu sesión ha expirado por seguridad. Vuelve a iniciar sesión.")
+        st.stop()
+    st.session_state.ultima_actividad = _ahora
+
+    # ── Cambio obligatorio de contraseña: bloquea el resto de la app hasta que se complete ──
+    if st.session_state.get("forzar_cambio_password"):
+        formulario_cambio_obligatorio_password(st.session_state.usuario, st.session_state.tipo_usuario)
+
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+    if st.session_state.get("mostrar_aviso_pw_temporal"):
+        st.sidebar.warning("⚠️ Estás usando la contraseña temporal. Cámbiala ahora abajo, en '🔑 Cambiar mi contraseña'.")
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     if str(st.session_state.usuario).strip().upper() != "DEMO":
         formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
+    # Verificación en dos pasos (TOTP): de momento, solo disponible para Yuri.
+    if str(st.session_state.usuario).strip().lower() == "yuri" and st.session_state.tipo_usuario == "admin":
+        seccion_configurar_totp(st.session_state.usuario, st.session_state.tipo_usuario)
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.autenticado = False
         st.session_state.usuario = None
@@ -10270,12 +10680,80 @@ def seccion_gestion_excel():
     with tab_usuarios:
         st.subheader("Usuarios y contraseñas")
         st.caption(
-            "Por seguridad, las contraseñas ya NO se guardan en texto plano — se guardan "
-            "hasheadas (bcrypt), así que ni siquiera nosotros podemos ver la contraseña real "
-            "de nadie. Si alguien la olvida, resetéala aquí y comunícale la nueva por un canal "
-            "seguro (nunca por email sin cifrar)."
+            "Por seguridad, las contraseñas se guardan hasheadas (bcrypt) — ni siquiera "
+            "nosotros podemos ver la contraseña real de nadie. Los accesos nuevos y los "
+            "reseteos se envían por email como contraseña temporal de un solo uso: el usuario "
+            "está obligado a cambiarla en su primer login, y esa contraseña temporal no vuelve "
+            "a mostrarse ni guardarse en ningún sitio."
         )
+
+        try:
+            _smtp_sender_u = st.secrets["email"]["sender"]
+            _smtp_password_u = st.secrets["email"]["password"]
+            _display_name_u = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+            _email_configurado = True
+        except Exception:
+            _smtp_sender_u = _smtp_password_u = _display_name_u = ""
+            _email_configurado = False
+
         df_u = _leer_hoja_usuarios()
+
+        # ── Generar acceso nuevo ──
+        st.markdown("#### ➕ Generar acceso nuevo")
+        if not _email_configurado:
+            st.warning("Configura el email de envío (Secrets → [email]) para poder generar accesos nuevos de forma segura.")
+        else:
+            with st.form("form_generar_acceso_nuevo"):
+                c1, c2 = st.columns(2)
+                tipo_nuevo = c1.selectbox("Tipo de acceso", ["inversor", "admin"], key="tipo_acceso_nuevo")
+                usuario_nuevo = c2.text_input(
+                    "Usuario", key="input_usuario_nuevo",
+                    help="Para inversores, debe coincidir exactamente con el nombre en la columna 'inversor' del Excel.",
+                )
+                email_nuevo = st.text_input("Email de destino", key="input_email_nuevo")
+                generar = st.form_submit_button("Generar y enviar acceso")
+            if generar:
+                usuario_nuevo_limpio = (usuario_nuevo or "").strip()
+                email_nuevo_limpio = (email_nuevo or "").strip()
+                ya_existe = (
+                    not df_u.empty and {"usuario", "tipo_usuario"}.issubset(df_u.columns)
+                    and not df_u[
+                        (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_nuevo_limpio.lower())
+                        & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo_nuevo)
+                    ].empty
+                )
+                if not usuario_nuevo_limpio or not email_nuevo_limpio:
+                    st.error("Rellena usuario y email.")
+                elif "@" not in email_nuevo_limpio:
+                    st.error("El email no parece válido.")
+                elif ya_existe:
+                    st.error(f"Ya existe un acceso '{tipo_nuevo}' para {usuario_nuevo_limpio}. Usa 'Resetear contraseña' más abajo.")
+                else:
+                    password_temp = _generar_password_temporal()
+                    for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password"]:
+                        if col not in df_u.columns:
+                            df_u[col] = "NO" if col == "debe_cambiar_password" else ""
+                        df_u[col] = df_u[col].astype(object)
+                    fila_nueva = pd.DataFrame([{
+                        "usuario": usuario_nuevo_limpio, "tipo_usuario": tipo_nuevo,
+                        "password": _hash_password(password_temp), "debe_cambiar_password": "SI",
+                    }])
+                    df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
+                    exito, mensaje = _guardar_hoja_usuarios(df_u)
+                    if exito:
+                        env_ok, env_msg = enviar_email_credenciales_nuevas(
+                            email_nuevo_limpio, usuario_nuevo_limpio, password_temp, tipo_nuevo,
+                            _smtp_sender_u, _smtp_password_u, _display_name_u,
+                        )
+                        if env_ok:
+                            st.success(f"✅ Acceso creado y contraseña temporal enviada a {email_nuevo_limpio}.")
+                        else:
+                            st.error(f"El acceso se creó, pero el email falló: {env_msg}. La contraseña temporal no se puede recuperar — resetéala de nuevo.")
+                    else:
+                        st.warning(f"⚠️ No se pudo guardar en Drive: {mensaje}")
+
+        st.divider()
+
         if df_u.empty:
             st.info(
                 "Todavía no hay nadie en la hoja USUARIOS (nadie ha cambiado su contraseña "
@@ -10283,30 +10761,72 @@ def seccion_gestion_excel():
             )
         else:
             tabla = df_u[["usuario", "tipo_usuario"]].rename(columns={"usuario": "Usuario", "tipo_usuario": "Tipo"})
-            tabla["Estado"] = df_u["password"].apply(
-                lambda v: "🔒 Hasheada (segura)" if _es_hash_bcrypt(str(v)) else "⚠️ Texto plano (pendiente de migrar)"
-            )
+            tabla["Estado"] = [
+                ("🕓 Pendiente de 1er cambio" if str(dcp).strip().upper() == "SI"
+                 else ("🔒 Hasheada (segura)" if _es_hash_bcrypt(str(pw)) else "⚠️ Texto plano (pendiente de migrar)"))
+                for pw, dcp in zip(df_u["password"], df_u.get("debe_cambiar_password", ["NO"] * len(df_u)))
+            ]
             st.dataframe(tabla, use_container_width=True, hide_index=True)
 
-            st.markdown("#### Resetear una contraseña")
+            st.markdown("#### 🔁 Resetear una contraseña")
             usuario_reset = st.selectbox(
                 "Usuario", options=df_u["usuario"].astype(str).tolist(), key="select_usuario_reset_pw"
             )
-            nueva_pw_reset = st.text_input(
-                "Nueva contraseña temporal", type="password", key="input_nueva_pw_reset",
-                help="Compártela con el usuario por un canal seguro (no email sin cifrar). Que la cambie él mismo en cuanto entre.",
-            )
-            if st.button("Resetear contraseña", key="btn_resetear_pw") and usuario_reset and nueva_pw_reset:
-                if len(nueva_pw_reset) < 6:
-                    st.error("La nueva contraseña debe tener al menos 6 caracteres.")
-                else:
-                    idx = df_u[df_u["usuario"].astype(str) == usuario_reset].index
-                    df_u.loc[idx, "password"] = _hash_password(nueva_pw_reset)
-                    exito, mensaje = _guardar_hoja_usuarios(df_u)
-                    if exito:
-                        st.success(f"✅ Contraseña de {usuario_reset} reseteada. {mensaje}")
+            tipo_reset = df_u.loc[df_u["usuario"].astype(str) == usuario_reset, "tipo_usuario"].iloc[0] if usuario_reset else ""
+
+            tab_reset_email, tab_reset_manual = st.tabs(["📧 Enviar por email (recomendado)", "✍️ Manual (respaldo)"])
+            with tab_reset_email:
+                st.caption("Genera una contraseña temporal aleatoria, la envía por email y obliga a cambiarla en el próximo login. Nadie ve la contraseña en pantalla.")
+                email_reset = st.text_input("Email de destino", key="input_email_reset")
+                if st.button("Generar y enviar nueva contraseña", key="btn_resetear_pw_email") and usuario_reset:
+                    if not _email_configurado:
+                        st.error("Configura el email de envío (Secrets → [email]) antes de usar esta opción.")
+                    elif not email_reset or "@" not in email_reset:
+                        st.error("Introduce un email válido.")
                     else:
-                        st.warning(f"⚠️ Reseteada localmente. {mensaje}")
+                        password_temp = _generar_password_temporal()
+                        idx = df_u[
+                            (df_u["usuario"].astype(str) == usuario_reset)
+                            & (df_u["tipo_usuario"].astype(str) == tipo_reset)
+                        ].index
+                        if "debe_cambiar_password" not in df_u.columns:
+                            df_u["debe_cambiar_password"] = "NO"
+                        df_u.loc[idx, "password"] = _hash_password(password_temp)
+                        df_u.loc[idx, "debe_cambiar_password"] = "SI"
+                        exito, mensaje = _guardar_hoja_usuarios(df_u)
+                        if exito:
+                            env_ok, env_msg = enviar_email_credenciales_nuevas(
+                                email_reset, usuario_reset, password_temp, tipo_reset,
+                                _smtp_sender_u, _smtp_password_u, _display_name_u,
+                            )
+                            if env_ok:
+                                st.success(f"✅ Contraseña temporal de {usuario_reset} enviada a {email_reset}.")
+                            else:
+                                st.error(f"Se reseteó, pero el email falló: {env_msg}. Vuelve a resetear cuando el email funcione.")
+                        else:
+                            st.warning(f"⚠️ Reseteada localmente. {mensaje}")
+            with tab_reset_manual:
+                st.caption("Úsalo solo si el envío por email no funciona. Tú eliges y ves la contraseña — comunícasela al usuario por un canal seguro (nunca email sin cifrar).")
+                nueva_pw_reset = st.text_input(
+                    "Nueva contraseña temporal", type="password", key="input_nueva_pw_reset",
+                )
+                if st.button("Resetear contraseña manualmente", key="btn_resetear_pw") and usuario_reset and nueva_pw_reset:
+                    if len(nueva_pw_reset) < 6:
+                        st.error("La nueva contraseña debe tener al menos 6 caracteres.")
+                    else:
+                        idx = df_u[
+                            (df_u["usuario"].astype(str) == usuario_reset)
+                            & (df_u["tipo_usuario"].astype(str) == tipo_reset)
+                        ].index
+                        if "debe_cambiar_password" not in df_u.columns:
+                            df_u["debe_cambiar_password"] = "NO"
+                        df_u.loc[idx, "password"] = _hash_password(nueva_pw_reset)
+                        df_u.loc[idx, "debe_cambiar_password"] = "SI"
+                        exito, mensaje = _guardar_hoja_usuarios(df_u)
+                        if exito:
+                            st.success(f"✅ Contraseña de {usuario_reset} reseteada. {mensaje}")
+                        else:
+                            st.warning(f"⚠️ Reseteada localmente. {mensaje}")
 
         if st.button("🔄 Recargar desde Drive", key="btn_recargar_usuarios"):
             st.cache_data.clear()
