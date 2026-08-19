@@ -1479,6 +1479,12 @@ def seccion_configurar_totp(usuario_actual: str, tipo: str):
     relojes, solo reutiliza el email que ya recibe extractos."""
     activo = _2fa_activo(usuario_actual, tipo)
     with st.sidebar.expander(f"🔐 Verificación en dos pasos ({'activada' if activo else 'desactivada'})"):
+        # Blindaje: si el usuario todavía no tiene fila propia en la hoja USUARIOS (nunca ha
+        # cambiado su contraseña desde el portal), no dejamos activar el 2FA — guardarlo no
+        # tendría dónde persistir de forma fiable. Se lo decimos claro en vez de fallar silencioso.
+        if not activo and _fila_usuario(_leer_hoja_usuarios(), usuario_actual, tipo) is None:
+            st.info("Antes de activar esto, cambia tu contraseña arriba en '🔑 Cambiar mi contraseña' (aunque sea por la misma). Así se crea tu perfil y el 2FA queda guardado de forma fiable.")
+            return
         if activo:
             email_actual = _2fa_email_de(usuario_actual, tipo)
             st.success(f"Activada. Se te enviará un código a **{email_actual}** al iniciar sesión.")
