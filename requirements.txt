@@ -15,5 +15,3 @@ google-auth
 pypdf
 python-pptx
 bcrypt
-pyotp
-qrcode
