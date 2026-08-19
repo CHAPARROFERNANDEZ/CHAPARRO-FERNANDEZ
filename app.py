@@ -1762,8 +1762,9 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     if str(st.session_state.usuario).strip().upper() != "DEMO":
         formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
-    # Verificación en dos pasos por email: equipo interno (admin) + Eva Chaparro como inversora piloto.
-    if st.session_state.tipo_usuario == "admin" or str(st.session_state.usuario).strip().upper() == "EVA CHAPARRO":
+    # Verificación en dos pasos por email: equipo interno (admin) + inversores piloto autorizados.
+    INVERSORES_CON_2FA = {"EVA CHAPARRO", "JORDI CHAPARRO", "PEDRO MAGAÑA"}
+    if st.session_state.tipo_usuario == "admin" or str(st.session_state.usuario).strip().upper() in INVERSORES_CON_2FA:
         seccion_configurar_totp(st.session_state.usuario, st.session_state.tipo_usuario)
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.autenticado = False
@@ -2626,6 +2627,8 @@ def _construir_datos_demo_inversor():
 # SIEMPRE primero su propia información — esto solo añade acceso extra, nunca lo quita.
 INVERSORES_ADICIONALES_VISIBLES = {
     "EVA CHAPARRO": ["JEP"],
+    "JORDI CHAPARRO": ["PAM", "2012 JACC GROUP", "JR REAL ESTATE", "JORDI ESPECIAL"],
+    "PEDRO MAGAÑA": ["PAM", "2012 JACC GROUP"],
 }
 
 
