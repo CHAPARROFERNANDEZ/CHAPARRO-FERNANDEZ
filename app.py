@@ -13291,7 +13291,7 @@ def seccion_asistente_ia_fondo():
             st.rerun()
 
 
-
+if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `streamlit run`, no al importar
     # ── Portal de inversor: acceso limitado, se corta aquí antes del menú de administración ──
     if st.session_state.get("tipo_usuario") == "inversor":
         seccion_portal_inversor(st.session_state.usuario)
