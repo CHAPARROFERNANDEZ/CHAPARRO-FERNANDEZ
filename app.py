@@ -1850,10 +1850,43 @@ def aplicar_filtro_chaparro_fernandez(df: pd.DataFrame, incluir_chaparro: bool) 
 
 
 def descargar_excel_desde_drive():
-    """Descarga el Excel desde Google Sheets y lo guarda localmente."""
+    """Descarga el Excel desde Google Sheets y lo guarda localmente.
+
+    Intenta primero por la API autenticada de Drive (con la cuenta de servicio) — no depende del
+    enlace público de exportación, que puede ralentizarse o limitarse tras muchas descargas
+    seguidas en poco tiempo. Si no hay credenciales configuradas o falla, cae al enlace público
+    como respaldo, con un timeout corto para no dejar la app colgada esperando indefinidamente.
+    """
+    if "gcp_service_account" in st.secrets:
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaIoBaseDownload
+            import io as _io_dl
+
+            credenciales = service_account.Credentials.from_service_account_info(
+                dict(st.secrets["gcp_service_account"]),
+                scopes=["https://www.googleapis.com/auth/drive.readonly"],
+            )
+            servicio = build("drive", "v3", credentials=credenciales)
+            request = servicio.files().export_media(
+                fileId=GDRIVE_FILE_ID,
+                mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            buffer = _io_dl.BytesIO()
+            downloader = MediaIoBaseDownload(buffer, request)
+            done = False
+            while not done:
+                _status, done = downloader.next_chunk(num_retries=1)
+            with open(ARCHIVO, "wb") as f:
+                f.write(buffer.getvalue())
+            return True
+        except Exception:
+            pass  # sin credenciales válidas o fallo puntual: caemos al enlace público de abajo
+
     try:
         url = f"https://docs.google.com/spreadsheets/d/{GDRIVE_FILE_ID}/export?format=xlsx"
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=12)
         if response.status_code == 200:
             with open(ARCHIVO, "wb") as f:
                 f.write(response.content)
@@ -11000,8 +11033,25 @@ if __name__ == "__main__":  # carga inicial + hero: solo se ejecuta con `streaml
     tag_sesion = st.session_state.usuario + (" (Portal de inversor)" if st.session_state.get("tipo_usuario") == "inversor" else "")
     mostrar_hero(tag_sesion)
 
+    # Límite de tiempo DURO a la carga inicial de datos: si algo se queda colgado (red, Drive,
+    # lo que sea), la app NUNCA se queda en blanco indefinidamente — pasados 15s se corta y se
+    # muestra un aviso claro con un botón para reintentar, en vez de una pantalla vacía.
+    import concurrent.futures as _cf
     try:
-        df_inv, df_cal, df_control = cargar_excel_completo()
+        with st.spinner("Cargando datos del fondo..."):
+            with _cf.ThreadPoolExecutor(max_workers=1) as _executor:
+                _future = _executor.submit(cargar_excel_completo)
+                df_inv, df_cal, df_control = _future.result(timeout=15)
+    except _cf.TimeoutError:
+        st.error(
+            "⏱️ La carga de datos está tardando demasiado (más de 15 segundos) y se ha cortado "
+            "para no dejarte con la pantalla en blanco. Puede ser un problema temporal de conexión "
+            "con Google Drive. Pulsa el botón de abajo para reintentar."
+        )
+        if st.button("🔄 Reintentar"):
+            st.cache_data.clear()
+            st.rerun()
+        st.stop()
     except Exception as e:
         st.error("No se ha podido cargar inversiones.xlsx. Revisa que el archivo esté subido a GitHub y que las hojas existan.")
         with st.expander("Ver detalle técnico"):
