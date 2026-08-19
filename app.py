@@ -13221,76 +13221,6 @@ def seccion_asistente_ia_fondo():
             st.session_state["chat_ia_cf"] = []
             st.rerun()
 
-def seccion_base_datos():
-    """Panel de administración de la base de datos Postgres — permite ejecutar SQL directamente
-    desde la app, con las mismas salvaguardas que el resto de zonas sensibles (solo Yuri, sesión
-    autenticada). Pensado para ir sustituyendo poco a poco la dependencia del Excel."""
-    st.subheader("🗄️ Base de datos (Postgres)")
-    st.caption(
-        "Ejecuta SQL directamente contra la base de datos del fondo. Las tablas 'excel_*' son "
-        "espejos automáticos de las hojas del Excel (se actualizan solas en cada despliegue); "
-        "'usuarios' es la tabla que ya usa la app para el login."
-    )
-
-    database_url = os.environ.get("DATABASE_URL", "")
-    if not database_url:
-        st.error("No hay DATABASE_URL configurada en este entorno — la base de datos no está conectada a esta app.")
-        return
-
-    try:
-        from sqlalchemy import create_engine, text as _sql_text
-        url_sqlalchemy = database_url
-        if url_sqlalchemy.startswith("postgres://"):
-            url_sqlalchemy = url_sqlalchemy.replace("postgres://", "postgresql+psycopg2://", 1)
-        elif url_sqlalchemy.startswith("postgresql://") and "+psycopg2" not in url_sqlalchemy:
-            url_sqlalchemy = url_sqlalchemy.replace("postgresql://", "postgresql+psycopg2://", 1)
-        engine = create_engine(url_sqlalchemy, pool_pre_ping=True)
-    except Exception as e:
-        st.error(f"No se pudo preparar la conexión: {e}")
-        return
-
-    with st.expander("📋 Ver tablas disponibles", expanded=False):
-        try:
-            with engine.connect() as conn:
-                tablas = conn.execute(_sql_text(
-                    "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
-                )).fetchall()
-            st.write([t[0] for t in tablas])
-        except Exception as e:
-            st.error(f"No se pudieron listar las tablas: {e}")
-
-    sql = st.text_area(
-        "Consulta SQL",
-        height=160,
-        placeholder="SELECT * FROM excel_inversiones LIMIT 20;",
-        key="input_sql_admin",
-    )
-    es_consulta_lectura = sql.strip().lower().startswith("select")
-    if not es_consulta_lectura and sql.strip():
-        st.warning(
-            "⚠️ Esto NO es un SELECT — va a modificar datos de verdad (INSERT/UPDATE/DELETE/DROP...). "
-            "Revisa bien la consulta antes de ejecutar."
-        )
-        confirmar_escritura = st.checkbox("Sé lo que hago, ejecutar de todas formas", key="check_sql_confirmar")
-    else:
-        confirmar_escritura = True
-
-    if st.button("▶️ Ejecutar", key="btn_ejecutar_sql", disabled=(not sql.strip() or not confirmar_escritura)):
-        try:
-            with engine.begin() as conn:
-                resultado = conn.execute(_sql_text(sql))
-                if resultado.returns_rows:
-                    filas = resultado.fetchall()
-                    columnas = list(resultado.keys())
-                    df_resultado = pd.DataFrame(filas, columns=columnas)
-                    st.success(f"✅ {len(df_resultado)} fila(s) devuelta(s).")
-                    st.dataframe(df_resultado, use_container_width=True)
-                    boton_descarga_excel(df_resultado, "resultado_sql.xlsx")
-                else:
-                    st.success(f"✅ Ejecutado correctamente. Filas afectadas: {resultado.rowcount}")
-        except Exception as e:
-            st.error(f"❌ Error al ejecutar: {e}")
-
 
 
     # ── Portal de inversor: acceso limitado, se corta aquí antes del menú de administración ──
@@ -13311,7 +13241,6 @@ def seccion_base_datos():
         menu_opciones.insert(6, "➕ Nueva inversión")
         menu_opciones.insert(7, "📊 Uso IA")
         menu_opciones.insert(8, "💰 Gastos")
-        menu_opciones.insert(9, "🗄️ Base de datos")
 
     menu = st.sidebar.selectbox("Menú principal", menu_opciones)
 
@@ -13336,8 +13265,6 @@ def seccion_base_datos():
         seccion_uso_ia()
     elif menu == "💰 Gastos" and _es_yuri:
         seccion_gastos_plataforma()
-    elif menu == "🗄️ Base de datos" and _es_yuri:
-        seccion_base_datos()
     elif menu == "🏦 Deuda Jordi Chaparro":
         seccion_deuda_jordi()
     elif menu == "✨ Asistente IA":
