@@ -15,3 +15,5 @@ google-auth
 pypdf
 python-pptx
 bcrypt
+sqlalchemy
+psycopg2-binary
