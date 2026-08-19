@@ -5487,7 +5487,11 @@ def dashboard_financiero():
             anio_dashboard,
             mes_dashboard,
         )
-        mostrar_cobros_semanales_dashboard(df_inv_calculo, df_cal, df_control, anio_dashboard, mes_dashboard)
+        # El cobro de notas es dinero que entra a la empresa (venga o no de una posición de
+        # Chaparro Fernández) — por eso aquí SIEMPRE se usa el dataframe completo (df_inv),
+        # sin aplicar el filtro del checkbox. El checkbox "Incluir Chaparro Fernández" solo debe
+        # afectar al capital activo, pagos y beneficio mostrados en las tarjetas de arriba.
+        mostrar_cobros_semanales_dashboard(df_inv, df_cal, df_control, anio_dashboard, mes_dashboard)
 
     mostrar_rentabilidad_por_activo_dashboard(resumen.get("rentabilidad_por_activo", pd.DataFrame()))
 
