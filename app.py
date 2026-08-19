@@ -3,6 +3,7 @@ import json
 import os
 import re
 import smtplib
+import sys
 import ssl
 import zipfile
 from datetime import datetime
@@ -1571,7 +1572,9 @@ def seccion_configurar_totp(usuario_actual: str, tipo: str):
 
 
 if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit run`, no al importar
+    print("[DIAG] 1. Arranca bloque login/sidebar", file=sys.stderr, flush=True)
     aplicar_estilo_profesional()
+    print("[DIAG] 2. Estilo aplicado", file=sys.stderr, flush=True)
 
 
 
@@ -1747,10 +1750,12 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         st.warning("⏱️ Tu sesión ha expirado por seguridad. Vuelve a iniciar sesión.")
         st.stop()
     st.session_state.ultima_actividad = _ahora
+    print("[DIAG] 3. Sesión validada, empieza sidebar autenticado", file=sys.stderr, flush=True)
 
     # ── Cambio obligatorio de contraseña: bloquea el resto de la app hasta que se complete ──
     if st.session_state.get("forzar_cambio_password"):
         formulario_cambio_obligatorio_password(st.session_state.usuario, st.session_state.tipo_usuario)
+    print("[DIAG] 4. Comprobación cambio obligatorio OK", file=sys.stderr, flush=True)
 
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
     if st.session_state.get("mostrar_aviso_pw_temporal"):
@@ -1758,9 +1763,11 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     if str(st.session_state.usuario).strip().upper() != "DEMO":
         formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
+    print("[DIAG] 5. Formulario cambiar contraseña renderizado", file=sys.stderr, flush=True)
     # Verificación en dos pasos por email: disponible para todo el equipo interno (admin).
     if st.session_state.tipo_usuario == "admin":
         seccion_configurar_totp(st.session_state.usuario, st.session_state.tipo_usuario)
+    print("[DIAG] 6. Panel 2FA renderizado — sidebar completo", file=sys.stderr, flush=True)
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.autenticado = False
         st.session_state.usuario = None
@@ -11030,8 +11037,10 @@ def seccion_gestion_excel():
 # APP FINAL
 # =========================
 if __name__ == "__main__":  # carga inicial + hero: solo se ejecuta con `streamlit run`, no al importar
+    print("[DIAG] 7. Arranca bloque carga inicial + hero", file=sys.stderr, flush=True)
     tag_sesion = st.session_state.usuario + (" (Portal de inversor)" if st.session_state.get("tipo_usuario") == "inversor" else "")
     mostrar_hero(tag_sesion)
+    print("[DIAG] 8. Hero renderizado, empieza carga de datos", file=sys.stderr, flush=True)
 
     # Límite de tiempo DURO a la carga inicial de datos: si algo se queda colgado (red, Drive,
     # lo que sea), la app NUNCA se queda en blanco indefinidamente — pasados 15s se corta y se
@@ -11044,10 +11053,13 @@ if __name__ == "__main__":  # carga inicial + hero: solo se ejecuta con `streaml
     _executor_carga = _cf.ThreadPoolExecutor(max_workers=1)
     try:
         with st.spinner("Cargando datos del fondo..."):
+            print("[DIAG] 9. Lanzando cargar_excel_completo en hilo aparte", file=sys.stderr, flush=True)
             _future = _executor_carga.submit(cargar_excel_completo)
             df_inv, df_cal, df_control = _future.result(timeout=15)
+        print("[DIAG] 10. cargar_excel_completo TERMINÓ BIEN", file=sys.stderr, flush=True)
         _executor_carga.shutdown(wait=False)
     except _cf.TimeoutError:
+        print("[DIAG] 10b. TIMEOUT de 15s disparado correctamente", file=sys.stderr, flush=True)
         _executor_carga.shutdown(wait=False)
         st.error(
             "⏱️ La carga de datos está tardando demasiado (más de 15 segundos) y se ha cortado "
