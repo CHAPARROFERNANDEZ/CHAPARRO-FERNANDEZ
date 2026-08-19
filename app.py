@@ -11036,13 +11036,19 @@ if __name__ == "__main__":  # carga inicial + hero: solo se ejecuta con `streaml
     # Límite de tiempo DURO a la carga inicial de datos: si algo se queda colgado (red, Drive,
     # lo que sea), la app NUNCA se queda en blanco indefinidamente — pasados 15s se corta y se
     # muestra un aviso claro con un botón para reintentar, en vez de una pantalla vacía.
+    # IMPORTANTE: el executor se crea SIN 'with' — un 'with' espera (bloquea) a que el hilo de
+    # fondo termine de verdad antes de dejar continuar el código, aunque ya hayamos detectado el
+    # timeout, lo que anulaba por completo el límite de 15s. Así, en cuanto salta el timeout,
+    # seguimos adelante inmediatamente y dejamos el hilo colgado morir solo en segundo plano.
     import concurrent.futures as _cf
+    _executor_carga = _cf.ThreadPoolExecutor(max_workers=1)
     try:
         with st.spinner("Cargando datos del fondo..."):
-            with _cf.ThreadPoolExecutor(max_workers=1) as _executor:
-                _future = _executor.submit(cargar_excel_completo)
-                df_inv, df_cal, df_control = _future.result(timeout=15)
+            _future = _executor_carga.submit(cargar_excel_completo)
+            df_inv, df_cal, df_control = _future.result(timeout=15)
+        _executor_carga.shutdown(wait=False)
     except _cf.TimeoutError:
+        _executor_carga.shutdown(wait=False)
         st.error(
             "⏱️ La carga de datos está tardando demasiado (más de 15 segundos) y se ha cortado "
             "para no dejarte con la pantalla en blanco. Puede ser un problema temporal de conexión "
@@ -11053,6 +11059,7 @@ if __name__ == "__main__":  # carga inicial + hero: solo se ejecuta con `streaml
             st.rerun()
         st.stop()
     except Exception as e:
+        _executor_carga.shutdown(wait=False)
         st.error("No se ha podido cargar inversiones.xlsx. Revisa que el archivo esté subido a GitHub y que las hojas existan.")
         with st.expander("Ver detalle técnico"):
             st.exception(e)
