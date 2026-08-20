@@ -6740,12 +6740,22 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
 
     numero_nota = int(st.number_input("Número de nota (ej. 28)", min_value=1, max_value=999, step=1, key="nueva_nota_numero"))
 
-    # Si no está en memoria de esta sesión, intenta recuperar el borrador persistente
-    # (sobrevive a reinicios de la app, actualizaciones de código, etc.)
+    # A diferencia de antes, YA NO se carga solo un borrador guardado de un intento anterior —
+    # se avisa y se deja elegir, para no arrancar con datos de otra sesión sin darte cuenta.
     if numero_nota not in almacen:
-        borrador = cargar_borrador_nota("nueva", numero_nota)
-        if borrador:
-            almacen[numero_nota] = borrador
+        borrador_disponible = cargar_borrador_nota("nueva", numero_nota)
+        if borrador_disponible:
+            st.info(f"📂 Hay un borrador guardado de un intento anterior para la Nota {numero_nota}.")
+            col_cargar, col_ignorar = st.columns(2)
+            with col_cargar:
+                if st.button(f"📂 Cargar ese borrador", key=f"cargar_borrador_nota_{numero_nota}"):
+                    almacen[numero_nota] = borrador_disponible
+                    st.rerun()
+            with col_ignorar:
+                if st.button("🗑️ Ignorarlo y empezar en blanco", key=f"ignorar_borrador_nota_{numero_nota}"):
+                    borrar_borrador_nota("nueva", numero_nota)
+                    st.rerun()
+            return
 
     extraido_guardado = almacen.get(numero_nota)
 
@@ -11597,7 +11607,7 @@ def _sugerir_fecha_inicio_nota(numero_nota: int, df_cal: pd.DataFrame):
     if not fechas_pago:
         try:
             almacen_notas = st.session_state.get("notas_wizard_datos", {})
-            extraido = almacen_notas.get(numero_nota) or cargar_borrador_nota("nueva", numero_nota)
+            extraido = almacen_notas.get(numero_nota)
             if extraido and extraido.get("calendario"):
                 fechas_pago = sorted(pd.to_datetime(
                     [e.get("pago") for e in extraido["calendario"] if e.get("pago") and str(e.get("pago")).strip().upper() != "REVISAR"],
