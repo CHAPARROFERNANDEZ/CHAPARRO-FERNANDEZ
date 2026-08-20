@@ -6991,6 +6991,11 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
                 id_inv_nota_i = st.text_input("id_inversion (ej. OP005)", key=f"nota_inv_id_{numero_nota}_{i}")
             with c5:
                 email_inv_i = st.text_input("email (opcional)", key=f"nota_inv_email_{numero_nota}_{i}")
+            cuenta_cobro_i = st.selectbox(
+                "¿En qué cuenta se cobra esta nota?", ["COMPAÑÍA", "JORDI"],
+                key=f"nota_inv_cuenta_cobro_{numero_nota}_{i}",
+                help="COMPAÑÍA: el cobro de esta nota entra en las cuentas del fondo. JORDI: entra en la cuenta personal de Jordi (afecta a la deuda con Jordi).",
+            )
 
             if st.session_state[clave_num_inv_nota] > 1:
                 if st.button(f"🗑️ Quitar inversor #{i + 1}", key=f"nota_inv_quitar_{numero_nota}_{i}"):
@@ -7000,10 +7005,10 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
             filas_inversores_nota.append({
                 "id_inversion": id_inv_nota_i, "inversor": inv_final, "tipo_inversion": "nota",
                 "subtipo_inversion": "ESTRUCTURADA", "nombre_activo": f"NOTA_{int(numero_nota):02d}",
-                "metodo_calculo": "NOTA", "cuenta_cobro": "", "activo_generador_interes": "SI",
+                "metodo_calculo": "NOTA", "cuenta_cobro": cuenta_cobro_i, "activo_generador_interes": "SI",
                 "fecha_inversion": str(valor_fecha_inicio_inv), "fecha_final_inversion": "", "motivo": "",
                 "capital_invertido": capital_inv_i,
-                "interes_nota_anual": round(float(extraido.get("cupon_anual_pct") or 0) / 100.0, 6) if str(extraido.get("cupon_anual_pct", "")).strip().upper() != "REVISAR" else 0,
+                "interes_nota_anual": round(float(extraido.get("cupon_anual_pct") or 0), 6) if str(extraido.get("cupon_anual_pct", "")).strip().upper() != "REVISAR" else 0,
                 "interes_inversor_anual": round(tasa_inv_nota_i / 100.0, 6),
                 "tipo_operacion": "NUEVA", "id_inversion_origen": "", "capital_nuevo_real": "si",
                 "email": email_inv_i, "pago_intereses": "reinvierte",
