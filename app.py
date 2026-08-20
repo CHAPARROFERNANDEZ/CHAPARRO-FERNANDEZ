@@ -6742,7 +6742,14 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
 
     # A diferencia de antes, YA NO se carga solo un borrador guardado de un intento anterior —
     # se avisa y se deja elegir, para no arrancar con datos de otra sesión sin darte cuenta.
-    if numero_nota not in almacen:
+    # "Ignorarlo" NO toca el Excel (a propósito): solo lo recuerda en esta sesión (session_state),
+    # para que funcione bien incluso sin credenciales de Drive configuradas — si borráramos el
+    # borrador del Excel aquí, la siguiente recarga automática desde Drive lo volvería a traer.
+    if "notas_borradores_ignorados" not in st.session_state:
+        st.session_state["notas_borradores_ignorados"] = set()
+    borradores_ignorados = st.session_state["notas_borradores_ignorados"]
+
+    if numero_nota not in almacen and numero_nota not in borradores_ignorados:
         borrador_disponible = cargar_borrador_nota("nueva", numero_nota)
         if borrador_disponible:
             st.info(f"📂 Hay un borrador guardado de un intento anterior para la Nota {numero_nota}.")
@@ -6753,7 +6760,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
                     st.rerun()
             with col_ignorar:
                 if st.button("🗑️ Ignorarlo y empezar en blanco", key=f"ignorar_borrador_nota_{numero_nota}"):
-                    borrar_borrador_nota("nueva", numero_nota)
+                    borradores_ignorados.add(numero_nota)
                     st.rerun()
             return
 
