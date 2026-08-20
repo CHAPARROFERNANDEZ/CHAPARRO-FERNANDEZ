@@ -7059,23 +7059,38 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
                     else:
                         mapa_inv = _mapa_columnas_reales(hojas, "INVERSIONES")
                         if not mapa_inv:
-                            st.warning("⚠️ No se pudo determinar el nombre real de las columnas de INVERSIONES — registra los inversores a mano desde '➕ Nueva inversión'.")
-                        else:
-                            filas_reales_inv = []
-                            columnas_faltantes_inv = set()
-                            for fila_logica in filas_inv_validas:
-                                fila_real = {}
-                                for clave_logica, valor in fila_logica.items():
-                                    col_real = mapa_inv.get(clave_logica)
-                                    if col_real:
-                                        fila_real[col_real] = valor
-                                    else:
-                                        columnas_faltantes_inv.add(clave_logica)
-                                filas_reales_inv.append(fila_real)
-                            hojas["INVERSIONES"] = pd.concat([hojas["INVERSIONES"], pd.DataFrame(filas_reales_inv)], ignore_index=True)
-                            mensaje_inversores = f" y {len(filas_reales_inv)} inversor(es) en INVERSIONES"
-                            if columnas_faltantes_inv:
-                                st.warning(f"⚠️ Estas columnas no existen tal cual en INVERSIONES y no se escribieron: {', '.join(sorted(columnas_faltantes_inv))}.")
+                            # Plan B: las columnas reales de INVERSIONES ya son minúsculas/snake_case
+                            # (confirmado en el propio Excel) — usamos esos nombres directamente en
+                            # vez de depender de la detección automática, que aquí está fallando.
+                            _df_inv_diag = hojas.get("INVERSIONES")
+                            with st.expander("🔍 Detalle técnico (para diagnosticar más adelante)"):
+                                if _df_inv_diag is None:
+                                    st.write("hojas['INVERSIONES'] es None.")
+                                else:
+                                    st.write(f"Tipo: {type(_df_inv_diag)}")
+                                    st.write(f"Forma (filas, columnas): {getattr(_df_inv_diag, 'shape', 'sin atributo shape')}")
+                                    st.write(f"Columnas encontradas: {list(getattr(_df_inv_diag, 'columns', []))}")
+                            columnas_esperadas = ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion",
+                                                   "nombre_activo", "metodo_calculo", "cuenta_cobro", "activo_generador_interes",
+                                                   "fecha_inversion", "fecha_final_inversion", "motivo", "capital_invertido",
+                                                   "interes_nota_anual", "interes_inversor_anual", "tipo_operacion",
+                                                   "id_inversion_origen", "capital_nuevo_real", "email", "pago_intereses"]
+                            mapa_inv = {c: c for c in columnas_esperadas}
+                        filas_reales_inv = []
+                        columnas_faltantes_inv = set()
+                        for fila_logica in filas_inv_validas:
+                            fila_real = {}
+                            for clave_logica, valor in fila_logica.items():
+                                col_real = mapa_inv.get(clave_logica)
+                                if col_real:
+                                    fila_real[col_real] = valor
+                                else:
+                                    columnas_faltantes_inv.add(clave_logica)
+                            filas_reales_inv.append(fila_real)
+                        hojas["INVERSIONES"] = pd.concat([hojas["INVERSIONES"], pd.DataFrame(filas_reales_inv)], ignore_index=True)
+                        mensaje_inversores = f" y {len(filas_reales_inv)} inversor(es) en INVERSIONES"
+                        if columnas_faltantes_inv:
+                            st.warning(f"⚠️ Estas columnas no existen tal cual en INVERSIONES y no se escribieron: {', '.join(sorted(columnas_faltantes_inv))}.")
 
                 guardar_excel_completo_desde_hojas(hojas)
 
