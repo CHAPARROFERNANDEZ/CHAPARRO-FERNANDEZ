@@ -9059,14 +9059,11 @@ def seccion_notas_archivo():
         df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
 
-    tab_resumen, tab_nueva, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings = st.tabs([
-        "📊 Resumen y alertas", "➕ Añadir nota nueva",
+    tab_resumen, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings = st.tabs([
+        "📊 Resumen y alertas",
         "🏢 Ficha de compañía", "🔬 Análisis completo de nota", "⚖️ Comparador de notas",
         "📰 Noticias", "📅 Calendario earnings",
     ])
-
-    with tab_nueva:
-        _tab_añadir_nota_nueva(df_control, df_cal, df_calls)
 
     with tab_ficha:
         _tab_ficha_compania(df_control)
@@ -11665,7 +11662,7 @@ def _sugerir_fecha_inicio_nota(numero_nota: int, df_cal: pd.DataFrame):
     completo (1 mes si el cobro es mensual, 3 meses si es trimestral, etc. — no siempre 1 mes fijo).
     Busca primero en CALENDARIO_NOTAS ya guardado; si la nota todavía no está guardada (se está dando
     de alta a la vez que su inversión), busca en el borrador de extracción de IA de esa misma nota
-    en la pestaña 'Notas estructuradas → Añadir nota nueva' (en sesión o persistido en Drive).
+    en '➕ Nueva inversión' (en sesión o persistido en Drive).
     Devuelve (fecha_sugerida: pd.Timestamp|None, periodicidad_meses: int, fuente: str)."""
     fechas_pago = []
     fuente = ""
@@ -11690,7 +11687,7 @@ def _sugerir_fecha_inicio_nota(numero_nota: int, df_cal: pd.DataFrame):
                     errors="coerce",
                 ).dropna().tolist())
                 if fechas_pago:
-                    fuente = "borrador de extracción de IA de la nota (pestaña Notas estructuradas → Añadir nota nueva)"
+                    fuente = "borrador de extracción de IA de la nota (➕ Nueva inversión)"
         except Exception:
             pass
 
@@ -11923,6 +11920,12 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         )
         tipo_inversion_final = st.text_input("Escribe el tipo de inversión", key="ni_tipo_inv_libre") if tipo_inversion_sel == "otro" else tipo_inversion_sel
     es_nota = tipo_inversion_final.strip().lower() == "nota"
+
+    if tipo_operacion == "NUEVA" and es_nota:
+        st.info("📄 Nota nueva: sube el PDF y se rellena todo junto — datos de la nota **e** inversor(es), en un único guardado.")
+        df_calls_para_nota = _leer_calendario_calls_cached()
+        _tab_añadir_nota_nueva(df_control, df_cal, df_calls_para_nota)
+        return
 
     fecha_sugerida_nota, periodicidad_sugerida_nota, fuente_sugerencia_nota = None, 1, ""
 
@@ -13244,7 +13247,7 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
             lineas_borradores.append("\n=== NOTAS EN BORRADOR — EXTRAÍDAS POR IA EN EL WIZARD, TODAVÍA NO GUARDADAS EN CONTROL_NOTAS ===")
             lineas_borradores.append(
                 "(IMPORTANTE: esto NO son posiciones activas ni confirmadas — es una extracción de un PDF que "
-                "Yuri está revisando en 'Notas estructuradas → Añadir nota nueva / Auditar nota existente'. "
+                "Yuri está revisando en '➕ Nueva inversión' o en 'Notas → Análisis completo de nota'. "
                 "Si te pregunta por una de estas notas, acláraselo explícitamente ('esto es un borrador, aún no "
                 "guardado') y avisa de que puede haber campos marcados como REVISAR pendientes de corregir. "
                 "NUNCA mezcles estos datos con las notas oficiales de CONTROL_NOTAS al calcular capital, cobros "
