@@ -7036,7 +7036,10 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
     except NameError:
         inversores_conocidos_nota = []
 
-    valor_fecha_inicio_inv = fecha_sugerida_nota.date() if fecha_sugerida_nota is not None else pd.Timestamp.today().date()
+    fecha_sugerida_inv, _periodicidad_inv, _fuente_inv = _sugerir_fecha_inicio_nota(int(numero_nota), df_cal)
+    valor_fecha_inicio_inv = fecha_sugerida_inv.date() if fecha_sugerida_inv is not None else pd.Timestamp.today().date()
+    if fecha_sugerida_inv is not None:
+        st.caption(f"📌 Fecha de inicio sugerida para la inversión: **{fecha_sugerida_inv.strftime('%d/%m/%Y')}** (primer pago menos 1 periodo, de {_fuente_inv}).")
     filas_inversores_nota = []
     for i in range(st.session_state[clave_num_inv_nota]):
         with st.container(border=True):
