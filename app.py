@@ -2292,8 +2292,11 @@ def _guardar_hoja_prestamos_yuri(df_prestamos: pd.DataFrame) -> tuple:
 
 def resumen_prestamos_yuri() -> dict:
     """Consolida todos los tramos de PRESTAMOS_YURI: saldo pendiente total, calendario completo
-    y el margen (spread) que gana la empresa cada mes = interés que paga Yuri − interés que
-    recibe el inversor de ese tramo."""
+    y el margen que gana la empresa cada mes. Para la empresa, lo que cuenta como ingreso es la
+    CUOTA COMPLETA que paga Yuri cada mes (capital + interés juntos, sin separar) — la empresa
+    recibe ese dinero íntegro, indistintamente de qué parte sea interés o devolución de capital.
+    Al inversor que financia el tramo se le paga siempre lo mismo (fijo, sobre su capital
+    nominal), así que el margen de la empresa cada mes es simplemente: cuota − pago fijo al inversor."""
     df_tramos = _leer_hoja_prestamos_yuri()
     if df_tramos.empty:
         return {"df_tramos": df_tramos, "capital_total_prestado": 0.0, "saldo_pendiente_total": 0.0,
@@ -2309,8 +2312,10 @@ def resumen_prestamos_yuri() -> dict:
         cal["tramo_id"] = tramo.get("tramo_id", "")
         cal["inversor"] = tramo.get("inversor", "")
         tasa_inv_mensual = float(tramo["tasa_anual_inversor"]) / 12
-        cal["interes_pagado_inversor"] = float(tramo["principal"]) * tasa_inv_mensual
-        cal["margen_empresa_mes"] = cal["interes"] - cal["interes_pagado_inversor"]
+        cal["pago_inversor_mes"] = float(tramo["principal"]) * tasa_inv_mensual
+        # Ingreso de la empresa = la cuota COMPLETA que devuelve Yuri (capital + interés juntos).
+        cal["ingreso_empresa_mes"] = cal["cuota"]
+        cal["margen_empresa_mes"] = cal["ingreso_empresa_mes"] - cal["pago_inversor_mes"]
         calendarios.append(cal)
 
     calendario_completo = pd.concat(calendarios, ignore_index=True) if calendarios else pd.DataFrame()
@@ -2329,6 +2334,21 @@ def resumen_prestamos_yuri() -> dict:
         "saldo_pendiente_total": saldo_pendiente_total,
         "calendario": calendario_completo,
         "hueco_disponible": max(0.0, CAPITAL_MAXIMO_PRESTAMO_YURI - capital_total_prestado),
+    }
+
+
+def ingresos_prestamo_yuri_mes(anio: int, mes: int) -> dict:
+    """Ingreso, pago a inversores y margen del Préstamo Yuri para un mes concreto — para
+    sumarlo a las tarjetas del dashboard general (Cobro estimado / Pago inversores / Beneficio)."""
+    resumen = resumen_prestamos_yuri()
+    cal = resumen["calendario"]
+    if cal.empty:
+        return {"ingreso": 0.0, "pago_inversor": 0.0, "margen": 0.0}
+    cal_mes = cal[(cal["fecha_pago"].dt.year == anio) & (cal["fecha_pago"].dt.month == mes)]
+    return {
+        "ingreso": float(cal_mes["ingreso_empresa_mes"].sum()),
+        "pago_inversor": float(cal_mes["pago_inversor_mes"].sum()),
+        "margen": float(cal_mes["margen_empresa_mes"].sum()),
     }
 
 
@@ -4701,6 +4721,15 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     pago_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
     beneficio_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
 
+    # Préstamo Yuri: caso especial (igual que MotoClick) — su ingreso mensual no sale de una
+    # tasa fija sobre capital constante, sino del calendario real de amortización del préstamo.
+    # El capital del inversor que lo financia ya se cuenta solo (viene de INVERSIONES, con tasa
+    # 0% ahí para no duplicar este ingreso).
+    _prestamo_yuri_mes = ingresos_prestamo_yuri_mes(int(anio), int(mes))
+    cobro_fijos += _prestamo_yuri_mes["ingreso"]
+    pago_fijos += _prestamo_yuri_mes["pago_inversor"]
+    beneficio_fijos += _prestamo_yuri_mes["margen"]
+
     cobro_total_mes = c_notas + cobro_fijos
     pago_total_mes = p_notas + pago_fijos
     beneficio_total_mes = b_notas + beneficio_fijos
@@ -6738,9 +6767,10 @@ def seccion_prestamo_yuri():
                 f"tasa anual del inversor **{tasa_anual_inversor:.2f}%** → fecha de inicio "
                 f"**{pd.Timestamp(fecha_desembolso).strftime('%d/%m/%Y')}** → fecha final "
                 f"**{fecha_fin_estimada.strftime('%d/%m/%Y')}** (fecha estimada de la última cuota — "
-                f"su capital queda fijo hasta entonces). Para la 'tasa anual que rinde el activo para "
-                f"la empresa', puedes dejar el {tasa_anual_deudor:.2f}% — aquí, en este panel, siempre "
-                f"verás el margen REAL mes a mes, que es el que manda."
+                f"su capital queda fijo hasta entonces). ⚠️ **Importante:** en 'tasa anual que rinde "
+                f"el activo para la empresa', pon **0%** — el ingreso real de este préstamo ya lo "
+                f"calcula automáticamente este panel y se suma solo al dashboard general; si pones "
+                f"aquí también un porcentaje, el ingreso se contaría dos veces."
             )
             st.rerun()
 
@@ -6759,20 +6789,22 @@ def seccion_prestamo_yuri():
     st.dataframe(tabla_tramos, use_container_width=True, hide_index=True)
 
     st.markdown("### 📅 Calendario de amortización y margen real")
+    st.caption("El 'ingreso empresa' es la cuota completa que Yuri devuelve cada mes (capital + interés juntos) — para el fondo, cuenta como ingreso todo lo que entra, indistintamente de qué parte sea capital o interés. Al inversor se le paga siempre lo mismo cada mes, sobre su capital fijo.")
     for _, tramo in resumen["df_tramos"].iterrows():
         with st.expander(f"{tramo['tramo_id']} — {tramo['inversor']} — {fmt(tramo['principal'])} desde {pd.Timestamp(tramo['fecha_desembolso']).strftime('%d/%m/%Y')}"):
             cal = calcular_amortizacion_prestamo(tramo["principal"], tramo["tasa_anual_deudor"], tramo["cuota_objetivo"], tramo["fecha_desembolso"])
             tasa_inv_mensual = tramo["tasa_anual_inversor"] / 12
-            cal["interes_pagado_inversor"] = tramo["principal"] * tasa_inv_mensual
-            cal["margen_empresa"] = cal["interes"] - cal["interes_pagado_inversor"]
+            cal["pago_inversor_mes"] = tramo["principal"] * tasa_inv_mensual
+            cal["ingreso_empresa_mes"] = cal["cuota"]
+            cal["margen_empresa_mes"] = cal["ingreso_empresa_mes"] - cal["pago_inversor_mes"]
             tabla_cal = cal.copy()
             tabla_cal["fecha_pago"] = pd.to_datetime(tabla_cal["fecha_pago"]).dt.strftime("%d/%m/%Y")
-            for col in ["saldo_inicial", "cuota", "interes", "principal", "saldo_final", "interes_pagado_inversor", "margen_empresa"]:
+            for col in ["saldo_inicial", "cuota", "interes", "principal", "saldo_final", "ingreso_empresa_mes", "pago_inversor_mes", "margen_empresa_mes"]:
                 tabla_cal[col] = tabla_cal[col].apply(fmt)
             st.dataframe(tabla_cal, use_container_width=True, hide_index=True)
-            margen_total = (cal["interes"] - cal["interes_pagado_inversor"]).sum()
+            margen_total = (cal["ingreso_empresa_mes"] - cal["pago_inversor_mes"]).sum()
             color_margen = "positivo" if margen_total >= 0 else "negativo"
-            st.markdown(f"**Margen total de este tramo para la empresa: {fmt(margen_total)}**" + (" ⚠️ (negativo — la empresa paga más al inversor de lo que recibe de Yuri en este tramo)" if margen_total < 0 else ""))
+            st.markdown(f"**Margen total de este tramo para la empresa: {fmt(margen_total)}**" + (" ⚠️ (negativo)" if margen_total < 0 else ""))
             boton_descarga_excel(cal, f"amortizacion_{tramo['tramo_id']}.xlsx")
 
 
