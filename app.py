@@ -6331,6 +6331,31 @@ REGLAS:
 CARPETA_DATOS = "/data"  # volumen persistente de Railway (mount path: /data)
 CARPETA_FACTURAS = "/data/facturas"
 ARCHIVO_GASTOS_JSON = "/data/gastos_plataforma.json"
+CARPETA_PDFS_NOTAS = "/data/notas_pdfs"
+
+
+def guardar_pdf_nota(numero_nota: int, pdf_bytes: bytes) -> str:
+    """Guarda el PDF oficial de una nota en el volumen persistente de Railway (/data), para
+    poder auditarla más adelante sin tener que volver a pedírselo a nadie. Devuelve la ruta
+    guardada, o cadena vacía si no se pudo guardar (por ejemplo, en local sin volumen montado)."""
+    try:
+        os.makedirs(CARPETA_PDFS_NOTAS, exist_ok=True)
+        ruta = os.path.join(CARPETA_PDFS_NOTAS, f"nota_{int(numero_nota):02d}.pdf")
+        with open(ruta, "wb") as f:
+            f.write(pdf_bytes)
+        return ruta
+    except Exception:
+        return ""
+
+
+def leer_pdf_nota_guardado(numero_nota: int) -> bytes | None:
+    """Lee el PDF guardado de una nota, si existe."""
+    ruta = os.path.join(CARPETA_PDFS_NOTAS, f"nota_{int(numero_nota):02d}.pdf")
+    try:
+        with open(ruta, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
 
 
 def _guardar_pdf_factura(pdf_bytes: bytes, nombre_sugerido: str) -> Optional[str]:
@@ -6811,20 +6836,67 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
         st.info(f"📂 Ya hay datos extraídos guardados para la Nota {numero_nota}. Puedes revisarlos abajo, o subir un PDF nuevo para reemplazarlos.")
 
     pdf_subido = st.file_uploader(f"Documento oficial de la Nota {numero_nota} (PDF)", type=["pdf"], key=f"nueva_nota_pdf_{numero_nota}")
+    verificar_doble = st.checkbox(
+        "🔍 Verificar automáticamente con una segunda lectura independiente (recomendado — tarda un poco más, pero detecta si la IA se confunde en una fecha o una tasa)",
+        value=True, key=f"nueva_nota_doble_lectura_{numero_nota}",
+    )
 
     if st.button("🔎 Extraer datos con IA", type="primary", disabled=pdf_subido is None):
+        pdf_bytes_subido = pdf_subido.read()
         with st.spinner("Leyendo el documento y extrayendo los datos..."):
-            resultado = extraer_datos_nota_con_ia(pdf_subido.read())
+            resultado = extraer_datos_nota_con_ia(pdf_bytes_subido)
         if "error" in resultado:
             st.error(f"No se pudieron extraer los datos: {resultado['error']}")
         else:
             almacen[numero_nota] = resultado
+            almacen_pdfs_notas = st.session_state.setdefault("nota_pdf_bytes", {})
+            almacen_pdfs_notas[numero_nota] = pdf_bytes_subido
+            st.session_state.pop(f"nota_doble_lectura_resultado_{numero_nota}", None)
+            if verificar_doble:
+                with st.spinner("Verificando con una segunda lectura independiente..."):
+                    segundo_resultado = extraer_datos_nota_con_ia(pdf_bytes_subido)
+                if "error" not in segundo_resultado:
+                    st.session_state[f"nota_doble_lectura_resultado_{numero_nota}"] = segundo_resultado
             st.success(f"Datos extraídos para la Nota {numero_nota}. Revisa la previsualización abajo.")
             guardar_borrador_nota("nueva", numero_nota, resultado)
 
     extraido = almacen.get(numero_nota)
     if not extraido:
         return
+
+    # ── Verificación automática: comparar la 1ª lectura contra una 2ª lectura independiente ──
+    segundo = st.session_state.get(f"nota_doble_lectura_resultado_{numero_nota}")
+    if segundo:
+        campos_clave_verificar = [
+            ("emisor", "Emisor"), ("cupon_anual_pct", "Cupón anual (%)"),
+            ("fecha_vencimiento", "Fecha de vencimiento"), ("fecha_inicio_nota", "Fecha de inicio"),
+        ]
+        discrepancias_doble = []
+        for clave_campo, etiqueta in campos_clave_verificar:
+            v1, v2 = extraido.get(clave_campo), segundo.get(clave_campo)
+            if v1 is None and v2 is None:
+                continue
+            if str(v1).strip().upper() != str(v2).strip().upper():
+                discrepancias_doble.append({"Campo": etiqueta, "1ª lectura": v1, "2ª lectura": v2})
+        tickers1 = {str(t.get("ticker", "")).strip().upper(): t for t in extraido.get("tickers", [])}
+        tickers2 = {str(t.get("ticker", "")).strip().upper(): t for t in segundo.get("tickers", [])}
+        for tk in set(tickers1) | set(tickers2):
+            t1, t2 = tickers1.get(tk, {}), tickers2.get(tk, {})
+            for campo_ticker in ["precio_compra", "barrera_cupon", "barrera_capital", "call_level"]:
+                v1, v2 = t1.get(campo_ticker), t2.get(campo_ticker)
+                if v1 is None and v2 is None:
+                    continue
+                if str(v1).strip().upper() != str(v2).strip().upper():
+                    discrepancias_doble.append({"Campo": f"{tk} — {campo_ticker}", "1ª lectura": v1, "2ª lectura": v2})
+        if discrepancias_doble:
+            st.warning(
+                f"⚠️ **La verificación automática detectó {len(discrepancias_doble)} diferencia(s)** entre "
+                "la primera y la segunda lectura del PDF — revísalas con especial cuidado antes de guardar, "
+                "puede que la IA se haya confundido en algún dato:"
+            )
+            st.dataframe(pd.DataFrame(discrepancias_doble), use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ Verificación automática: la segunda lectura coincide con la primera en emisor, cupón, fechas y datos de tickers.")
 
     def _marcar(valor):
         return "⚠️ REVISAR" if (valor is None or str(valor).strip().upper() == "REVISAR") else valor
@@ -6948,6 +7020,62 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
         else:
             st.caption(f"✅ Sin diferencias: coincide con lo que ya había guardado en el Excel para la Nota {numero_nota}.")
 
+    # ── Inversor(es) de esta nota: mismo paso, sin cambiar de pestaña ──────────────────
+    st.markdown("---")
+    st.markdown("#### 💰 Inversor(es) de esta nota")
+    st.caption(
+        "Regístralos aquí mismo — al guardar, se escriben a la vez en CONTROL_NOTAS/CALENDARIO_NOTAS "
+        "**y** en INVERSIONES, sin tener que ir luego a '➕ Nueva inversión'."
+    )
+    clave_num_inv_nota = f"nota_num_inversores_{numero_nota}"
+    if clave_num_inv_nota not in st.session_state:
+        st.session_state[clave_num_inv_nota] = 1
+
+    try:
+        inversores_conocidos_nota = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]))
+    except NameError:
+        inversores_conocidos_nota = []
+
+    valor_fecha_inicio_inv = fecha_sugerida_nota.date() if fecha_sugerida_nota is not None else pd.Timestamp.today().date()
+    filas_inversores_nota = []
+    for i in range(st.session_state[clave_num_inv_nota]):
+        with st.container(border=True):
+            st.markdown(f"**Inversor #{i + 1}**")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                inv_sel = st.selectbox("Inversor", inversores_conocidos_nota + ["Otro (escribir)"], key=f"nota_inv_sel_{numero_nota}_{i}")
+                inv_final = st.text_input("Escribe el nombre (exacto, mayúsculas)", key=f"nota_inv_libre_{numero_nota}_{i}") if inv_sel == "Otro (escribir)" else inv_sel
+            with c2:
+                capital_inv_i = st.number_input("Capital ($)", min_value=0.0, step=1000.0, format="%.2f", key=f"nota_inv_capital_{numero_nota}_{i}")
+            with c3:
+                tasa_inv_nota_i = st.number_input("Interés anual AL INVERSOR (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key=f"nota_inv_tasa_{numero_nota}_{i}")
+            c4, c5 = st.columns(2)
+            with c4:
+                id_inv_nota_i = st.text_input("id_inversion (ej. OP005)", key=f"nota_inv_id_{numero_nota}_{i}")
+            with c5:
+                email_inv_i = st.text_input("email (opcional)", key=f"nota_inv_email_{numero_nota}_{i}")
+
+            if st.session_state[clave_num_inv_nota] > 1:
+                if st.button(f"🗑️ Quitar inversor #{i + 1}", key=f"nota_inv_quitar_{numero_nota}_{i}"):
+                    st.session_state[clave_num_inv_nota] -= 1
+                    st.rerun()
+
+            filas_inversores_nota.append({
+                "id_inversion": id_inv_nota_i, "inversor": inv_final, "tipo_inversion": "nota",
+                "subtipo_inversion": "ESTRUCTURADA", "nombre_activo": f"NOTA_{int(numero_nota):02d}",
+                "metodo_calculo": "NOTA", "cuenta_cobro": "", "activo_generador_interes": "SI",
+                "fecha_inversion": str(valor_fecha_inicio_inv), "fecha_final_inversion": "", "motivo": "",
+                "capital_invertido": capital_inv_i,
+                "interes_nota_anual": round(float(extraido.get("cupon_anual_pct") or 0) / 100.0, 6) if str(extraido.get("cupon_anual_pct", "")).strip().upper() != "REVISAR" else 0,
+                "interes_inversor_anual": round(tasa_inv_nota_i / 100.0, 6),
+                "tipo_operacion": "NUEVA", "id_inversion_origen": "", "capital_nuevo_real": "si",
+                "email": email_inv_i, "pago_intereses": "reinvierte",
+            })
+
+    if st.button("➕ Añadir otro inversor a esta nota", key=f"nota_inv_add_{numero_nota}"):
+        st.session_state[clave_num_inv_nota] += 1
+        st.rerun()
+
     col_guardar, col_avance, col_descartar = st.columns([1, 1, 1])
     with col_avance:
         if st.button(f"📌 Guardar avance de mis correcciones", help="Guarda en Google Drive lo que ya has corregido en las tablas de arriba, aunque todavía queden ⚠️ REVISAR. Útil antes de tocar el código, para no perder tus correcciones al redesplegar."):
@@ -6984,9 +7112,46 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
                 if "BORRADORES_NOTAS" in hojas and not hojas["BORRADORES_NOTAS"].empty:
                     df_b = hojas["BORRADORES_NOTAS"]
                     hojas["BORRADORES_NOTAS"] = df_b[~((df_b["TIPO"] == "nueva") & (pd.to_numeric(df_b["NOTA"], errors="coerce") == numero_nota))]
+
+                # ── Inversor(es) de esta nota, si se rellenaron campos ──────────────────
+                filas_inv_validas = [f for f in filas_inversores_nota if str(f.get("inversor", "")).strip() and str(f.get("id_inversion", "")).strip() and float(f.get("capital_invertido") or 0) > 0]
+                mensaje_inversores = ""
+                if filas_inv_validas:
+                    if "INVERSIONES" not in hojas:
+                        st.warning("⚠️ No se encontró la hoja INVERSIONES — la nota se guardó, pero los inversores NO se pudieron registrar. Usa '➕ Nueva inversión' para añadirlos a mano.")
+                    else:
+                        mapa_inv = _mapa_columnas_reales(hojas, "INVERSIONES")
+                        if not mapa_inv:
+                            st.warning("⚠️ No se pudo determinar el nombre real de las columnas de INVERSIONES — registra los inversores a mano desde '➕ Nueva inversión'.")
+                        else:
+                            filas_reales_inv = []
+                            columnas_faltantes_inv = set()
+                            for fila_logica in filas_inv_validas:
+                                fila_real = {}
+                                for clave_logica, valor in fila_logica.items():
+                                    col_real = mapa_inv.get(clave_logica)
+                                    if col_real:
+                                        fila_real[col_real] = valor
+                                    else:
+                                        columnas_faltantes_inv.add(clave_logica)
+                                filas_reales_inv.append(fila_real)
+                            hojas["INVERSIONES"] = pd.concat([hojas["INVERSIONES"], pd.DataFrame(filas_reales_inv)], ignore_index=True)
+                            mensaje_inversores = f" y {len(filas_reales_inv)} inversor(es) en INVERSIONES"
+                            if columnas_faltantes_inv:
+                                st.warning(f"⚠️ Estas columnas no existen tal cual en INVERSIONES y no se escribieron: {', '.join(sorted(columnas_faltantes_inv))}.")
+
                 guardar_excel_completo_desde_hojas(hojas)
+
+                # ── Guardar el PDF en el volumen persistente ─────────────────────────────
+                pdf_bytes_guardar = st.session_state.get("nota_pdf_bytes", {}).get(numero_nota)
+                if pdf_bytes_guardar:
+                    ruta_pdf_guardada = guardar_pdf_nota(numero_nota, pdf_bytes_guardar)
+                    if ruta_pdf_guardada:
+                        st.caption(f"📎 PDF original guardado en el servidor ({ruta_pdf_guardada}).")
+
                 del almacen[numero_nota]
-                st.success(f"Nota {numero_nota} guardada en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS.")
+                st.session_state[clave_num_inv_nota] = 1
+                st.success(f"Nota {numero_nota} guardada en CONTROL_NOTAS, CALENDARIO_NOTAS y CALENDARIO_CALLS{mensaje_inversores}.")
     with col_descartar:
         if st.button(f"🗑️ Descartar previsualización de la Nota {numero_nota}"):
             del almacen[numero_nota]
@@ -7035,7 +7200,21 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
 
     st.markdown("---")
     numero_nota = st.selectbox("Nota a auditar", notas_existentes, key="auditar_nota_numero")
-    pdf_subido = st.file_uploader(f"Documento oficial de la Nota {numero_nota} (PDF)", type=["pdf"], key=f"auditar_pdf_{numero_nota}")
+
+    pdf_guardado_bytes = leer_pdf_nota_guardado(numero_nota)
+    usar_pdf_guardado = False
+    if pdf_guardado_bytes:
+        usar_pdf_guardado = st.checkbox(
+            f"📎 Usar el PDF ya guardado en el servidor para la Nota {numero_nota} (no hace falta volver a subirlo)",
+            value=True, key=f"auditar_usar_guardado_{numero_nota}",
+        )
+    if usar_pdf_guardado:
+        pdf_subido = None
+        pdf_bytes_para_auditar = pdf_guardado_bytes
+        st.caption("Usando el PDF guardado en el servidor.")
+    else:
+        pdf_subido = st.file_uploader(f"Documento oficial de la Nota {numero_nota} (PDF)", type=["pdf"], key=f"auditar_pdf_{numero_nota}")
+        pdf_bytes_para_auditar = pdf_subido.read() if pdf_subido is not None else None
 
     if "auditoria_extraidos" not in st.session_state:
         st.session_state["auditoria_extraidos"] = {}
@@ -7047,9 +7226,9 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
             almacen_auditoria[numero_nota] = borrador
             st.info(f"📂 Se recuperó una auditoría en curso para la Nota {numero_nota} (guardada automáticamente).")
 
-    if st.button("🔍 Auditar nota", type="primary", disabled=pdf_subido is None):
+    if st.button("🔍 Auditar nota", type="primary", disabled=pdf_bytes_para_auditar is None):
         with st.spinner("Leyendo el documento y comparando contra el Excel..."):
-            resultado = extraer_datos_nota_con_ia(pdf_subido.read())
+            resultado = extraer_datos_nota_con_ia(pdf_bytes_para_auditar)
         if "error" in resultado:
             st.error(f"No se pudieron extraer los datos del PDF: {resultado['error']}")
             return
