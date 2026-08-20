@@ -2189,176 +2189,6 @@ def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, an
     return pd.DataFrame(filas)
 
 
-# =========================
-# PRÉSTAMO YURI — préstamo personal de Yuri financiado por un inversor a través del fondo.
-# A diferencia de Paraguay/Bolivia/MotoClick/Fútbol (tasa fija sobre capital constante), aquí
-# el capital que Yuri debe se AMORTIZA cada mes (sistema francés, cuota objetivo fija), así que
-# el ingreso real de la empresa varía mes a mes según el saldo pendiente — no es capital×tasa/12.
-# El inversor, en cambio, SÍ tiene capital fijo hasta que el préstamo quede saldado (confirmado
-# por Yuri): se registra como una inversión normal más en INVERSIONES, con fecha_final_inversion
-# = fecha estimada de la última cuota.
-# =========================
-HOJA_PRESTAMOS_YURI = "PRESTAMOS_YURI"
-CAPITAL_MAXIMO_PRESTAMO_YURI = 75_000.0
-
-
-def calcular_amortizacion_prestamo(principal: float, tasa_anual: float, cuota_objetivo: float,
-                                    fecha_desembolso, max_meses: int = 60) -> pd.DataFrame:
-    """Calendario de amortización a cuota fija (sistema francés), igual que el cuadro de Excel
-    de Yuri: interés = saldo_inicial × tasa_mensual; la última cuota se ajusta para saldar
-    exactamente. Devuelve una fila por mes hasta que el préstamo queda a 0."""
-    tasa_mensual = tasa_anual / 12
-    saldo = float(principal)
-    fecha_desembolso = pd.Timestamp(fecha_desembolso)
-    filas = []
-    for mes in range(1, max_meses + 1):
-        if saldo <= 0.005:
-            break
-        saldo_inicial = saldo
-        interes = saldo_inicial * tasa_mensual
-        cuota = min(float(cuota_objetivo), saldo_inicial + interes)
-        principal_pagado = cuota - interes
-        saldo = saldo_inicial - principal_pagado
-        if saldo < 0.005:
-            saldo = 0.0
-        filas.append({
-            "mes": mes,
-            "fecha_pago": (fecha_desembolso + pd.DateOffset(months=mes)).normalize(),
-            "saldo_inicial": round(saldo_inicial, 2),
-            "cuota": round(cuota, 2),
-            "interes": round(interes, 2),
-            "principal": round(principal_pagado, 2),
-            "saldo_final": round(saldo, 2),
-        })
-    return pd.DataFrame(filas)
-
-
-def _leer_hoja_prestamos_yuri() -> pd.DataFrame:
-    """Lee la hoja PRESTAMOS_YURI (un desembolso/tramo por fila)."""
-    try:
-        df = pd.read_excel(ARCHIVO, sheet_name=HOJA_PRESTAMOS_YURI)
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        for col in ["fecha_desembolso"]:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce")
-        for col in ["principal", "tasa_anual_deudor", "cuota_objetivo", "tasa_anual_inversor"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
-    except Exception:
-        return pd.DataFrame(columns=["tramo_id", "fecha_desembolso", "principal", "tasa_anual_deudor",
-                                      "cuota_objetivo", "inversor", "tasa_anual_inversor", "notas"])
-
-
-def _guardar_hoja_prestamos_yuri(df_prestamos: pd.DataFrame) -> tuple:
-    """Guarda la hoja PRESTAMOS_YURI, preservando el resto de hojas del Excel — mismo patrón
-    que _guardar_hoja_usuarios."""
-    import os as _os_cred
-    try:
-        if _os_cred.path.exists(ARCHIVO):
-            hojas = pd.read_excel(ARCHIVO, sheet_name=None)
-        else:
-            hojas = {}
-    except Exception:
-        hojas = {}
-    hojas[HOJA_PRESTAMOS_YURI] = df_prestamos
-
-    salida = BytesIO()
-    with pd.ExcelWriter(salida, engine="openpyxl") as writer:
-        for nombre_hoja, df_hoja in hojas.items():
-            nombre_limpio = str(nombre_hoja)[:31] if str(nombre_hoja).strip() else "Hoja"
-            (df_hoja if df_hoja is not None else pd.DataFrame()).to_excel(writer, sheet_name=nombre_limpio, index=False)
-    contenido = salida.getvalue()
-    with open(ARCHIVO, "wb") as f:
-        f.write(contenido)
-
-    if "gcp_service_account" not in st.secrets:
-        return False, "No hay credenciales de Google configuradas (falta [gcp_service_account] en Secrets) — el cambio no se sincronizó con Drive y se perderá si el servidor se reinicia."
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaIoBaseUpload
-
-        credenciales = service_account.Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]), scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        servicio = build("drive", "v3", credentials=credenciales)
-        media = MediaIoBaseUpload(BytesIO(contenido), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        servicio.files().update(fileId=GDRIVE_FILE_ID, media_body=media).execute()
-        return True, "Guardado y sincronizado con Drive."
-    except Exception as e:
-        return False, f"Guardado local, pero no se pudo sincronizar con Drive: {e}"
-
-
-def resumen_prestamos_yuri() -> dict:
-    """Consolida todos los tramos de PRESTAMOS_YURI: saldo pendiente total, calendario completo
-    y el margen que gana la empresa cada mes. Para la empresa, lo que cuenta como ingreso es la
-    CUOTA COMPLETA que paga Yuri cada mes (capital + interés juntos, sin separar) — la empresa
-    recibe ese dinero íntegro, indistintamente de qué parte sea interés o devolución de capital.
-    Al inversor que financia el tramo se le paga siempre lo mismo (fijo, sobre su capital
-    nominal), así que el margen de la empresa cada mes es simplemente: cuota − pago fijo al inversor."""
-    df_tramos = _leer_hoja_prestamos_yuri()
-    if df_tramos.empty:
-        return {"df_tramos": df_tramos, "capital_total_prestado": 0.0, "saldo_pendiente_total": 0.0,
-                "calendario": pd.DataFrame(), "hueco_disponible": CAPITAL_MAXIMO_PRESTAMO_YURI}
-
-    calendarios = []
-    for _, tramo in df_tramos.iterrows():
-        cal = calcular_amortizacion_prestamo(
-            tramo["principal"], tramo["tasa_anual_deudor"], tramo["cuota_objetivo"], tramo["fecha_desembolso"],
-        )
-        if cal.empty:
-            continue
-        cal["tramo_id"] = tramo.get("tramo_id", "")
-        cal["inversor"] = tramo.get("inversor", "")
-        tasa_inv_mensual = float(tramo["tasa_anual_inversor"]) / 12
-        cal["pago_inversor_mes"] = float(tramo["principal"]) * tasa_inv_mensual
-        # Ingreso de la empresa = la cuota COMPLETA que devuelve Yuri (capital + interés juntos).
-        cal["ingreso_empresa_mes"] = cal["cuota"]
-        cal["margen_empresa_mes"] = cal["ingreso_empresa_mes"] - cal["pago_inversor_mes"]
-        calendarios.append(cal)
-
-    calendario_completo = pd.concat(calendarios, ignore_index=True) if calendarios else pd.DataFrame()
-    capital_total_prestado = float(df_tramos["principal"].sum())
-    hoy = pd.Timestamp.today().normalize()
-    saldo_pendiente_total = 0.0
-    for _, tramo in df_tramos.iterrows():
-        cal = calcular_amortizacion_prestamo(tramo["principal"], tramo["tasa_anual_deudor"], tramo["cuota_objetivo"], tramo["fecha_desembolso"])
-        pendientes = cal[cal["fecha_pago"] >= hoy]
-        if not pendientes.empty:
-            saldo_pendiente_total += float(pendientes.iloc[0]["saldo_inicial"])
-
-    return {
-        "df_tramos": df_tramos,
-        "capital_total_prestado": capital_total_prestado,
-        "saldo_pendiente_total": saldo_pendiente_total,
-        "calendario": calendario_completo,
-        "hueco_disponible": max(0.0, CAPITAL_MAXIMO_PRESTAMO_YURI - capital_total_prestado),
-    }
-
-
-def ingresos_prestamo_yuri_mes(anio: int, mes: int) -> dict:
-    """Ingreso, pago a inversores y margen del Préstamo Yuri para un mes concreto — para
-    sumarlo a las tarjetas del dashboard general (Cobro estimado / Pago inversores / Beneficio)."""
-    resumen = resumen_prestamos_yuri()
-    cal = resumen["calendario"]
-    if cal.empty:
-        return {"ingreso": 0.0, "pago_inversor": 0.0, "margen": 0.0}
-    cal_mes = cal[(cal["fecha_pago"].dt.year == anio) & (cal["fecha_pago"].dt.month == mes)]
-    return {
-        "ingreso": float(cal_mes["ingreso_empresa_mes"].sum()),
-        "pago_inversor": float(cal_mes["pago_inversor_mes"].sum()),
-        "margen": float(cal_mes["margen_empresa_mes"].sum()),
-    }
-
-
-def fecha_fin_estimada_tramo_prestamo(principal: float, tasa_anual: float, cuota_objetivo: float, fecha_desembolso) -> pd.Timestamp:
-    """Fecha de la última cuota estimada de un tramo — se usa como fecha_final_inversion del
-    inversor que financia ese tramo (su capital queda fijo hasta entonces, según lo acordado)."""
-    cal = calcular_amortizacion_prestamo(principal, tasa_anual, cuota_objetivo, fecha_desembolso)
-    if cal.empty:
-        return pd.Timestamp(fecha_desembolso)
-    return pd.Timestamp(cal.iloc[-1]["fecha_pago"])
 
 
 def capital_activo_en_fecha(df_base: pd.DataFrame, fecha_consulta, activo: Optional[str] = None, solo_real: bool = False) -> float:
@@ -4721,15 +4551,6 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     pago_fijos = d_fijos["pago_inversor_mes"].sum() if not d_fijos.empty else 0
     beneficio_fijos = d_fijos["beneficio_empresa_mes"].sum() if not d_fijos.empty else 0
 
-    # Préstamo Yuri: caso especial (igual que MotoClick) — su ingreso mensual no sale de una
-    # tasa fija sobre capital constante, sino del calendario real de amortización del préstamo.
-    # El capital del inversor que lo financia ya se cuenta solo (viene de INVERSIONES, con tasa
-    # 0% ahí para no duplicar este ingreso).
-    _prestamo_yuri_mes = ingresos_prestamo_yuri_mes(int(anio), int(mes))
-    cobro_fijos += _prestamo_yuri_mes["ingreso"]
-    pago_fijos += _prestamo_yuri_mes["pago_inversor"]
-    beneficio_fijos += _prestamo_yuri_mes["margen"]
-
     cobro_total_mes = c_notas + cobro_fijos
     pago_total_mes = p_notas + pago_fijos
     beneficio_total_mes = b_notas + beneficio_fijos
@@ -6692,123 +6513,7 @@ def convertir_a_usd(importe: float, moneda: str) -> float:
     return importe * tasas.get(str(moneda).upper(), 1.0)
 
 
-def seccion_prestamo_yuri():
-    """Panel de seguimiento del préstamo personal de Yuri, financiado por inversores a través
-    del fondo (hasta $75.000 en total, en tramos). El capital lo amortiza Yuri cada mes a cuota
-    fija (sistema francés); el inversor que lo financia, en cambio, tiene su capital FIJO hasta
-    que ese tramo quede saldado (confirmado por Yuri) — por eso la parte del inversor se registra
-    como una inversión normal más desde '➕ Nueva inversión' (tipo 'otro' → nombre_activo
-    'Préstamo Yuri'), y aquí solo se lleva la cuenta de lo que Yuri debe."""
-    st.markdown("## 💵 Préstamo Yuri")
-    st.caption(
-        "Seguimiento del préstamo personal de Yuri financiado a través del fondo (límite $75.000, "
-        "en tramos). El capital se amortiza cada mes a cuota fija — el interés real que genera para "
-        "la empresa BAJA cada mes según el saldo pendiente, no es un tipo fijo como Paraguay o Bolivia."
-    )
-
-    resumen = resumen_prestamos_yuri()
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        tarjeta_kpi("💰 Prestado hasta ahora", fmt(resumen["capital_total_prestado"]), f"Límite total: {fmt(CAPITAL_MAXIMO_PRESTAMO_YURI)}", "normal")
-    with c2:
-        tarjeta_kpi("📉 Saldo pendiente hoy", fmt(resumen["saldo_pendiente_total"]), "Lo que Yuri debe todavía", "normal")
-    with c3:
-        tarjeta_kpi("🟢 Hueco disponible", fmt(resumen["hueco_disponible"]), "Hasta llegar a los $75.000", "positivo")
-
-    st.markdown("---")
-    st.markdown("### ➕ Registrar un nuevo tramo (desembolso)")
-    with st.form("form_nuevo_tramo_prestamo_yuri"):
-        col1, col2 = st.columns(2)
-        with col1:
-            fecha_desembolso = st.date_input("Fecha del desembolso", value=pd.Timestamp.today().date())
-            principal = st.number_input("Importe de este tramo ($)", min_value=0.0, step=1000.0, value=30000.0)
-            cuota_objetivo = st.number_input("Cuota mensual que devuelve Yuri ($)", min_value=0.0, step=500.0, value=5000.0)
-        with col2:
-            tasa_anual_deudor = st.number_input("Tasa anual que paga Yuri (%)", min_value=0.0, max_value=100.0, step=0.5, value=20.0)
-            inversor_tramo = st.text_input("Inversor que financia este tramo", value="")
-            tasa_anual_inversor = st.number_input("Tasa anual que se le paga a ese inversor (%)", min_value=0.0, max_value=100.0, step=0.5, value=15.0)
-
-        if resumen["capital_total_prestado"] + principal > CAPITAL_MAXIMO_PRESTAMO_YURI:
-            st.warning(f"⚠️ Con este tramo superarías el límite de {fmt(CAPITAL_MAXIMO_PRESTAMO_YURI)} en {fmt(resumen['capital_total_prestado'] + principal - CAPITAL_MAXIMO_PRESTAMO_YURI)}. Puedes registrarlo igualmente si el límite ha cambiado.")
-
-        guardar_tramo = st.form_submit_button("💾 Guardar tramo", type="primary")
-
-    if guardar_tramo:
-        if not inversor_tramo.strip():
-            st.error("Indica qué inversor financia este tramo.")
-        elif principal <= 0:
-            st.error("El importe del tramo debe ser mayor que 0.")
-        else:
-            df_tramos = _leer_hoja_prestamos_yuri()
-            nuevo_id = f"PYURI-{len(df_tramos) + 1:03d}"
-            fila_nueva = pd.DataFrame([{
-                "tramo_id": nuevo_id,
-                "fecha_desembolso": pd.Timestamp(fecha_desembolso),
-                "principal": principal,
-                "tasa_anual_deudor": tasa_anual_deudor / 100,
-                "cuota_objetivo": cuota_objetivo,
-                "inversor": inversor_tramo.strip().upper(),
-                "tasa_anual_inversor": tasa_anual_inversor / 100,
-                "notas": "",
-            }])
-            df_tramos = pd.concat([df_tramos, fila_nueva], ignore_index=True)
-            exito, mensaje = _guardar_hoja_prestamos_yuri(df_tramos)
-
-            fecha_fin_estimada = fecha_fin_estimada_tramo_prestamo(principal, tasa_anual_deudor / 100, cuota_objetivo, fecha_desembolso)
-            if exito:
-                st.success(f"✅ Tramo {nuevo_id} guardado. {mensaje}")
-            else:
-                st.warning(f"⚠️ Guardado localmente. {mensaje}")
-
-            st.info(
-                f"**Ahora falta registrar la parte del inversor.** Ve a '➕ Nueva inversión' → tipo "
-                f"**'otro'** → nombre_activo **'Préstamo Yuri'** → capital **{fmt(principal)}** → "
-                f"tasa anual del inversor **{tasa_anual_inversor:.2f}%** → fecha de inicio "
-                f"**{pd.Timestamp(fecha_desembolso).strftime('%d/%m/%Y')}** → fecha final "
-                f"**{fecha_fin_estimada.strftime('%d/%m/%Y')}** (fecha estimada de la última cuota — "
-                f"su capital queda fijo hasta entonces). ⚠️ **Importante:** en 'tasa anual que rinde "
-                f"el activo para la empresa', pon **0%** — el ingreso real de este préstamo ya lo "
-                f"calcula automáticamente este panel y se suma solo al dashboard general; si pones "
-                f"aquí también un porcentaje, el ingreso se contaría dos veces."
-            )
-            st.rerun()
-
-    if resumen["df_tramos"].empty:
-        st.caption("Todavía no hay ningún tramo registrado.")
-        return
-
-    st.markdown("---")
-    st.markdown("### 📋 Tramos registrados")
-    tabla_tramos = resumen["df_tramos"].copy()
-    tabla_tramos["fecha_desembolso"] = pd.to_datetime(tabla_tramos["fecha_desembolso"]).dt.strftime("%d/%m/%Y")
-    tabla_tramos["principal"] = tabla_tramos["principal"].apply(fmt)
-    tabla_tramos["tasa_anual_deudor"] = tabla_tramos["tasa_anual_deudor"].apply(lambda x: f"{x*100:.2f}%")
-    tabla_tramos["tasa_anual_inversor"] = tabla_tramos["tasa_anual_inversor"].apply(lambda x: f"{x*100:.2f}%")
-    tabla_tramos["cuota_objetivo"] = tabla_tramos["cuota_objetivo"].apply(fmt)
-    st.dataframe(tabla_tramos, use_container_width=True, hide_index=True)
-
-    st.markdown("### 📅 Calendario de amortización y margen real")
-    st.caption("El 'ingreso empresa' es la cuota completa que Yuri devuelve cada mes (capital + interés juntos) — para el fondo, cuenta como ingreso todo lo que entra, indistintamente de qué parte sea capital o interés. Al inversor se le paga siempre lo mismo cada mes, sobre su capital fijo.")
-    for _, tramo in resumen["df_tramos"].iterrows():
-        with st.expander(f"{tramo['tramo_id']} — {tramo['inversor']} — {fmt(tramo['principal'])} desde {pd.Timestamp(tramo['fecha_desembolso']).strftime('%d/%m/%Y')}"):
-            cal = calcular_amortizacion_prestamo(tramo["principal"], tramo["tasa_anual_deudor"], tramo["cuota_objetivo"], tramo["fecha_desembolso"])
-            tasa_inv_mensual = tramo["tasa_anual_inversor"] / 12
-            cal["pago_inversor_mes"] = tramo["principal"] * tasa_inv_mensual
-            cal["ingreso_empresa_mes"] = cal["cuota"]
-            cal["margen_empresa_mes"] = cal["ingreso_empresa_mes"] - cal["pago_inversor_mes"]
-            tabla_cal = cal.copy()
-            tabla_cal["fecha_pago"] = pd.to_datetime(tabla_cal["fecha_pago"]).dt.strftime("%d/%m/%Y")
-            for col in ["saldo_inicial", "cuota", "interes", "principal", "saldo_final", "ingreso_empresa_mes", "pago_inversor_mes", "margen_empresa_mes"]:
-                tabla_cal[col] = tabla_cal[col].apply(fmt)
-            st.dataframe(tabla_cal, use_container_width=True, hide_index=True)
-            margen_total = (cal["ingreso_empresa_mes"] - cal["pago_inversor_mes"]).sum()
-            color_margen = "positivo" if margen_total >= 0 else "negativo"
-            st.markdown(f"**Margen total de este tramo para la empresa: {fmt(margen_total)}**" + (" ⚠️ (negativo)" if margen_total < 0 else ""))
-            boton_descarga_excel(cal, f"amortizacion_{tramo['tramo_id']}.xlsx")
-
-
-
+def seccion_gastos_plataforma():
     """Panel de administrador (solo Yuri): sube una factura en PDF, la IA extrae los datos
     clave, y se guarda en la hoja GASTOS_PLATAFORMA — con vista mensual del total gastado
     en mantener la plataforma (Railway, dominio, Anthropic, etc.)."""
@@ -13706,7 +13411,6 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         menu_opciones.insert(6, "➕ Nueva inversión")
         menu_opciones.insert(7, "📊 Uso IA")
         menu_opciones.insert(8, "💰 Gastos")
-        menu_opciones.insert(9, "💵 Préstamo Yuri")
 
     menu = st.sidebar.selectbox("Menú principal", menu_opciones)
 
@@ -13731,8 +13435,6 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         seccion_uso_ia()
     elif menu == "💰 Gastos" and _es_yuri:
         seccion_gastos_plataforma()
-    elif menu == "💵 Préstamo Yuri" and _es_yuri:
-        seccion_prestamo_yuri()
     elif menu == "🏦 Deuda Jordi Chaparro":
         seccion_deuda_jordi()
     elif menu == "✨ Asistente IA":
