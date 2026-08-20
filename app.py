@@ -6721,7 +6721,8 @@ def _reconstruir_extraido_desde_tablas(extraido: dict, df_control_editado: pd.Da
     return nuevo
 
 
-def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_calls: pd.DataFrame = None):
+def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_calls: pd.DataFrame = None,
+                            tipo_operacion: str = "NUEVA", df_inv: pd.DataFrame = None):
     st.caption(
         "Sube el documento oficial (pricing supplement) de una nota nueva. La IA extrae automáticamente "
         "tickers, precios iniciales, barreras, cupón y el calendario de observación/pago. "
@@ -6954,6 +6955,37 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
         else:
             st.caption(f"✅ Sin diferencias: coincide con lo que ya había guardado en el Excel para la Nota {numero_nota}.")
 
+    # ── Origen de la reinversión (solo si tipo_operacion == REINVERSION) ───────────────
+    ids_origen_nota = []
+    if tipo_operacion == "REINVERSION":
+        st.markdown("---")
+        st.markdown("#### 🔁 Origen de la reinversión")
+        st.caption(
+            "Podés elegir una o varias posiciones de origen (por ejemplo, si el capital de esta nota "
+            "nueva viene de varias posiciones que se cerraron juntas). Se guarda en id_inversion_origen "
+            "de cada fila de inversor (separadas por coma si son varias) — no modifica ni cierra las "
+            "posiciones originales. Si además hay que cerrarlas formalmente, hacelo por separado con "
+            "una operación CANCELADA."
+        )
+        activas_origen_nota = _posiciones_activas_para_cerrar(df_inv)
+        if not activas_origen_nota.empty:
+            activas_origen_nota = activas_origen_nota.copy()
+            activas_origen_nota["_etiqueta"] = activas_origen_nota.apply(
+                lambda r: f"{r.get('id_inversion','?')} | {r.get('inversor','?')} | {r.get('nombre_activo','?')} | ${float(r.get('capital_invertido',0) or 0):,.2f}",
+                axis=1,
+            )
+            etiquetas_origen_nota = st.multiselect(
+                "Posición(es) de origen (opcional, se aplica a todos los inversores de abajo)",
+                activas_origen_nota["_etiqueta"].tolist(), key=f"nota_origen_reinv_multisel_{numero_nota}",
+            )
+            if etiquetas_origen_nota:
+                ids_origen_nota = [
+                    str(activas_origen_nota[activas_origen_nota["_etiqueta"] == et].iloc[0].get("id_inversion", ""))
+                    for et in etiquetas_origen_nota
+                ]
+        else:
+            st.caption("No se encontraron posiciones activas (NUEVA/REINVERSION sin fecha_final_inversion) para vincular como origen.")
+
     # ── Inversor(es) de esta nota: mismo paso, sin cambiar de pestaña ──────────────────
     st.markdown("---")
     st.markdown("#### 💰 Inversor(es) de esta nota")
@@ -7010,7 +7042,9 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
                 "capital_invertido": capital_inv_i,
                 "interes_nota_anual": round(float(extraido.get("cupon_anual_pct") or 0), 6) if str(extraido.get("cupon_anual_pct", "")).strip().upper() != "REVISAR" else 0,
                 "interes_inversor_anual": round(tasa_inv_nota_i / 100.0, 6),
-                "tipo_operacion": "NUEVA", "id_inversion_origen": "", "capital_nuevo_real": "si",
+                "tipo_operacion": tipo_operacion,
+                "id_inversion_origen": ", ".join(ids_origen_nota) if ids_origen_nota else "",
+                "capital_nuevo_real": "si" if tipo_operacion == "NUEVA" else "no",
                 "email": email_inv_i, "pago_intereses": "reinvierte",
             })
 
@@ -7096,6 +7130,31 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
                         mensaje_inversores = f" y {len(filas_reales_inv)} inversor(es) en INVERSIONES"
                         if columnas_faltantes_inv:
                             st.warning(f"⚠️ Estas columnas no existen tal cual en INVERSIONES y no se escribieron: {', '.join(sorted(columnas_faltantes_inv))}.")
+
+                        # Vínculo adicional en la hoja histórica REINVERSIONES (trazabilidad, igual
+                        # que en '➕ Nueva inversión') — soporta varios orígenes por fila (separados
+                        # por coma en id_inversion_origen), escribiendo un enlace por cada uno.
+                        if tipo_operacion == "REINVERSION" and "REINVERSIONES" in hojas:
+                            mapa_reinv = _mapa_columnas_reales(hojas, "REINVERSIONES")
+                            col_origen = mapa_reinv.get("id_inversion_origen")
+                            col_destino = mapa_reinv.get("id_inversion_destino")
+                            if col_origen and col_destino:
+                                filas_reinv = []
+                                for fila_logica in filas_inv_validas:
+                                    ids_origen_f = str(fila_logica.get("id_inversion_origen") or "").strip()
+                                    if not ids_origen_f:
+                                        continue
+                                    for id_origen_uno in [x.strip() for x in ids_origen_f.split(",") if x.strip()]:
+                                        fila_reinv = {col_origen: id_origen_uno, col_destino: fila_logica.get("id_inversion", "")}
+                                        if mapa_reinv.get("fecha"):
+                                            fila_reinv[mapa_reinv["fecha"]] = pd.Timestamp(fila_logica.get("fecha_inversion"))
+                                        if mapa_reinv.get("importe"):
+                                            fila_reinv[mapa_reinv["importe"]] = fila_logica.get("capital_invertido")
+                                        filas_reinv.append(fila_reinv)
+                                if filas_reinv:
+                                    hojas["REINVERSIONES"] = pd.concat([hojas["REINVERSIONES"], pd.DataFrame(filas_reinv)], ignore_index=True)
+                            else:
+                                st.info("No se encontraron las columnas id_inversion_origen/id_inversion_destino en REINVERSIONES — añade el vínculo a mano si hace falta.")
 
                 guardar_excel_completo_desde_hojas(hojas)
 
@@ -11875,10 +11934,21 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         tipo_inversion_final = st.text_input("Escribe el tipo de inversión", key="ni_tipo_inv_libre") if tipo_inversion_sel == "otro" else tipo_inversion_sel
     es_nota = tipo_inversion_final.strip().lower() == "nota"
 
-    if tipo_operacion == "NUEVA" and es_nota:
-        st.info("📄 Nota nueva: sube el PDF y se rellena todo junto — datos de la nota **e** inversor(es), en un único guardado.")
+    reinversion_en_nota_nueva = False
+    if tipo_operacion == "REINVERSION" and es_nota:
+        reinversion_en_nota_nueva = st.radio(
+            "¿La nota de destino de esta reinversión ya existe en el sistema, o es una nota nueva (con PDF por subir)?",
+            ["Nota que ya existe (número ya cargado en CONTROL_NOTAS)", "Nota nueva — subir PDF"],
+            key="ni_reinv_nota_existente_o_nueva",
+        ) == "Nota nueva — subir PDF"
+
+    if (tipo_operacion == "NUEVA" and es_nota) or reinversion_en_nota_nueva:
+        if tipo_operacion == "NUEVA":
+            st.info("📄 Nota nueva: sube el PDF y se rellena todo junto — datos de la nota **e** inversor(es), en un único guardado.")
+        else:
+            st.info("📄 Reinversión en nota nueva: sube el PDF de la nota igual que en una alta normal — se rellena CONTROL_NOTAS/CALENDARIO_NOTAS y el/los inversor(es), marcando la operación como REINVERSION y vinculando la(s) posición(es) de origen.")
         df_calls_para_nota = _leer_calendario_calls_cached()
-        _tab_añadir_nota_nueva(df_control, df_cal, df_calls_para_nota)
+        _tab_añadir_nota_nueva(df_control, df_cal, df_calls_para_nota, tipo_operacion=tipo_operacion, df_inv=df_inv)
         return
 
     fecha_sugerida_nota, periodicidad_sugerida_nota, fuente_sugerencia_nota = None, 1, ""
@@ -11950,13 +12020,15 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         elif cuenta_cobro_final == "(dejar en blanco)":
             cuenta_cobro_final = ""
 
-    id_inversion_origen_reinv = None
+    ids_inversion_origen_reinv = []
     if tipo_operacion == "REINVERSION":
         st.markdown("#### Origen de la reinversión")
         st.caption(
-            "Se guarda en la columna id_inversion_origen de cada fila (trazabilidad de dónde viene el "
-            "capital) — no modifica ni cierra la posición original. Si además hace falta cerrar formalmente "
-            "la posición original, hazlo por separado con una operación CANCELADA."
+            "Podés elegir una o varias posiciones de origen (por ejemplo, si el capital de esta "
+            "reinversión viene de varias posiciones cerradas a la vez). Se guarda en la columna "
+            "id_inversion_origen de cada fila (separadas por coma si son varias) — trazabilidad de "
+            "dónde viene el capital, no modifica ni cierra las posiciones originales. Si además hace "
+            "falta cerrar formalmente alguna posición original, hazlo por separado con una operación CANCELADA."
         )
         activas_origen = _posiciones_activas_para_cerrar(df_inv)
         if not activas_origen.empty:
@@ -11965,9 +12037,12 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                 lambda r: f"{r.get('id_inversion','?')} | {r.get('inversor','?')} | {r.get('nombre_activo','?')} | ${float(r.get('capital_invertido',0) or 0):,.2f}",
                 axis=1,
             )
-            etiqueta_origen = st.selectbox("Posición de origen (opcional, se aplica a todos los inversores de abajo)", ["(sin vincular)"] + activas_origen["_etiqueta"].tolist(), key="ni_origen_reinv_sel")
-            if etiqueta_origen != "(sin vincular)":
-                id_inversion_origen_reinv = str(activas_origen[activas_origen["_etiqueta"] == etiqueta_origen].iloc[0].get("id_inversion", ""))
+            etiquetas_origen = st.multiselect("Posición(es) de origen (opcional, se aplica a todos los inversores de abajo)", activas_origen["_etiqueta"].tolist(), key="ni_origen_reinv_multisel")
+            if etiquetas_origen:
+                ids_inversion_origen_reinv = [
+                    str(activas_origen[activas_origen["_etiqueta"] == et].iloc[0].get("id_inversion", ""))
+                    for et in etiquetas_origen
+                ]
 
     # ═══════════════════════════════════════════════════════════════════
     # 2. INVERSOR(ES) — uno o varios en la misma inversión
@@ -12040,7 +12115,7 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                 "interes_nota_anual": round(interes_nota_anual_pct / 100.0, 6),
                 "interes_inversor_anual": round(tasa_inv_i / 100.0, 6),
                 "tipo_operacion": tipo_operacion,
-                "id_inversion_origen": id_inversion_origen_reinv or "",
+                "id_inversion_origen": ", ".join(ids_inversion_origen_reinv) if ids_inversion_origen_reinv else "",
                 "capital_nuevo_real": cap_real_i,
                 "email": email_i,
                 "pago_intereses": pago_i,
@@ -12119,15 +12194,16 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
             if col_origen and col_destino:
                 filas_reinv = []
                 for fila_logica in filas_borrador:
-                    id_origen_f = fila_logica.get("id_inversion_origen")
-                    if not id_origen_f:
+                    ids_origen_f = str(fila_logica.get("id_inversion_origen") or "").strip()
+                    if not ids_origen_f:
                         continue
-                    fila_reinv = {col_origen: id_origen_f, col_destino: fila_logica.get("id_inversion", "")}
-                    if mapa_reinv.get("fecha"):
-                        fila_reinv[mapa_reinv["fecha"]] = pd.Timestamp(fecha_inversion_final)
-                    if mapa_reinv.get("importe"):
-                        fila_reinv[mapa_reinv["importe"]] = fila_logica.get("capital_invertido")
-                    filas_reinv.append(fila_reinv)
+                    for id_origen_uno in [x.strip() for x in ids_origen_f.split(",") if x.strip()]:
+                        fila_reinv = {col_origen: id_origen_uno, col_destino: fila_logica.get("id_inversion", "")}
+                        if mapa_reinv.get("fecha"):
+                            fila_reinv[mapa_reinv["fecha"]] = pd.Timestamp(fecha_inversion_final)
+                        if mapa_reinv.get("importe"):
+                            fila_reinv[mapa_reinv["importe"]] = fila_logica.get("capital_invertido")
+                        filas_reinv.append(fila_reinv)
                 if filas_reinv:
                     hojas["REINVERSIONES"] = pd.concat([hojas["REINVERSIONES"], pd.DataFrame(filas_reinv)], ignore_index=True)
             else:
