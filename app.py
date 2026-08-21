@@ -9036,7 +9036,7 @@ def _renderizar_tarjetas_noticias(resultados: list):
     st.caption("⚠️ Resultados generados por IA a partir de búsqueda web pública — no son recomendaciones de inversión.")
 
 
-def _widget_busqueda_libre_noticias(key_prefix: str, tickers_sugeridos: list | None = None):
+def _widget_busqueda_libre_noticias(key_prefix: str):
     """Widget reutilizable de 'preguntá lo que quieras' — se usa tanto en la sección de
     Noticias del menú de administración como en el portal de cada inversor, por eso todas
     las keys de Streamlit llevan key_prefix (para no chocar si ambas viven en la misma sesión,
@@ -9046,26 +9046,14 @@ def _widget_busqueda_libre_noticias(key_prefix: str, tickers_sugeridos: list | N
         "Cada resultado enlaza directo a la fuente (noticia, informe, comunicado)."
     )
 
-    clave_atajo = f"_query_atajo_noticias_{key_prefix}"
-    query_atajo = st.session_state.pop(clave_atajo, None)
-
     with st.form(f"form_busqueda_libre_noticias_{key_prefix}"):
         query = st.text_input(
             "Buscar",
-            value=query_atajo or "",
             placeholder="Ej: 'resultados trimestrales de Nvidia', 'HOOD noticias regulatorias', "
                         "'perspectivas del sector bancario europeo'...",
             label_visibility="collapsed",
         )
         enviar = st.form_submit_button("🔍 Buscar", type="primary")
-
-    if tickers_sugeridos:
-        st.caption("Atajos rápidos:")
-        cols = st.columns(len(tickers_sugeridos))
-        for col, tk in zip(cols, tickers_sugeridos):
-            if col.button(tk, key=f"atajo_noticias_{key_prefix}_{tk}", use_container_width=True):
-                st.session_state[clave_atajo] = tk
-                st.rerun()
 
     if enviar:
         if not query or not query.strip():
@@ -9077,17 +9065,9 @@ def _widget_busqueda_libre_noticias(key_prefix: str, tickers_sugeridos: list | N
 
 
 def seccion_noticias():
-    """Sección de nivel superior en el menú principal — búsqueda libre de noticias/research,
-    con atajos a los tickers de las notas activas del fondo."""
+    """Sección de nivel superior en el menú principal — búsqueda libre de noticias/research."""
     st.header("📰 Noticias")
-    df_inv, _df_cal, df_control = cargar_excel_completo()
-    control_activo_sug = obtener_control_notas_activas(df_inv, df_control)
-    tickers_sugeridos = []
-    if control_activo_sug is not None and not control_activo_sug.empty and "ticker" in control_activo_sug.columns:
-        tickers_sugeridos = sorted(
-            control_activo_sug["ticker"].dropna().astype(str).str.strip().str.upper().unique()
-        )[:8]
-    _widget_busqueda_libre_noticias(key_prefix="admin", tickers_sugeridos=tickers_sugeridos)
+    _widget_busqueda_libre_noticias(key_prefix="admin")
 
 
 def _tab_dashboard_noticias(df_inv: pd.DataFrame, df_control: pd.DataFrame):
