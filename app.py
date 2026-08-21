@@ -2788,6 +2788,10 @@ def seccion_portal_inversor(nombre_inversor: str):
     st.markdown("---")
     seccion_asistente_ia_inversor(nombre_inversor, df_inv, inversores_visibles=inversores_visibles)
 
+    st.markdown("---")
+    st.markdown("### 📰 Noticias")
+    _widget_busqueda_libre_noticias(key_prefix=f"inversor_{nombre_inversor}")
+
 
 
 def total_pagado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: float) -> float:
@@ -8918,6 +8922,174 @@ def obtener_screening_noticias_ia(tickers_nombres: tuple) -> dict:
         return {"_error": str(e)}
 
 
+@st.cache_data(show_spinner=False, ttl=1800)
+def buscar_noticias_libre(query: str) -> list:
+    """Búsqueda libre de noticias/investigación vía Claude + web_search — 'preguntá lo que
+    quieras', a diferencia de obtener_resumen_noticias_ia (que resume en texto libre y solo
+    funciona atado a un ticker de CONTROL_NOTAS). Esto devuelve una lista estructurada con
+    título, resumen, fuente, URL y fecha, pensada para enlazar directo a cada artículo/paper.
+    Cacheado 30 min (más corto que las 6h de las noticias por ticker): una búsqueda libre es
+    más probable que se repita/reformule en la misma sesión."""
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+    prompt = f"""Busca en la web las noticias, informes o documentos más relevantes y recientes
+(últimos 30 días salvo que la pregunta pida explícitamente algo histórico) sobre: {query}
+
+Si "{query}" parece un ticker bursátil (letras mayúsculas cortas, ej. HOOD, AAPL, TSLA) trata la
+búsqueda como noticias sobre ESA COMPAÑÍA cotizada concreta, no sobre el significado literal de
+la palabra. Busca varias veces con términos distintos si la primera búsqueda no da resultados
+claros antes de rendirte.
+
+Devuelve ÚNICAMENTE un array JSON (nada de texto antes o después, sin backticks de markdown),
+con como máximo 8 elementos, cada uno con este formato exacto:
+[{{
+  "titular": "...",
+  "resumen": "2-3 frases en español, en tus propias palabras, nunca cites texto literal de la fuente",
+  "fuente": "nombre del medio o autor",
+  "url": "https://...",
+  "fecha": "YYYY-MM-DD (fecha real de publicación; si no la sabes con certeza, tu mejor estimación)",
+  "prioridad": "alta | media | baja (alta = mueve materialmente la cotización o la tesis de inversión; media = relevante pero no decisivo; baja = contexto o ruido menor)"
+}}]
+
+Si tras buscar de verdad no encuentras nada relevante, devuelve un array vacío [] — pero solo
+después de haber intentado varias búsquedas, no a la primera."""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 2500,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60,
+        )
+        data = resp.json()
+    except Exception as e:
+        return [{"_error": f"Error de conexión: {e}"}]
+
+    if data.get("type") == "error" or data.get("error"):
+        msg = data.get("error", {}).get("message", str(data))
+        return [{"_error": f"Error de la API: {msg}. Si menciona permisos o 'web_search', puede que "
+                            f"la búsqueda web no esté activada para esta cuenta en la Consola de Anthropic."}]
+
+    contenido = data.get("content", [])
+    texto = "".join(b.get("text", "") for b in contenido if b.get("type") == "text").strip()
+    if not texto:
+        return []
+
+    texto_limpio = re.sub(r"^```(?:json)?", "", texto).strip()
+    texto_limpio = re.sub(r"```$", "", texto_limpio).strip()
+    if not texto_limpio.startswith("["):
+        inicio, fin = texto_limpio.find("["), texto_limpio.rfind("]")
+        if inicio != -1 and fin != -1 and fin > inicio:
+            texto_limpio = texto_limpio[inicio:fin + 1]
+
+    try:
+        resultados = json.loads(texto_limpio)
+        if not isinstance(resultados, list):
+            raise ValueError("la respuesta no es una lista")
+    except (json.JSONDecodeError, ValueError) as e:
+        return [{"_error": f"No se pudo interpretar la respuesta de la IA ({e}). Probá reformular la búsqueda."}]
+
+    orden_prioridad = {"alta": 0, "media": 1, "baja": 2}
+
+    def _clave_orden(n):
+        fecha = n.get("fecha") or ""
+        prioridad = orden_prioridad.get(str(n.get("prioridad", "")).lower(), 1)
+        return (fecha, -prioridad)
+
+    return sorted(resultados, key=_clave_orden, reverse=True)
+
+
+_COLOR_FONDO_PRIORIDAD = {"alta": "#fee2e2", "media": "#fef3c7", "baja": "#e5e7eb"}
+_COLOR_TEXTO_PRIORIDAD = {"alta": "#7f1d1d", "media": "#78350f", "baja": "#374151"}
+
+
+def _renderizar_tarjetas_noticias(resultados: list):
+    if resultados and isinstance(resultados[0], dict) and "_error" in resultados[0]:
+        st.error(f"⚠️ {resultados[0]['_error']}")
+        return
+    if not resultados:
+        st.info("No se encontraron resultados relevantes tras buscar. Probá reformular la pregunta.")
+        return
+    for n in resultados:
+        prioridad = str(n.get("prioridad", "media")).lower()
+        color_fondo = _COLOR_FONDO_PRIORIDAD.get(prioridad, "#e5e7eb")
+        color_texto = _COLOR_TEXTO_PRIORIDAD.get(prioridad, "#374151")
+        with st.container(border=True):
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.markdown(f"**{_md_seguro(n.get('titular', 'Sin título'))}**")
+            with c2:
+                st.markdown(
+                    f"<div style='text-align:right'><span style='background:{color_fondo};color:{color_texto};"
+                    f"padding:2px 10px;border-radius:10px;font-size:0.75em;font-weight:700'>"
+                    f"{prioridad.upper()}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            st.caption(f"{n.get('fuente', 'Fuente desconocida')} · {n.get('fecha', 'Sin fecha')}")
+            st.write(_md_seguro(n.get("resumen", "")))
+            if n.get("url"):
+                st.link_button("🔗 Leer la fuente completa", n["url"])
+    st.caption("⚠️ Resultados generados por IA a partir de búsqueda web pública — no son recomendaciones de inversión.")
+
+
+def _widget_busqueda_libre_noticias(key_prefix: str, tickers_sugeridos: list | None = None):
+    """Widget reutilizable de 'preguntá lo que quieras' — se usa tanto en la sección de
+    Noticias del menú de administración como en el portal de cada inversor, por eso todas
+    las keys de Streamlit llevan key_prefix (para no chocar si ambas viven en la misma sesión,
+    ej. Yuri viendo el portal de un inversor)."""
+    st.caption(
+        "Preguntá lo que quieras — un ticker, una compañía, un sector, un tema de mercado. "
+        "Cada resultado enlaza directo a la fuente (noticia, informe, comunicado)."
+    )
+
+    clave_atajo = f"_query_atajo_noticias_{key_prefix}"
+    query_atajo = st.session_state.pop(clave_atajo, None)
+
+    with st.form(f"form_busqueda_libre_noticias_{key_prefix}"):
+        query = st.text_input(
+            "Buscar",
+            value=query_atajo or "",
+            placeholder="Ej: 'resultados trimestrales de Nvidia', 'HOOD noticias regulatorias', "
+                        "'perspectivas del sector bancario europeo'...",
+            label_visibility="collapsed",
+        )
+        enviar = st.form_submit_button("🔍 Buscar", type="primary")
+
+    if tickers_sugeridos:
+        st.caption("Atajos rápidos:")
+        cols = st.columns(len(tickers_sugeridos))
+        for col, tk in zip(cols, tickers_sugeridos):
+            if col.button(tk, key=f"atajo_noticias_{key_prefix}_{tk}", use_container_width=True):
+                st.session_state[clave_atajo] = tk
+                st.rerun()
+
+    if enviar:
+        if not query or not query.strip():
+            st.warning("Escribí algo para buscar.")
+        else:
+            with st.spinner(f"Buscando '{query.strip()}'..."):
+                resultados = buscar_noticias_libre(query.strip())
+            _renderizar_tarjetas_noticias(resultados)
+
+
+def seccion_noticias():
+    """Sección de nivel superior en el menú principal — búsqueda libre de noticias/research,
+    con atajos a los tickers de las notas activas del fondo."""
+    st.header("📰 Noticias")
+    df_inv, _df_cal, df_control = cargar_excel_completo()
+    control_activo_sug = obtener_control_notas_activas(df_inv, df_control)
+    tickers_sugeridos = []
+    if control_activo_sug is not None and not control_activo_sug.empty and "ticker" in control_activo_sug.columns:
+        tickers_sugeridos = sorted(
+            control_activo_sug["ticker"].dropna().astype(str).str.strip().str.upper().unique()
+        )[:8]
+    _widget_busqueda_libre_noticias(key_prefix="admin", tickers_sugeridos=tickers_sugeridos)
+
+
 def _tab_dashboard_noticias(df_inv: pd.DataFrame, df_control: pd.DataFrame):
     st.caption(
         "Noticias recientes de las compañías subyacentes de tus notas activas. Para gastar menos tokens de "
@@ -13637,6 +13809,7 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
     menu_opciones = [
         "Dashboard financiero", "Centro de control",
         "Notas estructuradas", "Alertas y calendario", "Extractos",
+        "📰 Noticias",
         "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
     ]
     # "Gestión de Excel" y "➕ Nueva inversión" son acceso directo/de escritura al Excel del
@@ -13662,6 +13835,8 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
 
     elif menu == "Extractos":
         seccion_extractos()
+    elif menu == "📰 Noticias":
+        seccion_noticias()
     elif menu == "Gestión de Excel" and _es_yuri:
         seccion_gestion_excel()
     elif menu == "➕ Nueva inversión" and _es_yuri:
