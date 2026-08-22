@@ -2598,53 +2598,78 @@ Responde SIEMPRE en español, de forma cercana y clara. Sé conciso. Importes co
 def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv, inversores_visibles=None):
     """Chat del asistente de IA personal dentro del portal del inversor.
     'inversores_visibles' es la lista completa de inversores que esta sesión puede consultar
-    (normalmente solo [nombre_inversor]; para casos autorizados, ver INVERSORES_ADICIONALES_VISIBLES)."""
+    (normalmente solo [nombre_inversor]; para casos autorizados, ver INVERSORES_ADICIONALES_VISIBLES).
+
+    OJO: se usa st.form + st.text_input en vez de st.chat_input a propósito. El chat_input de
+    Streamlit queda SIEMPRE fijo/flotando en la parte inferior de la pantalla, fuera del sitio
+    donde lo dibujamos en el código — eso era la causa real de que la app pareciera abrirse
+    desplazada hacia abajo en móvil, y de que el cuadro de escribir pareciera pertenecer a la
+    sección de Noticias (que va justo después) en vez de a esta. Con un formulario normal, todo
+    el bloque (título, preguntas de ejemplo y cuadro de escribir) queda dentro de una tarjeta
+    con borde propio, en el flujo normal de la página — consecutivo y visualmente separado de
+    Noticias."""
     lista_inversores = inversores_visibles if inversores_visibles else [nombre_inversor]
     es_multi = len(lista_inversores) > 1
-    st.markdown("### 💬 Tu asistente personal")
-    if es_multi:
-        st.caption(f"Pregunta sobre el capital, el interés o los extractos de {' o '.join(lista_inversores)}. Este asistente solo conoce estas posiciones — no tiene acceso a información del fondo ni de ningún otro inversor.")
-    else:
-        st.caption("Pregunta sobre tu capital, tu interés o tus extractos. Este asistente solo conoce tu propia posición — no tiene acceso a información del fondo ni de otros inversores.")
 
     key_chat = f"chat_ia_inversor_{nombre_inversor}"
     if key_chat not in st.session_state:
         st.session_state[key_chat] = []
 
-    for msg in st.session_state[key_chat]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    tarjeta_asistente = st.container(border=True)
+    with tarjeta_asistente:
+        st.markdown("### 💬 Tu asistente personal")
+        if es_multi:
+            st.caption(f"Pregunta sobre el capital, el interés o los extractos de {' o '.join(lista_inversores)}. Este asistente solo conoce estas posiciones — no tiene acceso a información del fondo ni de ningún otro inversor.")
+        else:
+            st.caption("Pregunta sobre tu capital, tu interés o tus extractos. Este asistente solo conoce tu propia posición — no tiene acceso a información del fondo ni de otros inversores.")
 
-    if not st.session_state[key_chat]:
-        st.markdown("**Ejemplos:**")
-        sugs = ["¿Cuánto capital tengo activo?", "¿Cuánto interés he ganado este año?", "¿Cuál es mi tasa contratada?"]
-        cols = st.columns(3)
-        for i, s in enumerate(sugs):
-            if cols[i].button(s, key=f"sug_ia_inv_{i}", use_container_width=True):
-                st.session_state[key_chat].append({"role": "user", "content": s})
-                st.rerun()
+        for msg in st.session_state[key_chat]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-    pregunta = st.chat_input("💬 Escribe aquí tu pregunta a tu asistente personal...", key=f"chat_input_ia_inv_{nombre_inversor}")
-    if pregunta:
-        st.session_state[key_chat].append({"role": "user", "content": pregunta})
-        st.rerun()
+        if not st.session_state[key_chat]:
+            st.markdown("**Ejemplos:**")
+            sugs = ["¿Cuánto capital tengo activo?", "¿Cuánto interés he ganado este año?", "¿Cuál es mi tasa contratada?"]
+            cols = st.columns(3)
+            for i, s in enumerate(sugs):
+                if cols[i].button(s, key=f"sug_ia_inv_{i}", use_container_width=True):
+                    st.session_state[key_chat].append({"role": "user", "content": s})
+                    st.rerun()
 
-    if st.session_state[key_chat] and st.session_state[key_chat][-1]["role"] == "user":
-        ultima = st.session_state[key_chat][-1]["content"]
-        with st.chat_message("assistant"):
-            with st.spinner("Consultando tu posición..."):
-                mensajes_prev = st.session_state[key_chat][:-1]
-                respuesta = preguntar_asistente_ia_inversor(ultima, lista_inversores, df_inv, historial_previo=mensajes_prev)
-                st.markdown(_md_seguro(respuesta))
-        st.session_state[key_chat].append({"role": "assistant", "content": respuesta})
-        # Lleva la vista hasta la pregunta+respuesta que se acaban de generar, para que no
-        # haya que subir manualmente a verla (el cuadro de escritura queda fijo abajo).
-        _forzar_scroll_a_ultimo_mensaje_chat()
+        # Cuadro de escribir, justo debajo de las preguntas de ejemplo, dentro del flujo
+        # normal de la tarjeta (nunca flotante — ver nota al inicio de la función).
+        with st.form(f"form_chat_ia_inv_{nombre_inversor}", clear_on_submit=True):
+            col_txt, col_btn = st.columns([5, 1])
+            with col_txt:
+                texto_pregunta = st.text_input(
+                    "Pregúntale a tu asistente personal",
+                    placeholder="Escribe aquí tu pregunta a tu asistente personal...",
+                    label_visibility="collapsed",
+                    key=f"txt_chat_ia_inv_{nombre_inversor}",
+                )
+            with col_btn:
+                enviar = st.form_submit_button("Enviar ➤", use_container_width=True)
 
-    if st.session_state[key_chat]:
-        if st.button("🗑️ Limpiar conversación", key=f"btn_limpiar_ia_inv_{nombre_inversor}"):
-            st.session_state[key_chat] = []
+        if enviar and texto_pregunta and texto_pregunta.strip():
+            st.session_state[key_chat].append({"role": "user", "content": texto_pregunta.strip()})
             st.rerun()
+
+        if st.session_state[key_chat] and st.session_state[key_chat][-1]["role"] == "user":
+            ultima = st.session_state[key_chat][-1]["content"]
+            with st.chat_message("assistant"):
+                with st.spinner("Consultando tu posición..."):
+                    mensajes_prev = st.session_state[key_chat][:-1]
+                    respuesta = preguntar_asistente_ia_inversor(ultima, lista_inversores, df_inv, historial_previo=mensajes_prev)
+                    st.markdown(_md_seguro(respuesta))
+            st.session_state[key_chat].append({"role": "assistant", "content": respuesta})
+            # Lleva la vista hasta la pregunta+respuesta que se acaban de generar, para que no
+            # haya que subir manualmente a verla.
+            _forzar_scroll_a_ultimo_mensaje_chat()
+
+        if st.session_state[key_chat]:
+            if st.button("🗑️ Limpiar conversación", key=f"btn_limpiar_ia_inv_{nombre_inversor}"):
+                st.session_state[key_chat] = []
+                st.rerun()
 
 
 def _construir_datos_demo_inversor():
