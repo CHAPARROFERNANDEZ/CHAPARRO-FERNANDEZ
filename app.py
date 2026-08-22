@@ -18,6 +18,7 @@ import time
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     import plotly.express as px
@@ -909,6 +910,62 @@ def aplicar_estilo_profesional():
     )
 
 
+def _forzar_scroll_arriba_del_todo():
+    """Fuerza que la página vuelva al principio (arriba del todo) justo después de un login.
+    Sin esto, en móvil la app a veces se queda anclada abajo del todo (por el cuadro fijo del
+    asistente de IA) y el inversor ve el chat antes que su bienvenida y sus datos."""
+    components.html(
+        """
+        <script>
+        (function() {
+            function irArriba() {
+                try {
+                    var doc = window.parent.document;
+                    doc.documentElement.scrollTop = 0;
+                    doc.body.scrollTop = 0;
+                    var contenedor = doc.querySelector('[data-testid="stAppViewContainer"]');
+                    if (contenedor) { contenedor.scrollTop = 0; }
+                    window.parent.scrollTo(0, 0);
+                } catch (e) {}
+            }
+            // Se repite varias veces porque en móvil el layout (teclado, barras del navegador)
+            // puede seguir moviéndose un instante después de la primera carga.
+            irArriba();
+            setTimeout(irArriba, 100);
+            setTimeout(irArriba, 350);
+            setTimeout(irArriba, 700);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _forzar_scroll_a_ultimo_mensaje_chat():
+    """Lleva la vista hasta el último mensaje del chat del asistente (la pregunta que se acaba
+    de hacer y su respuesta), para que el inversor no tenga que subir manualmente a verla."""
+    components.html(
+        """
+        <script>
+        (function() {
+            function irAlUltimoMensaje() {
+                try {
+                    var doc = window.parent.document;
+                    var mensajes = doc.querySelectorAll('[data-testid="stChatMessage"]');
+                    if (mensajes.length > 0) {
+                        mensajes[mensajes.length - 1].scrollIntoView({behavior: "smooth", block: "start"});
+                    }
+                } catch (e) {}
+            }
+            setTimeout(irAlUltimoMensaje, 120);
+            setTimeout(irAlUltimoMensaje, 400);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def mostrar_hero(usuario=None):
     tag = f"Sesión: {usuario}" if usuario else "Private Wealth Dashboard"
     st.markdown(
@@ -1282,6 +1339,9 @@ def _completar_login(usuario_match: str, tipo: str):
         st.session_state.mostrar_aviso_pw_temporal = False
     st.session_state.forzar_cambio_password = _debe_cambiar_password_login(usuario_match, tipo)
     st.session_state.totp_pendiente = None
+    # Al entrar recién logueado, la vista debe arrancar arriba del todo (bienvenida, capital,
+    # etc.) y no abajo donde vive el cuadro fijo del asistente de IA.
+    st.session_state.forzar_scroll_arriba_pendiente = True
 
 
 def enviar_email_credenciales_nuevas(destinatario: str, usuario: str, password_temporal: str,
@@ -2564,7 +2624,7 @@ def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv, inversores_visib
                 st.session_state[key_chat].append({"role": "user", "content": s})
                 st.rerun()
 
-    pregunta = st.chat_input("Escribe tu pregunta...", key=f"chat_input_ia_inv_{nombre_inversor}")
+    pregunta = st.chat_input("💬 Escribe aquí tu pregunta a tu asistente personal...", key=f"chat_input_ia_inv_{nombre_inversor}")
     if pregunta:
         st.session_state[key_chat].append({"role": "user", "content": pregunta})
         st.rerun()
@@ -2577,6 +2637,9 @@ def seccion_asistente_ia_inversor(nombre_inversor: str, df_inv, inversores_visib
                 respuesta = preguntar_asistente_ia_inversor(ultima, lista_inversores, df_inv, historial_previo=mensajes_prev)
                 st.markdown(_md_seguro(respuesta))
         st.session_state[key_chat].append({"role": "assistant", "content": respuesta})
+        # Lleva la vista hasta la pregunta+respuesta que se acaban de generar, para que no
+        # haya que subir manualmente a verla (el cuadro de escritura queda fijo abajo).
+        _forzar_scroll_a_ultimo_mensaje_chat()
 
     if st.session_state[key_chat]:
         if st.button("🗑️ Limpiar conversación", key=f"btn_limpiar_ia_inv_{nombre_inversor}"):
@@ -2712,6 +2775,10 @@ def seccion_portal_inversor(nombre_inversor: str):
     """Portal de acceso limitado para un inversor: solo ve su propia posición y, en casos
     excepcionales autorizados explícitamente (ver INVERSORES_ADICIONALES_VISIBLES), la de otro
     inversor concreto adicional — nunca la de nadie más."""
+    if st.session_state.get("forzar_scroll_arriba_pendiente"):
+        _forzar_scroll_arriba_del_todo()
+        st.session_state.forzar_scroll_arriba_pendiente = False
+
     es_demo = str(nombre_inversor).strip().upper() == "DEMO"
     if es_demo:
         df_inv, df_cal, df_control = _construir_datos_demo_inversor()
