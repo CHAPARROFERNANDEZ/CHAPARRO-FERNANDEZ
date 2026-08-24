@@ -83,6 +83,7 @@ def escribir_hojas_postgres(hojas: dict) -> None:
         _log(f"AVISO: no se pudo preparar la conexión a Postgres, se omite esta escritura en paralelo: {e}")
         return
 
+    hojas_ok = []
     for nombre_hoja in HOJAS_AUTOMATICAS:
         df = hojas.get(nombre_hoja)
         if df is None or df.empty:
@@ -94,8 +95,12 @@ def escribir_hojas_postgres(hojas: dict) -> None:
                 if pd.api.types.is_datetime64_any_dtype(df_norm[col]):
                     df_norm[col] = df_norm[col].dt.strftime("%Y-%m-%d %H:%M:%S")
             df_norm.to_sql(tabla, engine, if_exists="replace", index=False, method="multi", chunksize=500)
+            hojas_ok.append(f"{nombre_hoja}({len(df_norm)})")
         except Exception as e:
             _log(f"AVISO: fallo replicando '{nombre_hoja}' a Postgres (Drive ya quedó guardado bien, no se pierde nada): {e}")
+
+    if hojas_ok:
+        _log(f"OK — escritura en paralelo confirmada: {', '.join(hojas_ok)}")
 
 
 def sincronizar_usuarios_postgres(df_usuarios: pd.DataFrame) -> None:
