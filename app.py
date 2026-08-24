@@ -988,9 +988,12 @@ def mostrar_hero(usuario=None):
 # posición de otro inversor concreto (a petición expresa de Yuri). El titular sigue viendo
 # SIEMPRE primero su propia información — esto solo añade acceso extra, nunca lo quita.
 INVERSORES_ADICIONALES_VISIBLES = {
+    "ROBERTO VISCAFE": ["CROWE BOLIVIA", "JR REAL ESTATE"],
+    "JORDI CHAPARRO": ["PAM", "JEP", "JR REAL ESTATE", "2012 JACC GROUP", "JORDI ESPECIAL"],
+    "JAPAN JORDI": ["JEP"],
     "EVA CHAPARRO": ["JEP"],
-    "JORDI CHAPARRO": ["PAM", "2012 JACC GROUP", "JR REAL ESTATE", "JORDI ESPECIAL"],
-    "PEDRO MAGAÑA": ["PAM", "2012 JACC GROUP"],
+    "PAOLA CHAPARRO": ["JEP"],
+    "PEDRO MAGAÑA": ["2012 JACC GROUP", "PAM"],
 }
 
 # Excepción para el equipo interno (admin): además de su panel de administración, algunos
