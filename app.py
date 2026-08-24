@@ -7126,9 +7126,17 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
         inversores_conocidos_nota = []
 
     fecha_sugerida_inv, _periodicidad_inv, _fuente_inv = _sugerir_fecha_inicio_nota(int(numero_nota), df_cal)
-    valor_fecha_inicio_inv = fecha_sugerida_inv.date() if fecha_sugerida_inv is not None else pd.Timestamp.today().date()
+    valor_default_fecha_inv = fecha_sugerida_inv.date() if fecha_sugerida_inv is not None else pd.Timestamp.today().date()
     if fecha_sugerida_inv is not None:
-        st.caption(f"📌 Fecha de inicio sugerida para la inversión: **{fecha_sugerida_inv.strftime('%d/%m/%Y')}** (primer pago menos 1 periodo, de {_fuente_inv}).")
+        periodo_txt_inv = {1: "mensual", 3: "trimestral", 6: "semestral"}.get(_periodicidad_inv, f"cada {_periodicidad_inv} meses")
+        st.caption(f"📌 Fecha de inicio sugerida para la inversión: **{fecha_sugerida_inv.strftime('%d/%m/%Y')}** (primer pago menos 1 periodo — {periodo_txt_inv} —, de {_fuente_inv}).")
+    else:
+        st.caption("No se encontró un calendario de PAGO para sugerir la fecha — revisa/ajusta la fecha de inicio a mano abajo (primer pago menos 1 periodo).")
+    valor_fecha_inicio_inv = st.date_input(
+        "Fecha de inicio de la inversión (fecha_inversion)", value=valor_default_fecha_inv,
+        key=f"nota_fecha_inicio_inv_{numero_nota}",
+        help="Prellenada con la sugerencia (primer pago menos 1 periodo) — puedes escribir otra fecha a mano si corresponde.",
+    )
     filas_inversores_nota = []
     for i in range(st.session_state[clave_num_inv_nota]):
         with st.container(border=True):
@@ -7143,7 +7151,14 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
                 tasa_inv_nota_i = st.number_input("Interés anual AL INVERSOR (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key=f"nota_inv_tasa_{numero_nota}_{i}")
             c4, c5 = st.columns(2)
             with c4:
-                id_inv_nota_i = st.text_input("id_inversion (ej. OP005)", key=f"nota_inv_id_{numero_nota}_{i}")
+                id_sugerido_nota_i = _siguiente_id_inversion(df_inv, offset=i)
+                if id_sugerido_nota_i:
+                    st.caption(f"📌 Sugerido: **{id_sugerido_nota_i}**")
+                id_inv_nota_i = st.text_input(
+                    "id_inversion (ej. OP005)",
+                    value=id_sugerido_nota_i, key=f"nota_inv_id_{numero_nota}_{i}",
+                    help="Se sugiere automáticamente el siguiente número tras el último usado — puedes borrarlo y escribir otro a mano.",
+                )
             with c5:
                 email_inv_i = st.text_input("email (opcional)", key=f"nota_inv_email_{numero_nota}_{i}")
             cuenta_cobro_i = st.selectbox(
@@ -11972,6 +11987,26 @@ def _posiciones_activas_para_cerrar(df_inv: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def _siguiente_id_inversion(df_inv: pd.DataFrame, offset: int = 0) -> str:
+    """Sugiere el próximo id_inversion siguiendo la convención OPxxx (ej. si el último usado es
+    OP037, sugiere OP038). Busca el número más alto ya usado en toda la hoja INVERSIONES, con
+    independencia de cuántos ceros de relleno tenga cada fila existente.
+    'offset' permite pedir el 2º, 3º... siguiente número — para cuando se dan de alta varios
+    inversores a la vez en la misma operación, cada uno necesita su propio id_inversion distinto,
+    y no se pueden sugerir dos veces el mismo número dentro del mismo formulario."""
+    try:
+        numeros = []
+        if df_inv is not None and not df_inv.empty and "id_inversion" in df_inv.columns:
+            for valor in df_inv["id_inversion"].dropna().astype(str):
+                m = re.match(r"^\s*OP0*(\d+)\s*$", valor.strip(), re.IGNORECASE)
+                if m:
+                    numeros.append(int(m.group(1)))
+        siguiente = (max(numeros) + 1 + offset) if numeros else (1 + offset)
+        return f"OP{siguiente:03d}"
+    except Exception:
+        return ""
+
+
 def _sugerir_fecha_inicio_nota(numero_nota: int, df_cal: pd.DataFrame):
     """Sugiere la fecha_inversion de una nota: primer PAGO del calendario, menos 1 periodo
     completo (1 mes si el cobro es mensual, 3 meses si es trimestral, etc. — no siempre 1 mes fijo).
@@ -12394,7 +12429,14 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                     if not em.empty:
                         email_default_i = em.iloc[-1]
                 email_i = st.text_input("email", value=email_default_i, key=f"ni_email_{i}")
-            id_inv_i = st.text_input("id_inversion (sigue la convención de arriba, ej. OP005)", key=f"ni_id_inversion_{i}")
+            id_sugerido_i = _siguiente_id_inversion(df_inv, offset=i)
+            if id_sugerido_i:
+                st.caption(f"📌 Número de operación sugerido: **{id_sugerido_i}** (siguiente al último usado) — puedes escribir otro abajo si corresponde.")
+            id_inv_i = st.text_input(
+                "id_inversion (sigue la convención de arriba, ej. OP005)",
+                value=id_sugerido_i, key=f"ni_id_inversion_{i}",
+                help="Se sugiere automáticamente el siguiente número tras el último usado — puedes borrarlo y escribir otro a mano.",
+            )
 
             if st.session_state["ni_num_inversores"] > 1:
                 if st.button(f"🗑️ Quitar inversor #{i + 1}", key=f"ni_quitar_{i}"):
