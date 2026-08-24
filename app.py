@@ -993,6 +993,16 @@ INVERSORES_ADICIONALES_VISIBLES = {
     "PEDRO MAGAÑA": ["PAM", "2012 JACC GROUP"],
 }
 
+# Excepción para el equipo interno (admin): además de su panel de administración, algunos
+# también quieren poder ver un perfil de inversor concreto sin cerrar sesión y volver a entrar
+# por el portal de inversor — cambiando de vista con un simple selector en la barra lateral.
+# Clave = usuario admin (tal cual está en USUARIOS, sin distinguir mayúsculas/minúsculas),
+# valor = lista de nombres de inversor (tal cual en INVERSIONES) que puede ver desde su sesión.
+# EN PRUEBAS: solo con Yuri por ahora, viendo el perfil de PAM. Si funciona bien, se añade Jordi.
+ADMIN_VISTAS_INVERSOR_ADICIONALES = {
+    "YURI": ["PAM"],
+}
+
 # Inversores piloto con verificación en dos pasos por email disponible en su portal.
 INVERSORES_CON_2FA = {"EVA CHAPARRO", "JORDI CHAPARRO", "PEDRO MAGAÑA"}
 
@@ -1762,63 +1772,49 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
                         st.error("Código incorrecto o caducado. Puedes pedir uno nuevo con 'Reenviar código'.")
             st.stop()
 
-        tipo_acceso = st.radio("Tipo de acceso", ["Equipo interno", "Portal de inversor"], horizontal=True, label_visibility="collapsed")
-        if tipo_acceso == "Equipo interno":
-            with st.form("login_form"):
-                usuario_txt = st.text_input("Usuario")
-                password = st.text_input("Contraseña", type="password")
-                entrar = st.form_submit_button("Entrar")
-            if entrar:
-                _bloqueado, _min_restantes = _login_bloqueado("admin", usuario_txt or "")
-                if _bloqueado:
-                    st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {_min_restantes} minuto(s).")
-                else:
+        # Login único: no se distingue en pantalla entre "equipo interno" y "portal de
+        # inversor" — nadie que vea la pantalla de entrada puede saber que el equipo interno
+        # accede desde el mismo sitio. Se prueban las credenciales primero contra admin y,
+        # si no coinciden, contra inversor; el tipo se determina solo, en silencio.
+        with st.form("login_form_unico"):
+            usuario_txt = st.text_input("Usuario")
+            password = st.text_input("Contraseña", type="password")
+            entrar = st.form_submit_button("Entrar")
+        if entrar:
+            _bloq_admin, _min_admin = _login_bloqueado("admin", usuario_txt or "")
+            _bloq_inv, _min_inv = _login_bloqueado("inversor", usuario_txt or "")
+            if _bloq_admin and _bloq_inv:
+                st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {max(_min_admin, _min_inv)} minuto(s).")
+            else:
+                usuario_match, tipo_match = None, None
+                if not _bloq_admin:
                     usuario_match = _verificar_credencial(usuario_txt, password, "admin", USUARIOS)
                     if usuario_match:
-                        _resetear_intentos_login("admin", usuario_txt)
-                        if _2fa_activo(usuario_match, "admin"):
-                            try:
-                                _smtp_sender_l = st.secrets["email"]["sender"]
-                                _smtp_password_l = st.secrets["email"]["password"]
-                                _display_name_l = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
-                                _generar_y_enviar_codigo_2fa(usuario_match, "admin", _smtp_sender_l, _smtp_password_l, _display_name_l)
-                            except Exception:
-                                pass
-                            st.session_state.totp_pendiente = {"usuario": usuario_match, "tipo": "admin"}
-                        else:
-                            _completar_login(usuario_match, "admin")
-                        st.rerun()
+                        tipo_match = "admin"
+                if not usuario_match and not _bloq_inv:
+                    usuario_match = _verificar_credencial(usuario_txt, password, "inversor", USUARIOS_INVERSORES)
+                    if usuario_match:
+                        tipo_match = "inversor"
+                if usuario_match:
+                    _resetear_intentos_login(tipo_match, usuario_txt)
+                    if _2fa_activo(usuario_match, tipo_match):
+                        try:
+                            _smtp_sender_l = st.secrets["email"]["sender"]
+                            _smtp_password_l = st.secrets["email"]["password"]
+                            _display_name_l = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+                            _generar_y_enviar_codigo_2fa(usuario_match, tipo_match, _smtp_sender_l, _smtp_password_l, _display_name_l)
+                        except Exception:
+                            pass
+                        st.session_state.totp_pendiente = {"usuario": usuario_match, "tipo": tipo_match}
                     else:
-                        _registrar_intento_fallido("admin", usuario_txt or "")
-                        st.error("Usuario o contraseña incorrectos")
-        else:
-            with st.form("login_form_inversor"):
-                usuario_inv_txt = st.text_input("Usuario")
-                password_inv = st.text_input("Contraseña", type="password", key="pwd_inversor")
-                entrar_inv = st.form_submit_button("Entrar")
-            if entrar_inv:
-                _bloqueado, _min_restantes = _login_bloqueado("inversor", usuario_inv_txt or "")
-                if _bloqueado:
-                    st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {_min_restantes} minuto(s).")
+                        _completar_login(usuario_match, tipo_match)
+                    st.rerun()
                 else:
-                    usuario_inv_match = _verificar_credencial(usuario_inv_txt, password_inv, "inversor", USUARIOS_INVERSORES)
-                    if usuario_inv_match:
-                        _resetear_intentos_login("inversor", usuario_inv_txt)
-                        if _2fa_activo(usuario_inv_match, "inversor"):
-                            try:
-                                _smtp_sender_l = st.secrets["email"]["sender"]
-                                _smtp_password_l = st.secrets["email"]["password"]
-                                _display_name_l = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
-                                _generar_y_enviar_codigo_2fa(usuario_inv_match, "inversor", _smtp_sender_l, _smtp_password_l, _display_name_l)
-                            except Exception:
-                                pass
-                            st.session_state.totp_pendiente = {"usuario": usuario_inv_match, "tipo": "inversor"}
-                        else:
-                            _completar_login(usuario_inv_match, "inversor")
-                        st.rerun()
-                    else:
-                        _registrar_intento_fallido("inversor", usuario_inv_txt or "")
-                        st.error("Usuario o contraseña incorrectos")
+                    if not _bloq_admin:
+                        _registrar_intento_fallido("admin", usuario_txt or "")
+                    if not _bloq_inv:
+                        _registrar_intento_fallido("inversor", usuario_txt or "")
+                    st.error("Usuario o contraseña incorrectos")
         st.stop()
 
     # ── Timeout de sesión: expira por inactividad o por duración máxima absoluta ──
@@ -1841,6 +1837,24 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         formulario_cambio_obligatorio_password(st.session_state.usuario, st.session_state.tipo_usuario)
 
     st.sidebar.markdown(f"**Usuario conectado:** {st.session_state.usuario}")
+
+    # ── Cambio de vista admin ↔ inversor: solo para los admins con perfil(es) de inversor
+    # adicional autorizados (ver ADMIN_VISTAS_INVERSOR_ADICIONALES). No afecta a nadie más. ──
+    if st.session_state.tipo_usuario == "admin":
+        _vistas_extra_admin = ADMIN_VISTAS_INVERSOR_ADICIONALES.get(str(st.session_state.usuario).strip().upper(), [])
+        if _vistas_extra_admin:
+            _opciones_vista = ["🛠️ Panel de administración"] + [f"👤 {v}" for v in _vistas_extra_admin]
+            _vista_elegida = st.sidebar.selectbox(
+                "Vista", _opciones_vista, key="admin_vista_selector",
+                label_visibility="collapsed",
+            )
+            st.session_state.vista_admin_como_inversor = (
+                None if _vista_elegida == "🛠️ Panel de administración" else _vista_elegida[2:]
+            )
+            st.sidebar.divider()
+        else:
+            st.session_state.vista_admin_como_inversor = None
+
     if st.session_state.get("mostrar_aviso_pw_temporal"):
         st.sidebar.warning("⚠️ Estás usando la contraseña temporal. Cámbiala ahora abajo, en '🔑 Cambiar mi contraseña'.")
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
@@ -13955,6 +13969,13 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
     # ── Portal de inversor: acceso limitado, se corta aquí antes del menú de administración ──
     if st.session_state.get("tipo_usuario") == "inversor":
         seccion_portal_inversor(st.session_state.usuario)
+        st.stop()
+
+    # ── Admin viendo un perfil de inversor adicional (ver ADMIN_VISTAS_INVERSOR_ADICIONALES):
+    # se corta igual que el portal de inversor normal, pero sigue siendo su sesión de admin
+    # por debajo — con el selector de la barra lateral puede volver al panel cuando quiera. ──
+    if st.session_state.get("tipo_usuario") == "admin" and st.session_state.get("vista_admin_como_inversor"):
+        seccion_portal_inversor(st.session_state.vista_admin_como_inversor)
         st.stop()
 
     menu_opciones = [
