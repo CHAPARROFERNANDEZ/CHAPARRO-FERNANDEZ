@@ -1858,6 +1858,16 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         else:
             st.session_state.vista_admin_como_inversor = None
 
+    # ── Atajo fijo para el asistente de IA: siempre visible en la barra lateral para el
+    # equipo interno, sin tener que buscarlo en el desplegable del menú principal. Solo se
+    # muestra cuando el admin está en su panel (no mientras ve un perfil de inversor, que ya
+    # tiene su propio asistente incrustado en esa vista). ──
+    if st.session_state.tipo_usuario == "admin" and not st.session_state.get("vista_admin_como_inversor"):
+        if st.sidebar.button("💬 Preguntar al asistente", use_container_width=True, key="btn_atajo_asistente_ia"):
+            st.session_state["menu_principal_selector"] = "✨ Asistente IA"
+            st.rerun()
+        st.sidebar.divider()
+
     if st.session_state.get("mostrar_aviso_pw_temporal"):
         st.sidebar.warning("⚠️ Estás usando la contraseña temporal. Cámbiala ahora abajo, en '🔑 Cambiar mi contraseña'.")
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
@@ -13981,22 +13991,34 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         seccion_portal_inversor(st.session_state.vista_admin_como_inversor)
         st.stop()
 
-    menu_opciones = [
-        "Dashboard financiero", "Centro de control",
-        "Notas estructuradas", "Alertas y calendario", "Extractos",
-        "📰 Noticias",
-        "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
-    ]
-    # "Gestión de Excel" y "➕ Nueva inversión" son acceso directo/de escritura al Excel del
-    # fondo: solo Yuri debe verlos.
     _es_yuri = str(st.session_state.usuario).strip().lower() == "yuri"
-    if _es_yuri:
-        menu_opciones.insert(5, "Gestión de Excel")
-        menu_opciones.insert(6, "➕ Nueva inversión")
-        menu_opciones.insert(7, "📊 Uso IA")
-        menu_opciones.insert(8, "💰 Gastos")
+    _es_jordi_o_alan = str(st.session_state.usuario).strip().lower() in ("jordi", "alan")
 
-    menu = st.sidebar.selectbox("Menú principal", menu_opciones)
+    if _es_jordi_o_alan:
+        # Jordi y Alan ven un menú reducido: sin Extractos (ni, por supuesto, Gestión de
+        # Excel / Nueva inversión / Uso IA / Gastos, que ya eran solo para Yuri).
+        menu_opciones = [
+            "Dashboard financiero", "Centro de control",
+            "Notas estructuradas", "Alertas y calendario",
+            "📰 Noticias",
+            "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
+        ]
+    else:
+        menu_opciones = [
+            "Dashboard financiero", "Centro de control",
+            "Notas estructuradas", "Alertas y calendario", "Extractos",
+            "📰 Noticias",
+            "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
+        ]
+        # "Gestión de Excel" y "➕ Nueva inversión" son acceso directo/de escritura al Excel del
+        # fondo: solo Yuri debe verlos.
+        if _es_yuri:
+            menu_opciones.insert(5, "Gestión de Excel")
+            menu_opciones.insert(6, "➕ Nueva inversión")
+            menu_opciones.insert(7, "📊 Uso IA")
+            menu_opciones.insert(8, "💰 Gastos")
+
+    menu = st.sidebar.selectbox("Menú principal", menu_opciones, key="menu_principal_selector")
 
     if menu == "Dashboard financiero":
         dashboard_financiero()
