@@ -1084,6 +1084,12 @@ def _guardar_hoja_usuarios(df_usuarios: pd.DataFrame) -> tuple[bool, str]:
     with open(ARCHIVO, "wb") as f:
         f.write(contenido)
 
+    try:
+        from postgres_writer import sincronizar_usuarios_postgres
+        sincronizar_usuarios_postgres(df_usuarios)
+    except Exception:
+        pass
+
     if "gcp_service_account" not in st.secrets:
         return False, "No hay credenciales de Google configuradas (falta [gcp_service_account] en Secrets) — el cambio no se sincronizó con Drive y se perderá si el servidor se reinicia."
     try:
@@ -10935,6 +10941,12 @@ def guardar_excel_completo_desde_hojas(hojas: dict):
         f.write(contenido)
     st.cache_data.clear()
 
+    try:
+        from postgres_writer import escribir_hojas_postgres
+        escribir_hojas_postgres(hojas)
+    except Exception as e:
+        print(f"[postgres_writer] no disponible, se omite escritura en paralelo: {e}", file=sys.stderr)
+
     if "gcp_service_account" in st.secrets:
         exito, mensaje = subir_excel_a_drive(hojas)
         if exito:
@@ -10984,6 +10996,11 @@ def log_uso_ia(usuario: str, tipo: str, tokens_input: int, tokens_output: int,
         with open(ARCHIVO, "wb") as f:
             f.write(contenido)
         st.cache_data.clear()
+        try:
+            from postgres_writer import escribir_hojas_postgres
+            escribir_hojas_postgres(hojas)
+        except Exception:
+            pass
         if "gcp_service_account" in st.secrets:
             subir_excel_a_drive(hojas)
     except Exception:
@@ -11082,6 +11099,11 @@ def guardar_borrador_nota(tipo_wizard: str, numero_nota: int, datos: dict) -> bo
         with open(ARCHIVO, "wb") as f:
             f.write(contenido)
         st.cache_data.clear()
+        try:
+            from postgres_writer import escribir_hojas_postgres
+            escribir_hojas_postgres(hojas)
+        except Exception:
+            pass
 
         if "gcp_service_account" not in st.secrets:
             st.warning("⚠️ Borrador guardado solo localmente (no hay credenciales de Google configuradas) — se perderá si el servidor se reinicia o actualizas el código. Sube el Excel a Drive manualmente si quieres conservarlo.")
@@ -11127,6 +11149,11 @@ def borrar_borrador_nota(tipo_wizard: str, numero_nota: int):
         with open(ARCHIVO, "wb") as f:
             f.write(contenido)
         st.cache_data.clear()
+        try:
+            from postgres_writer import escribir_hojas_postgres
+            escribir_hojas_postgres(hojas)
+        except Exception:
+            pass
         if "gcp_service_account" in st.secrets:
             exito, mensaje = subir_excel_a_drive(hojas)
             if not exito:
@@ -11164,6 +11191,11 @@ def guardar_borrador_inversion(clave: str, datos: dict) -> bool:
         with open(ARCHIVO, "wb") as f:
             f.write(contenido)
         st.cache_data.clear()
+        try:
+            from postgres_writer import escribir_hojas_postgres
+            escribir_hojas_postgres(hojas)
+        except Exception:
+            pass
 
         if "gcp_service_account" not in st.secrets:
             st.warning("⚠️ Borrador guardado solo localmente (no hay credenciales de Google configuradas) — se perderá si el servidor se reinicia o actualizas el código.")
@@ -11221,6 +11253,11 @@ def borrar_borrador_inversion(clave: str):
         with open(ARCHIVO, "wb") as f:
             f.write(contenido)
         st.cache_data.clear()
+        try:
+            from postgres_writer import escribir_hojas_postgres
+            escribir_hojas_postgres(hojas)
+        except Exception:
+            pass
         if "gcp_service_account" in st.secrets:
             exito, mensaje = subir_excel_a_drive(hojas)
             if not exito:
