@@ -156,3 +156,34 @@ def sincronizar_usuarios_postgres(df_usuarios: pd.DataFrame) -> None:
                 })
     except Exception as e:
         _log(f"AVISO: fallo replicando USUARIOS a Postgres (Drive ya quedó guardado bien, no se pierde nada): {e}")
+
+
+def guardar_pdf_nota_postgres(numero_nota: int, pdf_bytes: bytes) -> bool:
+    """Best-effort: guarda (o actualiza) el PDF de una nota como blob en una tabla dedicada
+    `pdfs_notas`, separada de las tablas excel_* que sincroniza init_db.py — así el replace
+    completo de esas tablas en cada deploy nunca la toca. Es una tercera copia del PDF, junto
+    al volumen de Railway y el respaldo en Drive, pensada para lectura instantánea desde la
+    misma base de datos que ya usa la app para todo lo demás."""
+    if not _dual_write_activo():
+        return False
+    try:
+        engine = _get_engine()
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS pdfs_notas (
+                    numero_nota INTEGER PRIMARY KEY,
+                    pdf_data BYTEA NOT NULL,
+                    actualizado_en TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """))
+            conn.execute(text("""
+                INSERT INTO pdfs_notas (numero_nota, pdf_data, actualizado_en)
+                VALUES (:n, :data, now())
+                ON CONFLICT (numero_nota) DO UPDATE SET
+                    pdf_data = EXCLUDED.pdf_data,
+                    actualizado_en = now();
+            """), {"n": int(numero_nota), "data": pdf_bytes})
+        return True
+    except Exception as e:
+        _log(f"AVISO: fallo guardando PDF de la nota {numero_nota} en Postgres (volumen y Drive ya quedaron bien, no se pierde nada): {e}")
+        return False
