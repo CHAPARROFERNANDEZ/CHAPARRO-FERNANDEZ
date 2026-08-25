@@ -4403,10 +4403,28 @@ def construir_resumen_actual_notas_alertas(df_control: pd.DataFrame) -> pd.DataF
         control[barrera_col] = pd.to_numeric(control[barrera_col], errors="coerce").apply(lambda x: x / 100 if pd.notna(x) and x > 1 else x)
     control = control.dropna(subset=["nota", "ticker", "precio_compra"]).copy()
 
+    # Antes se pedía el precio ticker por ticker, en secuencia, probando hasta 3 fuentes cada
+    # uno — con ~30-40 tickers eso son decenas de llamadas de red seguidas, y es la causa real
+    # de la lentitud en el primer login (cuando esta caché de 30 min está fría), no la fuente de
+    # datos (Drive/Postgres). Se piden todos los tickers ÚNICOS en paralelo (además, si el mismo
+    # ticker aparece en varias notas, ahora solo se pide una vez en vez de una vez por nota).
+    tickers_unicos = [t for t in control["ticker"].unique().tolist() if t]
+    precios_por_ticker = {}
+    if tickers_unicos:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(tickers_unicos))) as executor:
+            futuros = {executor.submit(obtener_precio_actual_con_fallback, t): t for t in tickers_unicos}
+            for futuro in concurrent.futures.as_completed(futuros):
+                t = futuros[futuro]
+                try:
+                    precios_por_ticker[t] = futuro.result()
+                except Exception:
+                    precios_por_ticker[t] = None
+
     filas = []
     for _, row in control.iterrows():
         ticker = row["ticker"]
-        precio_actual = obtener_precio_actual_con_fallback(ticker)
+        precio_actual = precios_por_ticker.get(ticker)
 
         precio_compra = float(row["precio_compra"])
         barrera = float(row[barrera_col]) if barrera_col is not None and pd.notna(row.get(barrera_col)) else None
