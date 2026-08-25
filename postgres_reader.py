@@ -110,3 +110,25 @@ def cargar_excel_completo_postgres():
                 control[col] = pd.to_numeric(control[col], errors="coerce")
 
     return inv, cal, control
+
+
+def leer_pdf_nota_postgres(numero_nota: int) -> "bytes | None":
+    """Lee el PDF de una nota guardado en la tabla pdfs_notas, si existe. A diferencia del
+    resto de este módulo, nunca lanza excepción hacia arriba: devuelve None ante cualquier
+    problema (tabla inexistente, fila inexistente, Postgres caído), porque quien la llama
+    (leer_pdf_nota_guardado en app.py) ya tiene su propia cadena de respaldo (volumen → Drive)
+    y no necesita tratar esto como un fallo grave."""
+    try:
+        engine = _get_engine()
+        with engine.connect() as conn:
+            existe = conn.execute(text(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'pdfs_notas')"
+            )).scalar()
+            if not existe:
+                return None
+            fila = conn.execute(text(
+                "SELECT pdf_data FROM pdfs_notas WHERE numero_nota = :n"
+            ), {"n": int(numero_nota)}).fetchone()
+            return bytes(fila[0]) if fila else None
+    except Exception:
+        return None
