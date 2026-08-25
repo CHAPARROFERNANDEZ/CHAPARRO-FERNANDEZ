@@ -158,10 +158,10 @@ def sincronizar_usuarios(engine, df_usuarios: pd.DataFrame):
     log(f"USUARIOS: {len(df)} fila(s) sincronizada(s).")
 
 
-def sincronizar_hoja_automatica(engine, nombre_hoja: str, df: pd.DataFrame):
+def sincronizar_hoja_automatica(engine, nombre_hoja: str, df: pd.DataFrame) -> int:
     if df is None or df.empty:
         log(f"{nombre_hoja}: hoja vacía, se omite (la tabla se crea igualmente si no existía).")
-        return
+        return 0
     tabla = f"excel_{nombre_hoja.lower()}"
     df = normalizar_columnas(df)
     # Fechas y JSON como texto plano por ahora — sin fricción de tipos mientras estamos en fase
@@ -171,14 +171,22 @@ def sincronizar_hoja_automatica(engine, nombre_hoja: str, df: pd.DataFrame):
             df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
     df.to_sql(tabla, engine, if_exists="replace", index=False, method="multi", chunksize=500)
     log(f"{nombre_hoja} → tabla '{tabla}': {len(df)} fila(s) sincronizada(s).")
+    return len(df)
 
 
-def main():
+def main() -> dict:
+    """Ejecuta la sincronización completa Drive → Postgres y devuelve un resumen:
+    {"ok": bool, "detalle": [str, ...], "error": str | None}.
+    Se sigue pudiendo ejecutar como script (preDeployCommand) y también se puede importar y
+    llamar en caliente desde la app (botón 'Traer cambios de Drive ahora'), sin duplicar
+    lógica."""
+    detalle = []
     try:
         database_url = obtener_database_url()
     except Exception as e:
-        log(f"AVISO: {e} — se omite la sincronización con Postgres, la app sigue arrancando con Excel/Drive como siempre.")
-        return
+        msg = f"AVISO: {e} — se omite la sincronización con Postgres, la app sigue arrancando con Excel/Drive como siempre."
+        log(msg)
+        return {"ok": False, "detalle": [], "error": msg}
 
     try:
         engine = create_engine(database_url, pool_pre_ping=True)
@@ -186,29 +194,37 @@ def main():
             conn.execute(text("SELECT 1"))
         log("Conexión a Postgres OK.")
     except Exception as e:
-        log(f"AVISO: no se pudo conectar a Postgres ({e}) — se omite la sincronización, la app sigue arrancando igual.")
-        return
+        msg = f"AVISO: no se pudo conectar a Postgres ({e}) — se omite la sincronización, la app sigue arrancando igual."
+        log(msg)
+        return {"ok": False, "detalle": [], "error": msg}
 
     try:
         hojas = descargar_excel()
         log(f"Excel descargado de Drive: {len(hojas)} hoja(s) encontradas.")
     except Exception as e:
-        log(f"AVISO: no se pudo descargar el Excel de Drive ({e}) — se omite la sincronización.")
-        return
+        msg = f"AVISO: no se pudo descargar el Excel de Drive ({e}) — se omite la sincronización."
+        log(msg)
+        return {"ok": False, "detalle": [], "error": msg}
 
     try:
         crear_tabla_usuarios(engine)
         sincronizar_usuarios(engine, hojas.get("USUARIOS"))
+        n_usuarios = len(hojas.get("USUARIOS")) if hojas.get("USUARIOS") is not None else 0
+        detalle.append(f"USUARIOS: {n_usuarios} fila(s)")
     except Exception as e:
         log(f"ERROR sincronizando USUARIOS: {e}")
+        detalle.append(f"USUARIOS: ERROR ({e})")
 
     for nombre_hoja in HOJAS_AUTOMATICAS:
         try:
-            sincronizar_hoja_automatica(engine, nombre_hoja, hojas.get(nombre_hoja))
+            n = sincronizar_hoja_automatica(engine, nombre_hoja, hojas.get(nombre_hoja))
+            detalle.append(f"{nombre_hoja}: {n} fila(s)")
         except Exception as e:
             log(f"ERROR sincronizando {nombre_hoja}: {e}")
+            detalle.append(f"{nombre_hoja}: ERROR ({e})")
 
     log("Sincronización con Postgres completada.")
+    return {"ok": True, "detalle": detalle, "error": None}
 
 
 if __name__ == "__main__":
