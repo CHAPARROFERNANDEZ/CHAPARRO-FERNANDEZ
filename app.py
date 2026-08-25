@@ -7508,8 +7508,6 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
                 st.dataframe(audit_ultima[cols_audit], use_container_width=True, hide_index=True)
         st.caption("👁️ Solo lectura. Para volver a comparar contra el PDF oficial y detectar nuevas discrepancias, usa el auditor de abajo (necesita subir el PDF otra vez).")
 
-        st.caption("👁️ Solo lectura. Para volver a comparar contra el PDF oficial y detectar nuevas discrepancias, usa el auditor de abajo (necesita subir el PDF otra vez).")
-
     st.markdown("---")
     numero_nota = st.selectbox("Nota a auditar", notas_existentes, key="auditar_nota_numero")
 
@@ -7540,14 +7538,34 @@ def _tab_auditar_nota(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd
 
     if st.button("🔍 Auditar nota", type="primary", disabled=pdf_bytes_para_auditar is None):
         with st.spinner("Leyendo el documento y comparando contra el Excel..."):
-            resultado = extraer_datos_nota_con_ia(pdf_bytes_para_auditar)
+            resultado = _ejecutar_auditoria_ia(numero_nota, pdf_bytes_para_auditar)
         if "error" in resultado:
             st.error(f"No se pudieron extraer los datos del PDF: {resultado['error']}")
             return
-        almacen_auditoria[numero_nota] = resultado
-        with st.spinner("Guardando borrador automático..."):
-            guardar_borrador_nota("auditar", numero_nota, resultado)
 
+    _render_comparacion_auditoria(numero_nota, df_inv, df_cal, df_control, df_calls)
+
+
+def _ejecutar_auditoria_ia(numero_nota: int, pdf_bytes: bytes) -> dict:
+    """Llama a la IA para extraer los datos del PDF de una nota, guarda el resultado en el
+    almacén de sesión 'auditoria_extraidos' (para que _render_comparacion_auditoria lo pinte) y
+    en el borrador automático de Excel. Reutilizada tanto por el botón manual de la pestaña
+    'Auditar nota' como por el guardado automático desde 'PDFs de notas'. Devuelve el dict de
+    la IA tal cual (con clave 'error' si algo falló)."""
+    if "auditoria_extraidos" not in st.session_state:
+        st.session_state["auditoria_extraidos"] = {}
+    resultado = extraer_datos_nota_con_ia(pdf_bytes)
+    if "error" not in resultado:
+        st.session_state["auditoria_extraidos"][numero_nota] = resultado
+        guardar_borrador_nota("auditar", numero_nota, resultado)
+    return resultado
+
+
+def _render_comparacion_auditoria(numero_nota: int, df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, df_calls: pd.DataFrame):
+    """Pinta la comparación campo a campo (PDF vs Excel) y la validación económica para una
+    nota, a partir de lo que ya haya en st.session_state['auditoria_extraidos'][numero_nota].
+    No hace nada si todavía no hay ninguna extracción guardada para esa nota."""
+    almacen_auditoria = st.session_state.get("auditoria_extraidos", {})
     extraido = almacen_auditoria.get(numero_nota)
     if not extraido:
         return
@@ -9509,12 +9527,13 @@ def _tab_calendario_earnings(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_cont
     boton_descarga_excel(df_earnings, "calendario_earnings.xlsx")
 
 
-def _tab_pdfs_notas(df_control: pd.DataFrame):
+def _tab_pdfs_notas(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame, df_calls: pd.DataFrame):
     st.caption(
         "Documento oficial de cada nota: se guarda en tres sitios al crearla — el volumen del "
         "servidor, Postgres y una carpeta de Google Drive — así el acceso nunca depende de un "
         "único punto de fallo. Puedes verlo o descargarlo aquí en cualquier momento. Para notas "
-        "antiguas que no tienen PDF guardado todavía, súbelo desde aquí abajo."
+        "antiguas que no tienen PDF guardado todavía, súbelo desde aquí abajo: al guardarlo, la "
+        "IA lo audita automáticamente contra lo que ya hay en el Excel."
     )
 
     notas_existentes = sorted(
@@ -9568,15 +9587,19 @@ def _tab_pdfs_notas(df_control: pd.DataFrame):
                 f"Documento oficial de la Nota {n} (PDF)", type=["pdf"], key=f"subir_pdf_nota_{n}",
             )
             if nuevo_pdf is not None:
-                if st.button(f"💾 Guardar este PDF para la Nota {n}", key=f"guardar_pdf_nota_{n}", type="primary"):
-                    with st.spinner("Guardando en servidor, Postgres y Drive..."):
+                if st.button(f"💾 Guardar y auditar este PDF para la Nota {n}", key=f"guardar_pdf_nota_{n}", type="primary"):
+                    with st.spinner("Guardando en servidor, Postgres y Drive, y leyendo el PDF con la IA..."):
                         contenido = nuevo_pdf.read()
                         ruta_guardada = guardar_pdf_nota(n, contenido)
+                        resultado_auditoria = _ejecutar_auditoria_ia(n, contenido) if ruta_guardada else None
                     if ruta_guardada:
                         st.success(f"PDF de la Nota {n} guardado en servidor, Postgres y Drive.")
-                        st.rerun()
+                        if resultado_auditoria and "error" in resultado_auditoria:
+                            st.warning(f"El PDF se guardó, pero la IA no pudo auditarlo todavía: {resultado_auditoria['error']}")
                     else:
                         st.error("No se pudo guardar en el volumen del servidor. Revisa que esté montado.")
+
+            _render_comparacion_auditoria(n, df_inv, df_cal, df_control, df_calls)
 
 
 def seccion_notas_archivo():
@@ -9586,10 +9609,10 @@ def seccion_notas_archivo():
         df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
 
-    tab_resumen, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings, tab_pdfs = st.tabs([
+    tab_resumen, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings, tab_pdfs, tab_auditar = st.tabs([
         "📊 Resumen y alertas",
         "🏢 Ficha de compañía", "🔬 Análisis completo de nota", "⚖️ Comparador de notas",
-        "📰 Noticias", "📅 Calendario earnings", "📎 PDFs de notas",
+        "📰 Noticias", "📅 Calendario earnings", "📎 PDFs de notas", "🔍 Auditar nota",
     ])
 
     with tab_ficha:
@@ -9608,7 +9631,10 @@ def seccion_notas_archivo():
         _tab_calendario_earnings(df_inv, df_cal, df_control)
 
     with tab_pdfs:
-        _tab_pdfs_notas(df_control)
+        _tab_pdfs_notas(df_inv, df_cal, df_control, df_calls)
+
+    with tab_auditar:
+        _tab_auditar_nota(df_inv, df_cal, df_control, df_calls)
 
     with tab_resumen:
         st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
