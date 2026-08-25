@@ -11578,6 +11578,30 @@ def seccion_gestion_excel():
             st.rerun()
 
         st.markdown("---")
+        st.subheader("🗄️ Traer cambios de Drive a Postgres ahora")
+        st.caption(
+            "La app lee de Postgres, que normalmente solo se actualiza desde Drive en cada "
+            "despliegue. Si acabas de editar algo a mano en el Excel de Drive y quieres verlo "
+            "reflejado ya, sin esperar a un redeploy, pulsa este botón."
+        )
+        if st.button("🗄️ Traer cambios de Drive a Postgres ahora", type="primary", key="btn_sync_drive_postgres_manual"):
+            with st.spinner("Descargando el Excel de Drive y actualizando Postgres..."):
+                try:
+                    import init_db
+                    resultado = init_db.main()
+                except Exception as e:
+                    resultado = {"ok": False, "detalle": [], "error": str(e)}
+            if resultado.get("ok"):
+                st.success("Postgres actualizado con lo último de Drive.")
+                with st.expander("Ver detalle de filas sincronizadas por hoja"):
+                    for linea in resultado.get("detalle", []):
+                        st.caption(linea)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"No se pudo sincronizar: {resultado.get('error')}")
+
+        st.markdown("---")
         st.subheader("O sube un Excel manualmente")
         st.caption("Si prefieres subir el archivo directamente, recuerda actualizarlo también en Google Drive para que sea permanente.")
         archivo_subido = st.file_uploader("Sube el archivo actualizado", type=["xlsx"])
