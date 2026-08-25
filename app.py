@@ -9495,7 +9495,8 @@ def _tab_pdfs_notas(df_control: pd.DataFrame):
     st.caption(
         "Documento oficial de cada nota: se guarda en tres sitios al crearla — el volumen del "
         "servidor, Postgres y una carpeta de Google Drive — así el acceso nunca depende de un "
-        "único punto de fallo. Puedes verlo o descargarlo aquí en cualquier momento."
+        "único punto de fallo. Puedes verlo o descargarlo aquí en cualquier momento. Para notas "
+        "antiguas que no tienen PDF guardado todavía, súbelo desde aquí abajo."
     )
 
     notas_existentes = sorted(
@@ -9526,21 +9527,38 @@ def _tab_pdfs_notas(df_control: pd.DataFrame):
 
     st.markdown("---")
     for n in notas_existentes:
+        pdf_bytes = leer_pdf_nota_guardado(n)
         ruta_local = os.path.join(CARPETA_PDFS_NOTAS, f"nota_{n:02d}.pdf")
         en_local = os.path.exists(ruta_local)
         col_a, col_b, col_c = st.columns([1.5, 2, 2.5])
         col_a.markdown(f"**Nota {n}**")
-        col_b.caption("📁 En servidor" if en_local else "☁️ Solo en Drive (o no disponible)")
+        if en_local:
+            col_b.caption("📁 En servidor")
+        elif pdf_bytes:
+            col_b.caption("☁️ Solo en Postgres/Drive")
+        else:
+            col_b.caption("⚠️ Sin PDF guardado")
         with col_c:
-            pdf_bytes = leer_pdf_nota_guardado(n)
             if pdf_bytes:
                 st.download_button(
                     "⬇️ Descargar PDF", data=pdf_bytes, file_name=f"nota_{n:02d}.pdf",
                     mime="application/pdf", key=f"descargar_pdf_nota_{n}",
                     use_container_width=True,
                 )
-            else:
-                st.caption("PDF no disponible (ni en servidor ni en Drive).")
+        with st.expander(f"➕ Subir o reemplazar el PDF de la Nota {n}"):
+            nuevo_pdf = st.file_uploader(
+                f"Documento oficial de la Nota {n} (PDF)", type=["pdf"], key=f"subir_pdf_nota_{n}",
+            )
+            if nuevo_pdf is not None:
+                if st.button(f"💾 Guardar este PDF para la Nota {n}", key=f"guardar_pdf_nota_{n}", type="primary"):
+                    with st.spinner("Guardando en servidor, Postgres y Drive..."):
+                        contenido = nuevo_pdf.read()
+                        ruta_guardada = guardar_pdf_nota(n, contenido)
+                    if ruta_guardada:
+                        st.success(f"PDF de la Nota {n} guardado en servidor, Postgres y Drive.")
+                        st.rerun()
+                    else:
+                        st.error("No se pudo guardar en el volumen del servidor. Revisa que esté montado.")
 
 
 def seccion_notas_archivo():
