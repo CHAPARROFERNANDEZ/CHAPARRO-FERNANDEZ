@@ -6483,29 +6483,142 @@ CARPETA_FACTURAS = "/data/facturas"
 ARCHIVO_GASTOS_JSON = "/data/gastos_plataforma.json"
 CARPETA_PDFS_NOTAS = "/data/notas_pdfs"
 
+# Carpeta "PDFs Notas - CF Wealth" en Google Drive, compartida en modo escritor con la cuenta
+# de servicio del fondo (app-fondo-writer@fondo-write.iam.gserviceaccount.com). Sirve como
+# respaldo de los PDFs fuera del volumen de Railway y como origen alternativo si el volumen
+# se pierde o se recrea desde cero.
+GDRIVE_CARPETA_PDFS_NOTAS = "1j2Bj1sq_80agm47RRJ_zo953wigcU9qZ"
+
+
+def _servicio_drive():
+    """Crea un cliente autenticado de la API de Drive con la cuenta de servicio del fondo
+    (la misma que ya usa la app para leer/escribir inversiones.xlsx). Devuelve None si no
+    hay credenciales configuradas, sin lanzar excepción."""
+    if "gcp_service_account" not in st.secrets:
+        return None
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        credenciales = service_account.Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        return build("drive", "v3", credentials=credenciales)
+    except Exception:
+        return None
+
+
+def _subir_pdf_nota_a_drive(numero_nota: int, pdf_bytes: bytes) -> bool:
+    """Sube (o actualiza si ya existe) el PDF de una nota en la carpeta de respaldo de Google
+    Drive. Es un respaldo best-effort: si falla, nunca debe bloquear el guardado principal
+    en el volumen de Railway, así que nunca lanza excepción hacia afuera."""
+    servicio = _servicio_drive()
+    if servicio is None:
+        return False
+    try:
+        from googleapiclient.http import MediaIoBaseUpload
+        nombre_archivo = f"nota_{int(numero_nota):02d}.pdf"
+        existentes = servicio.files().list(
+            q=f"name='{nombre_archivo}' and '{GDRIVE_CARPETA_PDFS_NOTAS}' in parents and trashed=false",
+            fields="files(id)",
+        ).execute().get("files", [])
+        media = MediaIoBaseUpload(BytesIO(pdf_bytes), mimetype="application/pdf", resumable=False)
+        if existentes:
+            servicio.files().update(fileId=existentes[0]["id"], media_body=media, fields="id").execute()
+        else:
+            servicio.files().create(
+                body={"name": nombre_archivo, "parents": [GDRIVE_CARPETA_PDFS_NOTAS]},
+                media_body=media, fields="id",
+            ).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _descargar_pdf_nota_de_drive(numero_nota: int) -> bytes | None:
+    """Descarga el PDF de respaldo de una nota desde Drive, si existe. Se usa como último
+    recurso cuando el archivo no está en el volumen local de Railway."""
+    servicio = _servicio_drive()
+    if servicio is None:
+        return None
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+        nombre_archivo = f"nota_{int(numero_nota):02d}.pdf"
+        encontrados = servicio.files().list(
+            q=f"name='{nombre_archivo}' and '{GDRIVE_CARPETA_PDFS_NOTAS}' in parents and trashed=false",
+            fields="files(id)",
+        ).execute().get("files", [])
+        if not encontrados:
+            return None
+        buffer = BytesIO()
+        descargador = MediaIoBaseDownload(buffer, servicio.files().get_media(fileId=encontrados[0]["id"]))
+        listo = False
+        while not listo:
+            _, listo = descargador.next_chunk()
+        return buffer.getvalue()
+    except Exception:
+        return None
+
 
 def guardar_pdf_nota(numero_nota: int, pdf_bytes: bytes) -> str:
     """Guarda el PDF oficial de una nota en el volumen persistente de Railway (/data), para
     poder auditarla más adelante sin tener que volver a pedírselo a nadie. Devuelve la ruta
-    guardada, o cadena vacía si no se pudo guardar (por ejemplo, en local sin volumen montado)."""
+    guardada, o cadena vacía si no se pudo guardar (por ejemplo, en local sin volumen montado).
+    Además, sube una copia de respaldo a Google Drive (best-effort: si falla, no afecta al
+    guardado principal ni al flujo de la nota)."""
+    ruta = ""
     try:
         os.makedirs(CARPETA_PDFS_NOTAS, exist_ok=True)
         ruta = os.path.join(CARPETA_PDFS_NOTAS, f"nota_{int(numero_nota):02d}.pdf")
         with open(ruta, "wb") as f:
             f.write(pdf_bytes)
-        return ruta
     except Exception:
-        return ""
+        ruta = ""
+    try:
+        _subir_pdf_nota_a_drive(numero_nota, pdf_bytes)
+    except Exception:
+        pass
+    try:
+        from postgres_writer import guardar_pdf_nota_postgres
+        guardar_pdf_nota_postgres(numero_nota, pdf_bytes)
+    except Exception:
+        pass
+    return ruta
 
 
 def leer_pdf_nota_guardado(numero_nota: int) -> bytes | None:
-    """Lee el PDF guardado de una nota, si existe."""
+    """Lee el PDF guardado de una nota. Primero intenta el volumen local de Railway (rápido);
+    si no está ahí, cae al respaldo en Google Drive y lo vuelve a guardar localmente de paso,
+    para no tener que volver a descargarlo la próxima vez."""
     ruta = os.path.join(CARPETA_PDFS_NOTAS, f"nota_{int(numero_nota):02d}.pdf")
     try:
         with open(ruta, "rb") as f:
             return f.read()
     except Exception:
-        return None
+        pass
+    try:
+        from postgres_reader import leer_pdf_nota_postgres
+        pdf_pg = leer_pdf_nota_postgres(numero_nota)
+        if pdf_pg:
+            try:
+                os.makedirs(CARPETA_PDFS_NOTAS, exist_ok=True)
+                with open(ruta, "wb") as f:
+                    f.write(pdf_pg)
+            except Exception:
+                pass
+            return pdf_pg
+    except Exception:
+        pass
+    pdf_drive = _descargar_pdf_nota_de_drive(numero_nota)
+    if pdf_drive:
+        try:
+            os.makedirs(CARPETA_PDFS_NOTAS, exist_ok=True)
+            with open(ruta, "wb") as f:
+                f.write(pdf_drive)
+        except Exception:
+            pass
+        return pdf_drive
+    return None
 
 
 def _guardar_pdf_factura(pdf_bytes: bytes, nombre_sugerido: str) -> Optional[str]:
@@ -9378,6 +9491,58 @@ def _tab_calendario_earnings(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_cont
     boton_descarga_excel(df_earnings, "calendario_earnings.xlsx")
 
 
+def _tab_pdfs_notas(df_control: pd.DataFrame):
+    st.caption(
+        "Documento oficial de cada nota: se guarda en tres sitios al crearla — el volumen del "
+        "servidor, Postgres y una carpeta de Google Drive — así el acceso nunca depende de un "
+        "único punto de fallo. Puedes verlo o descargarlo aquí en cualquier momento."
+    )
+
+    notas_existentes = sorted(
+        int(n) for n in pd.to_numeric(df_control.get("nota", pd.Series(dtype=float)), errors="coerce").dropna().unique()
+    ) if df_control is not None and not df_control.empty else []
+
+    if not notas_existentes:
+        st.info("No hay notas en CONTROL_NOTAS todavía.")
+        return
+
+    if st.button("🔄 Sincronizar backup (Drive + Postgres) con los PDFs locales que falten"):
+        from postgres_writer import guardar_pdf_nota_postgres
+        subidos_drive, subidos_pg, sin_local = 0, 0, 0
+        with st.spinner("Revisando y subiendo PDFs pendientes..."):
+            for n in notas_existentes:
+                ruta_local = os.path.join(CARPETA_PDFS_NOTAS, f"nota_{n:02d}.pdf")
+                if not os.path.exists(ruta_local):
+                    sin_local += 1
+                    continue
+                with open(ruta_local, "rb") as f:
+                    contenido = f.read()
+                subidos_drive += 1 if _subir_pdf_nota_a_drive(n, contenido) else 0
+                subidos_pg += 1 if guardar_pdf_nota_postgres(n, contenido) else 0
+        mensaje = f"Sincronización completada: {subidos_drive} PDF(s) al día en Drive, {subidos_pg} al día en Postgres."
+        if sin_local:
+            mensaje += f" {sin_local} nota(s) sin PDF en el servidor (no había nada que subir)."
+        st.success(mensaje)
+
+    st.markdown("---")
+    for n in notas_existentes:
+        ruta_local = os.path.join(CARPETA_PDFS_NOTAS, f"nota_{n:02d}.pdf")
+        en_local = os.path.exists(ruta_local)
+        col_a, col_b, col_c = st.columns([1.5, 2, 2.5])
+        col_a.markdown(f"**Nota {n}**")
+        col_b.caption("📁 En servidor" if en_local else "☁️ Solo en Drive (o no disponible)")
+        with col_c:
+            pdf_bytes = leer_pdf_nota_guardado(n)
+            if pdf_bytes:
+                st.download_button(
+                    "⬇️ Descargar PDF", data=pdf_bytes, file_name=f"nota_{n:02d}.pdf",
+                    mime="application/pdf", key=f"descargar_pdf_nota_{n}",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("PDF no disponible (ni en servidor ni en Drive).")
+
+
 def seccion_notas_archivo():
     df_inv, df_cal, df_control = cargar_excel_completo()
     df_calls = _leer_calendario_calls_cached()
@@ -9385,10 +9550,10 @@ def seccion_notas_archivo():
         df_calls["nota"] = pd.to_numeric(df_calls["nota"], errors="coerce")
     st.header("🧾 Notas")
 
-    tab_resumen, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings = st.tabs([
+    tab_resumen, tab_ficha, tab_analisis, tab_comparador, tab_noticias, tab_earnings, tab_pdfs = st.tabs([
         "📊 Resumen y alertas",
         "🏢 Ficha de compañía", "🔬 Análisis completo de nota", "⚖️ Comparador de notas",
-        "📰 Noticias", "📅 Calendario earnings",
+        "📰 Noticias", "📅 Calendario earnings", "📎 PDFs de notas",
     ])
 
     with tab_ficha:
@@ -9405,6 +9570,9 @@ def seccion_notas_archivo():
 
     with tab_earnings:
         _tab_calendario_earnings(df_inv, df_cal, df_control)
+
+    with tab_pdfs:
+        _tab_pdfs_notas(df_control)
 
     with tab_resumen:
         st.caption("Resumen de precios actuales, variación, barrera de contingencia y alertas por nota.")
