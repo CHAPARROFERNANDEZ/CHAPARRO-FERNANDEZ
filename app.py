@@ -2110,8 +2110,7 @@ def leer_hoja_excel(nombre_hoja: str) -> pd.DataFrame:
         except Exception as e:
             print(f"[DATA_SOURCE=postgres] Fallo leyendo '{nombre_hoja}' de Postgres, cayendo a Drive: {e}", file=sys.stderr)
     try:
-        if not os.path.exists(ARCHIVO):
-            descargar_excel_desde_drive()
+        descargar_excel_desde_drive()
         df = pd.read_excel(ARCHIVO, sheet_name=nombre_hoja)
         df.columns = [str(c).strip().lower() for c in df.columns]
         return df
@@ -11210,11 +11209,18 @@ def seccion_extractos():
 # GESTIÓN DE EXCEL DESDE LA APP
 # =========================
 def leer_todas_las_hojas_excel() -> dict:
-    """Lee todas las hojas del archivo Excel para poder conservarlas al guardar."""
-    import os
+    """Lee todas las hojas del archivo Excel para poder conservarlas al guardar.
+
+    BUG REAL encontrado (27/08/2026): antes solo se descargaba de Drive si el archivo local
+    todavía no existía. Eso significa que si alguien edita el Google Sheet a mano (por ejemplo,
+    borrando filas) y justo después la app escribe algo (crear un préstamo, una nueva inversión,
+    etc.), esta función leía la copia local ANTIGUA — sin la edición manual — y esa base
+    desactualizada era la que se subía de vuelta a Drive, revirtiendo en silencio el cambio manual.
+    Ahora se refresca siempre desde Drive antes de leer, igual que ya hace
+    _cargar_excel_completo_desde_drive.
+    """
     try:
-        if not os.path.exists(ARCHIVO):
-            descargar_excel_desde_drive()
+        descargar_excel_desde_drive()
         hojas = pd.read_excel(ARCHIVO, sheet_name=None)
         return {str(nombre): df for nombre, df in hojas.items()}
     except Exception:
@@ -13035,7 +13041,7 @@ def crear_grupo_prestamos(prestamos: list, pago_mensual_total: float, fecha_inic
             "email": "",
             "pago_intereses": "",
         }
-        filas_inversiones.append({mapa.get(k, k): v for k, v in fila_logica.items() if mapa.get(k)})
+        filas_inversiones.append({mapa.get(k, k): v for k, v in fila_logica.items()})
 
         filas_prestamos.append({
             "grupo_prestamo": grupo,
@@ -13101,7 +13107,7 @@ def agregar_prestamo_a_grupo(grupo_prestamo: str, inversor: str, capital_origina
         "interes_inversor_anual": tasa_dec, "tipo_operacion": "NUEVA", "id_inversion_origen": "",
         "capital_nuevo_real": float(capital_original), "email": "", "pago_intereses": "",
     }
-    fila_real = {mapa.get(k, k): v for k, v in fila_logica.items() if mapa.get(k)}
+    fila_real = {mapa.get(k, k): v for k, v in fila_logica.items()}
     hojas["INVERSIONES"] = pd.concat([df_inv_raw, pd.DataFrame([fila_real])], ignore_index=True)
 
     fila_prestamo_nueva = {
@@ -13126,20 +13132,29 @@ def agregar_prestamo_a_grupo(grupo_prestamo: str, inversor: str, capital_origina
     return True, f"Préstamo {id_prestamo_nuevo} añadido al grupo. Cuotas mensuales recalculadas pro-rata para los {len(ids_activos)} préstamo(s) activos."
 
 
-def registrar_pago_mensual_prestamo(id_prestamo: str, fecha_pago: pd.Timestamp, destino: dict) -> tuple[bool, str]:
+def registrar_pago_mensual_prestamo(id_prestamo: str, fecha_pago: pd.Timestamp, destino: dict, fecha_reinversion: pd.Timestamp | None = None) -> tuple[bool, str]:
     """
     Registra el pago mensual de UN préstamo concreto (uno a la vez, se entra al préstamo que
     corresponda). Funciona igual estés amortizando o ya hayas liquidado el principal:
       - Si queda capital pendiente: el importe de la cuota (o lo que quede, si es menor) baja de
-        capital_pendiente. No se toca ni se cierra la fila permanente del inversor en INVERSIONES.
+        capital_pendiente EN LA FECHA DE PAGO. No se toca ni se cierra la fila permanente del
+        inversor en INVERSIONES.
       - Si ya está liquidado (capital_pendiente = 0): el importe es la cuota mensual completa.
-    En ambos casos, ese importe se registra como una fila NUEVA en INVERSIONES a nombre de
-    'CHAPARRO FERNANDEZ' (beneficio real de la empresa, a la tasa del activo de destino elegido),
-    enlazada al préstamo de origen solo para trazabilidad.
+    'fecha_pago' es cuándo Yuri amortiza (fecha de referencia del mes, para no poder registrar el
+    mismo mes dos veces). 'fecha_reinversion' es cuándo ese dinero empieza realmente a generar
+    rendimiento en el activo de destino — puede ser posterior a fecha_pago (ej. amortizas el 31/08
+    pero no reinviertes hasta el 7/9); si no se indica, se usa la misma fecha_pago. Ese importe se
+    registra como una fila NUEVA en INVERSIONES a nombre de 'CHAPARRO FERNANDEZ' (beneficio real de
+    la empresa, a la tasa del activo de destino elegido, empezando a devengar desde
+    fecha_reinversion), enlazada al préstamo de origen solo para trazabilidad.
     'destino' = {"tipo_inversion": str, "nombre_activo": str, "tasa_empresa_anual_pct": float}.
     """
     if not destino.get("tipo_inversion") or not destino.get("nombre_activo"):
         return False, "Falta el destino de la reinversión."
+    if fecha_reinversion is None:
+        fecha_reinversion = fecha_pago
+    if fecha_reinversion < fecha_pago:
+        return False, "La fecha de reinversión no puede ser anterior a la fecha del pago/amortización."
 
     df_prestamos = cargar_prestamos_internos()
     fila_df = df_prestamos[df_prestamos["id_prestamo"] == id_prestamo]
@@ -13168,15 +13183,16 @@ def registrar_pago_mensual_prestamo(id_prestamo: str, fecha_pago: pd.Timestamp, 
 
     id_inv_nuevo = _siguiente_id_inversion(df_inv_raw)
     tasa_empresa_dec = round(float(destino.get("tasa_empresa_anual_pct", 0)) / 100.0, 6)
+    nota_fecha = "" if fecha_reinversion == fecha_pago else f" — amortizado el {fecha_pago.strftime('%d/%m/%Y')}, reinvertido el {fecha_reinversion.strftime('%d/%m/%Y')}"
     fila_logica = {
         "id_inversion": id_inv_nuevo,
         "inversor": "CHAPARRO FERNANDEZ",
         "tipo_inversion": destino["tipo_inversion"],
         "subtipo_inversion": destino.get("subtipo_inversion", destino["tipo_inversion"]),
         "nombre_activo": destino["nombre_activo"],
-        "fecha_inversion": fecha_pago.strftime('%d/%m/%Y'),
+        "fecha_inversion": fecha_reinversion.strftime('%d/%m/%Y'),
         "fecha_final_inversion": "",
-        "motivo": f"Reinversión préstamo {id_prestamo} — {mes_label}" + (" (post-liquidación, beneficio empresa)" if liquidado_antes else ""),
+        "motivo": f"Reinversión préstamo {id_prestamo} — {mes_label}" + (" (post-liquidación, beneficio empresa)" if liquidado_antes else "") + nota_fecha,
         "capital_invertido": monto_tramo,
         "interes_nota_anual": tasa_empresa_dec,
         "interes_inversor_anual": 0.0,
@@ -13186,7 +13202,7 @@ def registrar_pago_mensual_prestamo(id_prestamo: str, fecha_pago: pd.Timestamp, 
         "email": "",
         "pago_intereses": "",
     }
-    fila_real = {mapa.get(k, k): v for k, v in fila_logica.items() if mapa.get(k)}
+    fila_real = {mapa.get(k, k): v for k, v in fila_logica.items()}
     hojas["INVERSIONES"] = pd.concat([df_inv_raw, pd.DataFrame([fila_real])], ignore_index=True)
 
     idx = df_prestamos[df_prestamos["id_prestamo"] == id_prestamo].index
@@ -13199,10 +13215,11 @@ def registrar_pago_mensual_prestamo(id_prestamo: str, fecha_pago: pd.Timestamp, 
     hojas[HOJA_PRESTAMOS_INTERNOS] = df_prestamos
 
     guardar_excel_completo_desde_hojas(hojas)
+    sufijo_fecha = "" if fecha_reinversion == fecha_pago else f", con rendimiento desde el {fecha_reinversion.strftime('%d/%m/%Y')}"
     if liquidado_antes:
-        msg = f"Pago de {mes_label} registrado: {fmt(monto_tramo)} — 100% beneficio de la empresa (préstamo ya liquidado), reinvertido en {destino['nombre_activo']}."
+        msg = f"Pago de {mes_label} registrado: {fmt(monto_tramo)} — 100% beneficio de la empresa (préstamo ya liquidado), reinvertido en {destino['nombre_activo']}{sufijo_fecha}."
     else:
-        msg = f"Pago de {mes_label} registrado: {fmt(monto_tramo)} amortizados y reinvertidos en {destino['nombre_activo']}."
+        msg = f"Pago de {mes_label} registrado: {fmt(monto_tramo)} amortizados y reinvertidos en {destino['nombre_activo']}{sufijo_fecha}."
         if capital_pendiente_nuevo <= 0.005:
             msg += " 🎉 Préstamo liquidado por completo — a partir del próximo pago, ya es beneficio de la empresa."
         else:
@@ -13456,7 +13473,18 @@ def mostrar_vista_prestamos_dashboard(_es_yuri: bool):
 
                     if _es_yuri:
                         st.markdown("**Registrar pago del mes**")
-                        fecha_pago = st.date_input("Fecha de este pago", value=pd.Timestamp.today().date(), key=f"prestamos_fecha_pago_{r['id_prestamo']}")
+                        cf1, cf2 = st.columns(2)
+                        with cf1:
+                            fecha_pago = st.date_input(
+                                "Fecha de amortización (cuándo pagas/reduces el préstamo)",
+                                value=pd.Timestamp.today().date(), key=f"prestamos_fecha_pago_{r['id_prestamo']}",
+                            )
+                        with cf2:
+                            fecha_reinversion = st.date_input(
+                                "Fecha en la que empieza a rendir la reinversión",
+                                value=pd.Timestamp(fecha_pago).date(), key=f"prestamos_fecha_reinversion_{r['id_prestamo']}",
+                                help="Normalmente coincide con la fecha de amortización, pero puedes ponerla más adelante si el dinero no se reinvierte de inmediato (ej. amortizas el 31/08 pero no reinviertes hasta el 7/9).",
+                            )
                         cp1, cp2, cp3 = st.columns(3)
                         with cp1:
                             tipo_dest = st.selectbox("Destino de la reinversión", tipos_activo_conocidos, key=f"prestamos_dest_tipo_{r['id_prestamo']}")
@@ -13473,6 +13501,7 @@ def mostrar_vista_prestamos_dashboard(_es_yuri: bool):
                             ok, msg = registrar_pago_mensual_prestamo(
                                 r["id_prestamo"], pd.Timestamp(fecha_pago),
                                 {"tipo_inversion": tipo_dest, "nombre_activo": nombre_activo_dest, "tasa_empresa_anual_pct": tasa_empresa},
+                                fecha_reinversion=pd.Timestamp(fecha_reinversion),
                             )
                             if ok:
                                 st.success(msg)
