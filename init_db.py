@@ -158,6 +158,39 @@ def sincronizar_usuarios(engine, df_usuarios: pd.DataFrame):
     log(f"USUARIOS: {len(df)} fila(s) sincronizada(s).")
 
 
+def _parsear_fecha_celda(valor):
+    """Parsea UNA celda de fecha admitiendo tanto un Timestamp/datetime ya parseado por
+    pandas (caso normal) como texto en distintos formatos (DD/MM/AAAA, AAAA-MM-DD, con o sin
+    hora) — que es lo que ocurre cuando alguien escribe la fecha a mano en el Sheet y Google
+    Sheets la guarda como texto en vez de como fecha real, mezclada con otras celdas de la
+    misma columna que sí son fechas genuinas.
+
+    BUG que corrige esta función (encontrado 27/08/2026): cuando una columna de fecha mezcla
+    fechas reales (dtype datetime) con texto (p.ej. "2026-08-24" sin hora, tecleado a mano),
+    pandas marca la columna ENTERA como dtype 'object' en vez de 'datetime64'. El código antiguo
+    comprobaba is_datetime64_any_dtype(columna) para decidir si normalizarla, así que esa
+    comprobación fallaba para la columna completa y NINGUNA fecha se normalizaba de forma
+    explícita — las celdas de texto llegaban a Postgres tal cual (sin hora), y luego
+    pd.to_datetime() en postgres_reader.py no siempre las reconocía, dejándolas como NaT
+    (nulas). Como el capital activo exige fecha_inversion no nula, esas filas desaparecían en
+    silencio del dashboard aunque el resto de sus datos estuviera perfecto (caso real: OP132 y
+    OP138, 95.000€ desaparecidos del capital activo). Aquí parseamos celda a celda, sin
+    depender del dtype de la columna, así da igual cómo se haya escrito la fecha origen."""
+    if pd.isna(valor):
+        return pd.NaT
+    if isinstance(valor, (pd.Timestamp, datetime)):
+        return pd.Timestamp(valor)
+    texto = str(valor).strip()
+    if not texto:
+        return pd.NaT
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return pd.to_datetime(texto, format=fmt)
+        except (ValueError, TypeError):
+            continue
+    return pd.to_datetime(texto, errors="coerce", dayfirst=True)
+
+
 def sincronizar_hoja_automatica(engine, nombre_hoja: str, df: pd.DataFrame) -> int:
     if df is None or df.empty:
         log(f"{nombre_hoja}: hoja vacía, se omite (la tabla se crea igualmente si no existía).")
@@ -166,6 +199,24 @@ def sincronizar_hoja_automatica(engine, nombre_hoja: str, df: pd.DataFrame) -> i
     df = normalizar_columnas(df)
     # Fechas y JSON como texto plano por ahora — sin fricción de tipos mientras estamos en fase
     # de espejo/lectura. Se afinarán tipos y claves cuando migremos esta hoja a código de verdad.
+    #
+    # IMPORTANTE: cualquier columna cuyo nombre contenga "fecha" se parsea celda a celda con
+    # _parsear_fecha_celda ANTES de mirar el dtype. No nos fiamos de is_datetime64_any_dtype
+    # sobre la columna completa: una sola celda de texto mezclada con fechas reales hace que
+    # pandas marque la columna entera como 'object' y el chequeo de dtype se salte esa columna
+    # por completo (ver docstring de _parsear_fecha_celda para el caso real que esto causó).
+    columnas_fecha = [c for c in df.columns if "fecha" in c]
+    for col in columnas_fecha:
+        celda_estaba_rellena = df[col].notna() & (df[col].astype(str).str.strip() != "")
+        df[col] = df[col].apply(_parsear_fecha_celda)
+        # Si una celda que SÍ tenía contenido en origen se quedó en NaT tras el parseo, es un
+        # dato real perdido — lo avisamos en el log en vez de dejarlo pasar en silencio, para
+        # detectarlo en el propio deploy en vez de descubrirlo semanas después comparando el
+        # dashboard contra el Excel a mano (como pasó con OP132 y OP138 el 27/08/2026).
+        perdidas = celda_estaba_rellena & df[col].isna()
+        if perdidas.any():
+            n_perdidas = int(perdidas.sum())
+            log(f"AVISO {nombre_hoja}.{col}: {n_perdidas} fecha(s) no se pudieron interpretar y quedan vacías. Revisa esas filas en el Sheet (formato de fecha no reconocido).")
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
