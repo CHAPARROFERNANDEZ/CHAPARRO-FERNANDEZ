@@ -5713,7 +5713,7 @@ def dashboard_financiero():
     col_activo, col_periodo_1, col_periodo_2, col_chaparro, col_prorrateo, col_devengo = st.columns([1.2, 0.8, 0.8, 1.0, 1.0, 1.0])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
-        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin"],
+        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin", "Préstamo"],
         key="dashboard_vista_activo",
     )
     incluir_chaparro = col_chaparro.checkbox(
@@ -5753,6 +5753,11 @@ def dashboard_financiero():
         f"Chaparro Fernández: {'incluido' if incluir_chaparro else 'excluido'} · "
         f"Cobro de notas: {'prorrateado (devengo mensual)' if prorratear_notas else 'real (calendario)'}"
     )
+
+    if vista_dashboard == "Préstamo":
+        _es_yuri_dashboard = str(st.session_state.get("usuario", "")).strip().lower() == "yuri"
+        mostrar_vista_prestamos_dashboard(_es_yuri_dashboard)
+        return
 
     df_inv_marcado = aplicar_filtro_chaparro_fernandez(df_inv, True)
     inversiones_chaparro = df_inv_marcado[df_inv_marcado.get("es_chaparro_fernandez", False) == True].copy() if not df_inv_marcado.empty else pd.DataFrame()
@@ -12913,20 +12918,49 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PRÉSTAMOS INTERNOS — préstamos que le hacen a Yuri (persona física) uno o
-# varios inversores, devueltos en cuotas mensuales fijas. Mientras hay capital
-# pendiente, cada cuota amortiza el préstamo (no genera beneficio) y ese
-# capital liberado se reinvierte a nombre del inversor original en el activo
-# que corresponda ese mes — su capital total no baja, solo cambia de sitio.
-# Cuando el préstamo queda liquidado, las cuotas siguientes ya son intereses
-# puros: beneficio de Chaparro Fernández (entidad al 0%, igual que el resto
-# de posiciones propias de la empresa).
+# PRÉSTAMOS INTERNOS — un inversor le presta dinero a Yuri (persona física).
+#
+# LÓGICA (v2, rediseñada desde cero):
+#
+# 1) PARA EL INVERSOR NO CAMBIA NADA. Es una inversión NUEVA normal: se crea
+#    UNA fila permanente en INVERSIONES (capital_invertido = capital prestado,
+#    fecha_inversion = fecha en la que prestó el dinero — su "inversión matriz",
+#    que nunca se toca) y cobra su tasa de siempre, para siempre, sobre ese
+#    capital completo. Esa fila NO se cierra ni se edita nunca por el proceso
+#    mensual — así el extracto del inversor queda intacto. Para la empresa esa
+#    fila es un coste puro (interes_nota_anual = 0): no genera ningún ingreso
+#    por sí misma, porque lo que hay detrás de ese capital cambia mes a mes.
+#
+# 2) CÓMO SE DEVUELVE. Yuri paga una cuota fija mensual. Mientras queda
+#    capital pendiente, esa cuota es 100% amortización de principal — no es
+#    un ingreso para la empresa, es simplemente que ese dinero deja de estar
+#    "prestado" y pasa a estar disponible. Una vez que el capital pendiente
+#    llega a 0, los pagos mensuales que Yuri siga haciendo (el mismo importe
+#    de la cuota) ya no amortizan nada — son beneficio puro de la empresa.
+#    El capital_pendiente de cada préstamo se lleva aparte, solo en la hoja
+#    PRESTAMOS_INTERNOS — nunca toca la fila permanente del inversor.
+#
+# 3) QUÉ PASA CON EL DINERO AMORTIZADO (o, tras liquidar, con la cuota
+#    completa). Cada mes Yuri decide en qué se reinvierte (una nota, Paraguay,
+#    lo que sea) y a qué tasa rinde ahí. Eso SÍ genera un ingreso real para la
+#    empresa. Se registra como una fila NUEVA normal en INVERSIONES a nombre
+#    de 'CHAPARRO FERNANDEZ' (0% de tasa inversor, igual que cualquier otra
+#    posición propia de la empresa) — así reutiliza tal cual todo el motor de
+#    cálculo de intereses que ya existe para Paraguay/notas/etc., sin tener
+#    que inventar nada nuevo. Esta fila queda vinculada al préstamo de origen
+#    vía id_inversion_origen, solo para trazabilidad — no afecta al cálculo.
+#
+# Con esto, la suma de: fila permanente del inversor (capital fijo, coste fijo)
+# + filas CHAPARRO FERNANDEZ de cada tramo reinvertido (capital creciente,
+# ingreso real) representa exactamente la realidad: el inversor cobra su tasa
+# siempre sobre su capital completo, y la empresa gana (o no gana nada, si el
+# tramo todavía no se ha movido a ningún sitio) según dónde esté cada tramo.
 # ═══════════════════════════════════════════════════════════════════
 
 HOJA_PRESTAMOS_INTERNOS = "PRESTAMOS_INTERNOS"
 COLUMNAS_PRESTAMOS_INTERNOS = [
     "grupo_prestamo", "id_prestamo", "inversor", "capital_original", "capital_pendiente",
-    "cuota_mensual", "tasa_inversor_anual", "fecha_inicio", "id_inversion_actual",
+    "cuota_mensual", "tasa_inversor_anual", "fecha_inicio", "id_inversion_inversor",
     "estado", "fecha_liquidacion", "meses_procesados", "pago_mensual_total", "notas",
 ]
 
@@ -12951,13 +12985,13 @@ def cargar_prestamos_internos() -> pd.DataFrame:
 
 def crear_grupo_prestamos(prestamos: list, pago_mensual_total: float, fecha_inicio: pd.Timestamp) -> tuple[bool, str]:
     """
-    Da de alta un nuevo grupo de préstamos internos hechos a Yuri por uno o varios inversores.
-    'prestamos' es una lista de dicts: {"inversor": str, "capital_original": float, "tasa_inversor_anual_pct": float}.
+    Da de alta uno o varios préstamos a la vez (un 'grupo'). 'prestamos' es una lista de dicts:
+    {"inversor": str, "capital_original": float, "tasa_inversor_anual_pct": float}.
     La cuota mensual de cada préstamo se reparte pro-rata sobre 'pago_mensual_total' según su
-    capital, de forma que todos los préstamos del grupo terminan de amortizarse el mismo mes —
-    así no hay que decidir arbitrariamente qué inversor cobra antes.
-    Crea una fila NUEVA en INVERSIONES por cada préstamo (representa el capital comprometido en el
-    préstamo, tasa = la que cobra ese inversor) y una fila en PRESTAMOS_INTERNOS por cada uno.
+    capital, para que todos terminen de amortizarse el mismo mes.
+    Crea, por cada préstamo, UNA fila PERMANENTE en INVERSIONES a nombre del inversor (ver
+    cabecera del módulo) y una fila en PRESTAMOS_INTERNOS para llevar el seguimiento del capital
+    pendiente de Yuri.
     """
     if not prestamos:
         return False, "No hay ningún préstamo que dar de alta."
@@ -12989,16 +13023,11 @@ def crear_grupo_prestamos(prestamos: list, pago_mensual_total: float, fecha_inic
             "tipo_inversion": "prestamo",
             "subtipo_inversion": "PRESTAMO_INTERNO_YURI",
             "nombre_activo": f"PRESTAMO_YURI_{id_prestamo}",
-            "metodo_calculo": "",
-            "cuenta_cobro": "",
-            "activo_generador_interes": "",
-            "fecha_inversion": str(fecha_inicio.date()),
+            "fecha_inversion": fecha_inicio.strftime('%d/%m/%Y'),
             "fecha_final_inversion": "",
-            "motivo": "",
+            "motivo": "Préstamo interno a Yuri — fila permanente, no se modifica en el proceso mensual",
             "capital_invertido": float(p["capital_original"]),
-            # Mientras el capital está "aparcado" en el préstamo, la empresa no gana spread
-            # (breakeven) — el spread llega en cuanto ese tramo se reinvierte de verdad.
-            "interes_nota_anual": tasa_dec,
+            "interes_nota_anual": 0.0,  # la empresa no gana nada por esta fila en sí (ver cabecera)
             "interes_inversor_anual": tasa_dec,
             "tipo_operacion": "NUEVA",
             "id_inversion_origen": "",
@@ -13016,8 +13045,8 @@ def crear_grupo_prestamos(prestamos: list, pago_mensual_total: float, fecha_inic
             "capital_pendiente": float(p["capital_original"]),
             "cuota_mensual": cuota,
             "tasa_inversor_anual": tasa_dec,
-            "fecha_inicio": str(fecha_inicio.date()),
-            "id_inversion_actual": id_inv,
+            "fecha_inicio": fecha_inicio.strftime('%d/%m/%Y'),
+            "id_inversion_inversor": id_inv,
             "estado": "ACTIVO",
             "fecha_liquidacion": "",
             "meses_procesados": "",
@@ -13032,255 +13061,15 @@ def crear_grupo_prestamos(prestamos: list, pago_mensual_total: float, fecha_inic
     return True, f"Grupo de préstamos '{grupo}' creado con {len(prestamos)} préstamo(s). Cuota mensual total: {fmt(pago_mensual_total)}."
 
 
-def procesar_pago_mensual_prestamos(grupo_prestamo: str, fecha_pago: pd.Timestamp, destinos: dict) -> tuple[bool, str]:
-    """
-    Registra el pago mensual de un grupo de préstamos ACTIVOS:
-      1) Cierra (CANCELADA, vía fecha_final_inversion) la fila de INVERSIONES que representaba el
-         saldo pendiente hasta ahora.
-      2) Si queda saldo tras la cuota, abre una fila REINVERSION nueva con el saldo restante
-         (mismo inversor, misma tasa, mismo préstamo — no reinicia nada, solo refleja el capital
-         que TODAVÍA no se ha reinvertido en ningún activo real, así que es breakeven: el inversor
-         cobra su tasa de siempre pero la empresa no gana nada sobre ese tramo sin desplegar).
-      3) El importe amortizado ese mes se reinvierte como otra fila REINVERSION en el activo
-         elegido para ese préstamo este mes. En cuanto ese tramo aterriza en un activo real (una
-         nota, Paraguay, Bitcoin...), es una inversión más como cualquier otra — la empresa SÍ gana
-         su margen normal ahí (tasa del activo de destino menos la tasa del inversor), aunque el
-         origen del capital sea una reinversión de este préstamo.
-      4) Si con este pago el préstamo llega a 0, lo marca LIQUIDADO.
-    'destinos' = {id_prestamo: {"tipo_inversion": str, "nombre_activo": str, "tasa_empresa_anual_pct": float}}.
-    """
-    df_prestamos = cargar_prestamos_internos()
-    grupo_rows = df_prestamos[(df_prestamos["grupo_prestamo"] == grupo_prestamo) & (df_prestamos["estado"] == "ACTIVO")]
-    if grupo_rows.empty:
-        return False, "No hay préstamos ACTIVOS en ese grupo — puede que ya estén todos liquidados."
-
-    mes_label = fecha_pago.strftime("%m/%Y")
-    ya_procesados = []
-    for _, r in grupo_rows.iterrows():
-        meses = [m.strip() for m in str(r.get("meses_procesados", "") or "").split(",") if m.strip()]
-        if mes_label in meses:
-            ya_procesados.append(r["id_prestamo"])
-    if ya_procesados:
-        return False, f"El mes {mes_label} ya está registrado para: {', '.join(ya_procesados)}. Si necesitas corregirlo, edítalo a mano en 'Gestión de Excel'."
-
-    for id_prestamo in destinos:
-        if not destinos[id_prestamo].get("tipo_inversion") or not destinos[id_prestamo].get("nombre_activo"):
-            return False, f"Falta el destino de reinversión para el préstamo {id_prestamo}."
-
-    hojas = leer_todas_las_hojas_excel()
-    if not hojas or "INVERSIONES" not in hojas:
-        return False, "No se pudo leer INVERSIONES."
-    mapa = _mapa_columnas_reales(hojas, "INVERSIONES")
-    df_inv_raw = hojas["INVERSIONES"]
-    col_id = mapa.get("id_inversion")
-    col_ff = mapa.get("fecha_final_inversion")
-    col_mot = mapa.get("motivo")
-    if not col_id or not col_ff:
-        return False, "No se encontraron las columnas id_inversion / fecha_final_inversion en INVERSIONES."
-
-    filas_nuevas_inversiones = []
-    actualizaciones_prestamos = []
-
-    for _, r in grupo_rows.iterrows():
-        id_prestamo = r["id_prestamo"]
-        dest = destinos.get(id_prestamo)
-        if not dest:
-            return False, f"Falta el destino de reinversión para el préstamo {id_prestamo}."
-
-        capital_pendiente_ant = float(r["capital_pendiente"])
-        cuota = min(float(r["cuota_mensual"]), capital_pendiente_ant)
-        capital_pendiente_nuevo = round(capital_pendiente_ant - cuota, 2)
-        id_inv_actual = str(r["id_inversion_actual"])
-        tasa_dec = float(r["tasa_inversor_anual"])
-
-        mascara = df_inv_raw[col_id].astype(str) == id_inv_actual
-        if not mascara.any():
-            return False, f"No se encontró en INVERSIONES la fila {id_inv_actual} del préstamo {id_prestamo} — revisa si el Excel cambió desde que se cargó esta pantalla."
-        # OJO días inclusivos: dias_activos_en_mes cuenta AMBOS extremos (fecha_inicio y
-        # fecha_final) como días activos. Si cerráramos esta fila el mismo día en que empiezan
-        # las filas nuevas, ese día se pagaría interés dos veces (una vez sobre el capital viejo,
-        # otra vez sobre el nuevo) — se cierra un día antes para que no se solapen.
-        df_inv_raw.loc[mascara, col_ff] = pd.Timestamp(fecha_pago) - pd.Timedelta(days=1)
-        if col_mot:
-            df_inv_raw.loc[mascara, col_mot] = f"Amortización préstamo interno {mes_label}"
-
-        id_inv_nuevo_saldo = ""
-        if capital_pendiente_nuevo > 0.005:
-            id_inv_nuevo_saldo = _siguiente_id_inversion(df_inv_raw, offset=len(filas_nuevas_inversiones))
-            # Breakeven: este tramo todavía no está en ningún activo real, solo refleja lo que
-            # queda por devolver — el inversor cobra igual, la empresa no gana nada aquí.
-            fila_saldo = {
-                "id_inversion": id_inv_nuevo_saldo,
-                "inversor": r["inversor"],
-                "tipo_inversion": "prestamo",
-                "subtipo_inversion": "PRESTAMO_INTERNO_YURI",
-                "nombre_activo": f"PRESTAMO_YURI_{id_prestamo}",
-                "fecha_inversion": str(fecha_pago.date()),
-                "fecha_final_inversion": "",
-                "motivo": "",
-                "capital_invertido": capital_pendiente_nuevo,
-                "interes_nota_anual": tasa_dec,
-                "interes_inversor_anual": tasa_dec,
-                "tipo_operacion": "REINVERSION",
-                "id_inversion_origen": id_inv_actual,
-                "capital_nuevo_real": capital_pendiente_nuevo,
-                "email": "",
-                "pago_intereses": "",
-            }
-            filas_nuevas_inversiones.append({mapa.get(k, k): v for k, v in fila_saldo.items() if mapa.get(k)})
-
-        id_inv_reinversion = _siguiente_id_inversion(df_inv_raw, offset=len(filas_nuevas_inversiones))
-        # Este tramo SÍ aterriza en un activo real este mes — es una inversión normal, con el
-        # margen normal de la empresa (tasa del activo de destino, no la del inversor).
-        tasa_empresa_dec = round(float(dest.get("tasa_empresa_anual_pct", 0)) / 100.0, 6)
-        fila_reinv = {
-            "id_inversion": id_inv_reinversion,
-            "inversor": r["inversor"],
-            "tipo_inversion": dest["tipo_inversion"],
-            "subtipo_inversion": dest.get("subtipo_inversion", dest["tipo_inversion"]),
-            "nombre_activo": dest["nombre_activo"],
-            "fecha_inversion": str(fecha_pago.date()),
-            "fecha_final_inversion": "",
-            "motivo": "",
-            "capital_invertido": cuota,
-            "interes_nota_anual": tasa_empresa_dec,
-            "interes_inversor_anual": tasa_dec,
-            "tipo_operacion": "REINVERSION",
-            "id_inversion_origen": id_inv_actual,
-            "capital_nuevo_real": cuota,
-            "email": "",
-            "pago_intereses": "",
-        }
-        filas_nuevas_inversiones.append({mapa.get(k, k): v for k, v in fila_reinv.items() if mapa.get(k)})
-
-        meses_prev = str(r.get("meses_procesados", "") or "")
-        meses_nuevo = (meses_prev + ", " if meses_prev else "") + mes_label
-        actualizaciones_prestamos.append({
-            "id_prestamo": id_prestamo,
-            "capital_pendiente": capital_pendiente_nuevo,
-            "id_inversion_actual": id_inv_nuevo_saldo,
-            "estado": "LIQUIDADO" if capital_pendiente_nuevo <= 0.005 else "ACTIVO",
-            "fecha_liquidacion": str(fecha_pago.date()) if capital_pendiente_nuevo <= 0.005 else "",
-            "meses_procesados": meses_nuevo,
-        })
-
-    hojas["INVERSIONES"] = pd.concat([df_inv_raw, pd.DataFrame(filas_nuevas_inversiones)], ignore_index=True)
-
-    for act in actualizaciones_prestamos:
-        idx = df_prestamos[df_prestamos["id_prestamo"] == act["id_prestamo"]].index
-        for col, val in act.items():
-            if col == "id_prestamo":
-                continue
-            df_prestamos.loc[idx, col] = val
-    hojas[HOJA_PRESTAMOS_INTERNOS] = df_prestamos
-
-    guardar_excel_completo_desde_hojas(hojas)
-    liquidados = [a["id_prestamo"] for a in actualizaciones_prestamos if a["estado"] == "LIQUIDADO"]
-    msg = f"Pago de {mes_label} registrado para {len(actualizaciones_prestamos)} préstamo(s)."
-    if liquidados:
-        msg += f" 🎉 Liquidado(s) por completo: {', '.join(liquidados)}."
-    return True, msg
-
-
-def registrar_intereses_mes_prestamos(grupo_prestamo: str, fecha_pago: pd.Timestamp, destino: dict, inversor_destino: str, tasa_inversor_destino_anual_pct: float) -> tuple[bool, str]:
-    """
-    Una vez todos los préstamos de un grupo están LIQUIDADO, los pagos mensuales que Yuri sigue
-    haciendo ya no amortizan capital, pero OJO — no son beneficio puro de la empresa a menos que
-    tú lo digas explícitamente: ese dinero puede estar comprometido con otro inversor (real, ya
-    dado de alta en el sistema), igual que cualquier otra reinversión. Por eso 'inversor_destino'
-    y su tasa son obligatorios: se registra como una fila NUEVA en INVERSIONES a nombre de ese
-    inversor, reinvertida en el activo elegido. El beneficio real de la empresa es solo el margen
-    entre lo que rinde el activo de destino (tasa_empresa_anual_pct) y lo que se le paga a ese
-    inversor (tasa_inversor_destino_anual_pct) — igual que en cualquier otra posición del fondo.
-    Si de verdad no hay ningún inversor detrás (beneficio 100% de la empresa), se puede seguir
-    usando 'CHAPARRO FERNANDEZ' con tasa 0% como inversor_destino.
-    'destino' = {"tipo_inversion": str, "nombre_activo": str, "tasa_empresa_anual_pct": float}.
-    """
-    if not inversor_destino or not str(inversor_destino).strip():
-        return False, "Falta indicar a nombre de qué inversor se registra este pago mensual."
-
-    df_prestamos = cargar_prestamos_internos()
-    grupo_rows = df_prestamos[df_prestamos["grupo_prestamo"] == grupo_prestamo]
-    if grupo_rows.empty:
-        return False, "No se encontró ese grupo de préstamos."
-    grupo_rows_reales = grupo_rows[~grupo_rows["id_prestamo"].astype(str).str.endswith("-INTERESES")]
-    if grupo_rows_reales.empty:
-        return False, "No se encontró ese grupo de préstamos."
-    if (grupo_rows_reales["estado"] != "LIQUIDADO").any():
-        return False, "Todavía quedan préstamos ACTIVOS en este grupo — usa 'Registrar pago del mes' normal, no esta opción."
-
-    pago_mensual_total = float(grupo_rows_reales["pago_mensual_total"].iloc[0])
-    mes_label = fecha_pago.strftime("%m/%Y")
-
-    id_marcador = f"{grupo_prestamo}-INTERESES"
-    fila_marcador = df_prestamos[df_prestamos["id_prestamo"] == id_marcador]
-    meses_prev = str(fila_marcador.iloc[0].get("meses_procesados", "")) if not fila_marcador.empty else ""
-    if mes_label in [m.strip() for m in meses_prev.split(",") if m.strip()]:
-        return False, f"El mes {mes_label} ya está registrado como intereses para este grupo."
-
-    hojas = leer_todas_las_hojas_excel()
-    if not hojas or "INVERSIONES" not in hojas:
-        return False, "No se pudo leer INVERSIONES."
-    mapa = _mapa_columnas_reales(hojas, "INVERSIONES")
-    df_inv_raw = hojas["INVERSIONES"]
-
-    id_inv_nuevo = _siguiente_id_inversion(df_inv_raw)
-    tasa_empresa_dec = round(float(destino.get("tasa_empresa_anual_pct", 0)) / 100.0, 6)
-    tasa_inversor_dec = round(float(tasa_inversor_destino_anual_pct) / 100.0, 6)
-    fila_logica = {
-        "id_inversion": id_inv_nuevo,
-        "inversor": inversor_destino,
-        "tipo_inversion": destino["tipo_inversion"],
-        "subtipo_inversion": destino.get("subtipo_inversion", destino["tipo_inversion"]),
-        "nombre_activo": destino["nombre_activo"],
-        "fecha_inversion": str(fecha_pago.date()),
-        "fecha_final_inversion": "",
-        "motivo": "",
-        "capital_invertido": pago_mensual_total,
-        "interes_nota_anual": tasa_empresa_dec,
-        "interes_inversor_anual": tasa_inversor_dec,
-        "tipo_operacion": "NUEVA",
-        "id_inversion_origen": "",
-        "capital_nuevo_real": pago_mensual_total,
-        "email": "",
-        "pago_intereses": "",
-    }
-    fila_real = {mapa.get(k, k): v for k, v in fila_logica.items() if mapa.get(k)}
-    hojas["INVERSIONES"] = pd.concat([df_inv_raw, pd.DataFrame([fila_real])], ignore_index=True)
-
-    meses_nuevo = (meses_prev + ", " if meses_prev else "") + mes_label
-    if fila_marcador.empty:
-        nueva_fila_marcador = {
-            "grupo_prestamo": grupo_prestamo, "id_prestamo": id_marcador, "inversor": inversor_destino,
-            "capital_original": 0, "capital_pendiente": 0, "cuota_mensual": pago_mensual_total,
-            "tasa_inversor_anual": tasa_inversor_dec, "fecha_inicio": str(fecha_pago.date()), "id_inversion_actual": "",
-            "estado": "ACTIVO", "fecha_liquidacion": "", "meses_procesados": meses_nuevo,
-            "pago_mensual_total": pago_mensual_total, "notas": "Marcador de pagos post-liquidación",
-        }
-        df_prestamos = pd.concat([df_prestamos, pd.DataFrame([nueva_fila_marcador])], ignore_index=True)
-    else:
-        idx = fila_marcador.index
-        df_prestamos.loc[idx, "meses_procesados"] = meses_nuevo
-        df_prestamos.loc[idx, "inversor"] = inversor_destino
-        df_prestamos.loc[idx, "tasa_inversor_anual"] = tasa_inversor_dec
-    hojas[HOJA_PRESTAMOS_INTERNOS] = df_prestamos
-
-    guardar_excel_completo_desde_hojas(hojas)
-    beneficio_estimado = pago_mensual_total * (tasa_empresa_dec - tasa_inversor_dec) / 12
-    return True, f"Pago de {mes_label} registrado: {fmt(pago_mensual_total)} a nombre de {inversor_destino} (tasa {tasa_inversor_destino_anual_pct:.2f}%), reinvertido en {destino['nombre_activo']}. Beneficio estimado de la empresa ese mes: {fmt(beneficio_estimado)}."
-
-
 def agregar_prestamo_a_grupo(grupo_prestamo: str, inversor: str, capital_original: float, tasa_inversor_anual_pct: float, fecha_inicio: pd.Timestamp) -> tuple[bool, str]:
     """
-    Añade un préstamo más a un grupo ya existente (ej. te olvidaste de dar de alta el segundo
-    préstamo del mismo lote). Crea su fila NUEVA en INVERSIONES igual que crear_grupo_prestamos, y
-    recalcula pro-rata la cuota_mensual de TODOS los préstamos ACTIVOS del grupo (incluido el
-    nuevo) en base a su capital_pendiente actual, para que todos sigan terminando de amortizarse
-    el mismo mes — manteniendo el pago_mensual_total ya fijado para el grupo.
+    Añade un préstamo más a un grupo ya existente (ej. se te olvidó dar de alta alguno). Crea su
+    fila permanente en INVERSIONES igual que crear_grupo_prestamos, y recalcula pro-rata la
+    cuota_mensual de TODOS los préstamos ACTIVOS del grupo (incluido el nuevo) sobre su capital
+    pendiente actual, para que sigan terminando de amortizarse el mismo mes.
     """
     df_prestamos = cargar_prestamos_internos()
-    grupo_rows = df_prestamos[df_prestamos["grupo_prestamo"] == grupo_prestamo]
-    grupo_rows_reales = grupo_rows[~grupo_rows["id_prestamo"].astype(str).str.endswith("-INTERESES")]
+    grupo_rows_reales = df_prestamos[df_prestamos["grupo_prestamo"] == grupo_prestamo]
     if grupo_rows_reales.empty:
         return False, "No se encontró ese grupo de préstamos."
     if capital_original <= 0:
@@ -13306,8 +13095,9 @@ def agregar_prestamo_a_grupo(grupo_prestamo: str, inversor: str, capital_origina
     fila_logica = {
         "id_inversion": id_inv_nuevo, "inversor": inversor, "tipo_inversion": "prestamo",
         "subtipo_inversion": "PRESTAMO_INTERNO_YURI", "nombre_activo": f"PRESTAMO_YURI_{id_prestamo_nuevo}",
-        "fecha_inversion": str(fecha_inicio.date()), "fecha_final_inversion": "", "motivo": "",
-        "capital_invertido": float(capital_original), "interes_nota_anual": tasa_dec,
+        "fecha_inversion": fecha_inicio.strftime('%d/%m/%Y'), "fecha_final_inversion": "",
+        "motivo": "Préstamo interno a Yuri — fila permanente, no se modifica en el proceso mensual",
+        "capital_invertido": float(capital_original), "interes_nota_anual": 0.0,
         "interes_inversor_anual": tasa_dec, "tipo_operacion": "NUEVA", "id_inversion_origen": "",
         "capital_nuevo_real": float(capital_original), "email": "", "pago_intereses": "",
     }
@@ -13317,13 +13107,12 @@ def agregar_prestamo_a_grupo(grupo_prestamo: str, inversor: str, capital_origina
     fila_prestamo_nueva = {
         "grupo_prestamo": grupo_prestamo, "id_prestamo": id_prestamo_nuevo, "inversor": inversor,
         "capital_original": float(capital_original), "capital_pendiente": float(capital_original),
-        "cuota_mensual": 0.0, "tasa_inversor_anual": tasa_dec, "fecha_inicio": str(fecha_inicio.date()),
-        "id_inversion_actual": id_inv_nuevo, "estado": "ACTIVO", "fecha_liquidacion": "",
+        "cuota_mensual": 0.0, "tasa_inversor_anual": tasa_dec, "fecha_inicio": fecha_inicio.strftime('%d/%m/%Y'),
+        "id_inversion_inversor": id_inv_nuevo, "estado": "ACTIVO", "fecha_liquidacion": "",
         "meses_procesados": "", "pago_mensual_total": pago_mensual_total, "notas": "",
     }
     df_prestamos = pd.concat([df_prestamos, pd.DataFrame([fila_prestamo_nueva])], ignore_index=True)
 
-    # Recalcular cuota pro-rata de todos los préstamos ACTIVOS del grupo (incluido el nuevo)
     capital_activo_total = float(activos_previos["capital_pendiente"].sum()) + float(capital_original)
     ids_activos = list(activos_previos["id_prestamo"]) + [id_prestamo_nuevo]
     for id_p in ids_activos:
@@ -13337,13 +13126,97 @@ def agregar_prestamo_a_grupo(grupo_prestamo: str, inversor: str, capital_origina
     return True, f"Préstamo {id_prestamo_nuevo} añadido al grupo. Cuotas mensuales recalculadas pro-rata para los {len(ids_activos)} préstamo(s) activos."
 
 
+def registrar_pago_mensual_prestamo(id_prestamo: str, fecha_pago: pd.Timestamp, destino: dict) -> tuple[bool, str]:
+    """
+    Registra el pago mensual de UN préstamo concreto (uno a la vez, se entra al préstamo que
+    corresponda). Funciona igual estés amortizando o ya hayas liquidado el principal:
+      - Si queda capital pendiente: el importe de la cuota (o lo que quede, si es menor) baja de
+        capital_pendiente. No se toca ni se cierra la fila permanente del inversor en INVERSIONES.
+      - Si ya está liquidado (capital_pendiente = 0): el importe es la cuota mensual completa.
+    En ambos casos, ese importe se registra como una fila NUEVA en INVERSIONES a nombre de
+    'CHAPARRO FERNANDEZ' (beneficio real de la empresa, a la tasa del activo de destino elegido),
+    enlazada al préstamo de origen solo para trazabilidad.
+    'destino' = {"tipo_inversion": str, "nombre_activo": str, "tasa_empresa_anual_pct": float}.
+    """
+    if not destino.get("tipo_inversion") or not destino.get("nombre_activo"):
+        return False, "Falta el destino de la reinversión."
+
+    df_prestamos = cargar_prestamos_internos()
+    fila_df = df_prestamos[df_prestamos["id_prestamo"] == id_prestamo]
+    if fila_df.empty:
+        return False, "No se encontró ese préstamo."
+    r = fila_df.iloc[0]
+
+    mes_label = fecha_pago.strftime("%m/%Y")
+    meses_prev_lista = [m.strip() for m in str(r.get("meses_procesados", "") or "").split(",") if m.strip()]
+    if mes_label in meses_prev_lista:
+        return False, f"El mes {mes_label} ya está registrado para este préstamo. Si necesitas corregirlo, edítalo a mano en 'Gestión de Excel'."
+
+    capital_pendiente_ant = float(r["capital_pendiente"])
+    cuota_mensual = float(r["cuota_mensual"])
+    pago_mensual_total_grupo = float(r["pago_mensual_total"])
+    liquidado_antes = capital_pendiente_ant <= 0.005
+
+    monto_tramo = pago_mensual_total_grupo if liquidado_antes else min(cuota_mensual, capital_pendiente_ant)
+    capital_pendiente_nuevo = 0.0 if liquidado_antes else round(capital_pendiente_ant - monto_tramo, 2)
+
+    hojas = leer_todas_las_hojas_excel()
+    if not hojas or "INVERSIONES" not in hojas:
+        return False, "No se pudo leer INVERSIONES."
+    mapa = _mapa_columnas_reales(hojas, "INVERSIONES")
+    df_inv_raw = hojas["INVERSIONES"]
+
+    id_inv_nuevo = _siguiente_id_inversion(df_inv_raw)
+    tasa_empresa_dec = round(float(destino.get("tasa_empresa_anual_pct", 0)) / 100.0, 6)
+    fila_logica = {
+        "id_inversion": id_inv_nuevo,
+        "inversor": "CHAPARRO FERNANDEZ",
+        "tipo_inversion": destino["tipo_inversion"],
+        "subtipo_inversion": destino.get("subtipo_inversion", destino["tipo_inversion"]),
+        "nombre_activo": destino["nombre_activo"],
+        "fecha_inversion": fecha_pago.strftime('%d/%m/%Y'),
+        "fecha_final_inversion": "",
+        "motivo": f"Reinversión préstamo {id_prestamo} — {mes_label}" + (" (post-liquidación, beneficio empresa)" if liquidado_antes else ""),
+        "capital_invertido": monto_tramo,
+        "interes_nota_anual": tasa_empresa_dec,
+        "interes_inversor_anual": 0.0,
+        "tipo_operacion": "NUEVA",
+        "id_inversion_origen": str(r.get("id_inversion_inversor", "") or ""),
+        "capital_nuevo_real": monto_tramo,
+        "email": "",
+        "pago_intereses": "",
+    }
+    fila_real = {mapa.get(k, k): v for k, v in fila_logica.items() if mapa.get(k)}
+    hojas["INVERSIONES"] = pd.concat([df_inv_raw, pd.DataFrame([fila_real])], ignore_index=True)
+
+    idx = df_prestamos[df_prestamos["id_prestamo"] == id_prestamo].index
+    meses_nuevo = (str(r.get("meses_procesados", "") or "") + ", " if meses_prev_lista else "") + mes_label
+    df_prestamos.loc[idx, "capital_pendiente"] = capital_pendiente_nuevo
+    df_prestamos.loc[idx, "meses_procesados"] = meses_nuevo
+    if not liquidado_antes and capital_pendiente_nuevo <= 0.005:
+        df_prestamos.loc[idx, "estado"] = "LIQUIDADO"
+        df_prestamos.loc[idx, "fecha_liquidacion"] = fecha_pago.strftime('%d/%m/%Y')
+    hojas[HOJA_PRESTAMOS_INTERNOS] = df_prestamos
+
+    guardar_excel_completo_desde_hojas(hojas)
+    if liquidado_antes:
+        msg = f"Pago de {mes_label} registrado: {fmt(monto_tramo)} — 100% beneficio de la empresa (préstamo ya liquidado), reinvertido en {destino['nombre_activo']}."
+    else:
+        msg = f"Pago de {mes_label} registrado: {fmt(monto_tramo)} amortizados y reinvertidos en {destino['nombre_activo']}."
+        if capital_pendiente_nuevo <= 0.005:
+            msg += " 🎉 Préstamo liquidado por completo — a partir del próximo pago, ya es beneficio de la empresa."
+        else:
+            msg += f" Quedan {fmt(capital_pendiente_nuevo)} pendientes."
+    return True, msg
+
+
 def guardar_edicion_prestamos(df_editado: pd.DataFrame, df_original: pd.DataFrame) -> tuple[bool, str]:
     """
     Guarda correcciones manuales hechas en la tabla editable de un grupo de préstamos (cuota,
-    capital, tasa, estado). Si cambia capital_pendiente o tasa_inversor_anual de un préstamo que
-    todavía tiene una fila abierta en INVERSIONES (id_inversion_actual), sincroniza también esa
-    fila (capital_invertido / interes_inversor_anual / interes_nota_anual) para que el capital y
-    la tasa mostrados y usados para calcular intereses cuadren en los dos sitios.
+    capital pendiente, tasa, estado). Si cambia el capital ORIGINAL o la tasa del inversor,
+    sincroniza también la fila permanente en INVERSIONES (capital_invertido / interes_inversor_anual),
+    porque esa es la que determina lo que cobra el inversor. Cambiar solo capital_pendiente NO
+    toca INVERSIONES — es puro seguimiento interno de cuánto le queda a Yuri por devolver.
     """
     if df_editado is None or df_editado.empty:
         return False, "No hay nada que guardar."
@@ -13356,17 +13229,16 @@ def guardar_edicion_prestamos(df_editado: pd.DataFrame, df_original: pd.DataFram
     col_id = mapa.get("id_inversion")
     col_cap = mapa.get("capital_invertido")
     col_tasa_inv = mapa.get("interes_inversor_anual")
-    col_tasa_emp = mapa.get("interes_nota_anual")
 
     df_prestamos = cargar_prestamos_internos()
     filas_sincronizadas = []
 
     for _, fila_ed in df_editado.iterrows():
         id_prestamo = str(fila_ed["id_prestamo"])
-        fila_orig = df_original[df_original["id_prestamo"] == id_prestamo]
-        if fila_orig.empty:
+        fila_orig_df = df_original[df_original["id_prestamo"] == id_prestamo]
+        if fila_orig_df.empty:
             continue
-        fila_orig = fila_orig.iloc[0]
+        fila_orig = fila_orig_df.iloc[0]
 
         idx = df_prestamos[df_prestamos["id_prestamo"] == id_prestamo].index
         if idx.empty:
@@ -13385,21 +13257,17 @@ def guardar_edicion_prestamos(df_editado: pd.DataFrame, df_original: pd.DataFram
         df_prestamos.loc[idx, "tasa_inversor_anual"] = tasa_dec_nueva
         df_prestamos.loc[idx, "estado"] = estado_nuevo
 
-        cambia_capital = abs(capital_pendiente_nuevo - float(fila_orig["capital_pendiente"])) > 0.005
+        cambia_capital_original = abs(capital_original_nuevo - float(fila_orig["capital_original"])) > 0.005
         cambia_tasa = abs(tasa_dec_nueva - float(fila_orig["tasa_inversor_anual"])) > 0.0000005
-        id_inv_actual = str(fila_orig.get("id_inversion_actual", "") or "")
-        if (cambia_capital or cambia_tasa) and id_inv_actual and col_id:
-            mascara = df_inv_raw[col_id].astype(str) == id_inv_actual
+        id_inv_inversor = str(fila_orig.get("id_inversion_inversor", "") or "")
+        if (cambia_capital_original or cambia_tasa) and id_inv_inversor and col_id:
+            mascara = df_inv_raw[col_id].astype(str) == id_inv_inversor
             if mascara.any():
-                if cambia_capital and col_cap:
-                    df_inv_raw.loc[mascara, col_cap] = capital_pendiente_nuevo
+                if cambia_capital_original and col_cap:
+                    df_inv_raw.loc[mascara, col_cap] = capital_original_nuevo
                 if cambia_tasa and col_tasa_inv:
                     df_inv_raw.loc[mascara, col_tasa_inv] = tasa_dec_nueva
-                if cambia_tasa and col_tasa_emp:
-                    # La fila de saldo pendiente del préstamo es breakeven: la empresa no gana
-                    # spread mientras el capital está aparcado ahí (ver crear_grupo_prestamos).
-                    df_inv_raw.loc[mascara, col_tasa_emp] = tasa_dec_nueva
-                filas_sincronizadas.append(id_inv_actual)
+                filas_sincronizadas.append(id_inv_inversor)
 
     hojas["INVERSIONES"] = df_inv_raw
     hojas[HOJA_PRESTAMOS_INTERNOS] = df_prestamos
@@ -13407,229 +13275,211 @@ def guardar_edicion_prestamos(df_editado: pd.DataFrame, df_original: pd.DataFram
 
     msg = "Cambios guardados."
     if filas_sincronizadas:
-        msg += f" También se sincronizó capital/tasa en INVERSIONES para: {', '.join(filas_sincronizadas)}."
+        msg += f" También se sincronizó capital/tasa del inversor en INVERSIONES para: {', '.join(filas_sincronizadas)}."
     return True, msg
 
 
-def seccion_prestamos():
-    """
-    Panel de 'Préstamos internos'. Solo visible para Yuri (igual que 'Gestión de Excel' /
-    '➕ Nueva inversión'), porque escribe directamente en INVERSIONES.
-    """
-    st.markdown("## 💰 Préstamos internos")
-    st.caption(
-        "Préstamos que te hacen a ti (Yuri) uno o varios inversores, devueltos en cuotas mensuales. "
-        "Mientras hay capital pendiente, cada cuota amortiza el préstamo y ese capital se reinvierte "
-        "a nombre del inversor original. Cuando queda liquidado, las cuotas siguientes son intereses "
-        "puros a beneficio de Chaparro Fernández."
-    )
+def tabla_amortizacion_prestamo(capital_original: float, cuota_mensual: float, meses_procesados: list) -> pd.DataFrame:
+    """Proyección del cuadro de amortización de un préstamo: mes a mes, cuánto se paga y cuánto
+    queda pendiente después. Marca con ✅ los meses que ya se han registrado de verdad."""
+    filas = []
+    saldo = float(capital_original)
+    cuota = float(cuota_mensual)
+    mes_n = 0
+    if saldo <= 0 or cuota <= 0:
+        return pd.DataFrame(filas)
+    while saldo > 0.005 and mes_n < 600:
+        mes_n += 1
+        cuota_mes = min(cuota, saldo)
+        saldo_tras = round(saldo - cuota_mes, 2)
+        filas.append({
+            "mes": mes_n, "cuota": cuota_mes, "saldo_pendiente_tras_cuota": saldo_tras,
+            "procesado": "✅" if mes_n <= len(meses_procesados) else "",
+        })
+        saldo = saldo_tras
+    return pd.DataFrame(filas)
 
+
+def mostrar_vista_prestamos_dashboard(_es_yuri: bool):
+    """
+    Vista de 'Préstamo' dentro del selector del Dashboard principal (junto a Notas, Paraguay,
+    Fútbol...). Cualquiera que vea el Dashboard puede consultar los préstamos y su cuadro de
+    amortización; dar de alta préstamos nuevos y registrar pagos mensuales queda reservado a Yuri,
+    porque escribe directamente en INVERSIONES.
+    """
     df_prestamos = cargar_prestamos_internos()
-    df_prestamos_reales = df_prestamos[~df_prestamos["id_prestamo"].astype(str).str.endswith("-INTERESES")] if not df_prestamos.empty else df_prestamos
-    grupos = sorted(df_prestamos_reales["grupo_prestamo"].dropna().astype(str).unique()) if not df_prestamos_reales.empty else []
 
-    # ── Alta de un nuevo grupo de préstamos ──────────────────────────────────
-    with st.expander("➕ Dar de alta un nuevo préstamo (o varios a la vez)", expanded=not grupos):
-        try:
-            inversores_conocidos = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]))
-        except Exception:
-            inversores_conocidos = []
+    if _es_yuri:
+        with st.expander("➕ Dar de alta un nuevo préstamo (o varios a la vez)", expanded=df_prestamos.empty):
+            try:
+                inversores_conocidos = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]))
+            except Exception:
+                inversores_conocidos = []
 
-        if "prestamos_alta_filas" not in st.session_state:
-            st.session_state["prestamos_alta_filas"] = 2
+            if "prestamos_alta_filas" not in st.session_state:
+                st.session_state["prestamos_alta_filas"] = 2
 
-        pago_mensual_total_alta = st.number_input(
-            "Pago mensual total que devuelves (compartido entre todos los préstamos de este grupo)",
-            min_value=0.0, step=100.0, value=5000.0, key="prestamos_pago_mensual_total",
-            help="Se reparte pro-rata entre los préstamos según su capital, para que todos terminen de amortizarse el mismo mes.",
-        )
-        fecha_inicio_alta = st.date_input("Fecha de inicio del/de los préstamo(s)", value=pd.Timestamp.today().date(), key="prestamos_fecha_inicio_alta")
+            pago_mensual_total_alta = st.number_input(
+                "Pago mensual total que devuelves (compartido entre todos los préstamos de este grupo)",
+                min_value=0.0, step=100.0, value=5000.0, key="prestamos_pago_mensual_total",
+                help="Se reparte pro-rata entre los préstamos según su capital, para que todos terminen de amortizarse el mismo mes.",
+            )
+            fecha_inicio_alta = st.date_input("Fecha en la que el inversor prestó el dinero", value=pd.Timestamp.today().date(), key="prestamos_fecha_inicio_alta")
 
-        filas_alta = []
-        for i in range(st.session_state["prestamos_alta_filas"]):
-            st.markdown(f"**Préstamo {i + 1}**")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                inv_sel = st.selectbox("Inversor", ["—"] + inversores_conocidos + ["Otro (escribir)"], key=f"prestamos_alta_inv_{i}")
-                if inv_sel == "Otro (escribir)":
-                    inv_sel = st.text_input("Nombre del inversor", key=f"prestamos_alta_inv_libre_{i}")
-            with c2:
-                capital_i = st.number_input("Capital del préstamo ($)", min_value=0.0, step=1000.0, key=f"prestamos_alta_capital_{i}")
-            with c3:
-                tasa_i = st.number_input("Tasa anual que cobra este inversor (%)", min_value=0.0, max_value=100.0, step=0.5, key=f"prestamos_alta_tasa_{i}")
-            if inv_sel and inv_sel != "—" and capital_i > 0:
-                filas_alta.append({"inversor": inv_sel, "capital_original": capital_i, "tasa_inversor_anual_pct": tasa_i})
+            filas_alta = []
+            for i in range(st.session_state["prestamos_alta_filas"]):
+                st.markdown(f"**Préstamo {i + 1}**")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    inv_sel = st.selectbox("Inversor", ["—"] + inversores_conocidos + ["Otro (escribir)"], key=f"prestamos_alta_inv_{i}")
+                    if inv_sel == "Otro (escribir)":
+                        inv_sel = st.text_input("Nombre del inversor", key=f"prestamos_alta_inv_libre_{i}")
+                with c2:
+                    capital_i = st.number_input("Capital del préstamo ($)", min_value=0.0, step=1000.0, key=f"prestamos_alta_capital_{i}")
+                with c3:
+                    tasa_i = st.number_input("Tasa anual que cobra este inversor (%)", min_value=0.0, max_value=100.0, step=0.5, key=f"prestamos_alta_tasa_{i}")
+                if inv_sel and inv_sel != "—" and capital_i > 0:
+                    filas_alta.append({"inversor": inv_sel, "capital_original": capital_i, "tasa_inversor_anual_pct": tasa_i})
 
-        col_add, col_crear = st.columns(2)
-        with col_add:
-            if st.button("➕ Añadir otro préstamo al grupo", key="prestamos_alta_add"):
-                st.session_state["prestamos_alta_filas"] += 1
-                st.rerun()
-        with col_crear:
-            if filas_alta and st.button("💾 Crear grupo de préstamos", type="primary", key="prestamos_alta_confirmar"):
-                ok, msg = crear_grupo_prestamos(filas_alta, pago_mensual_total_alta, pd.Timestamp(fecha_inicio_alta))
-                if ok:
-                    st.success(msg)
-                    st.session_state["prestamos_alta_filas"] = 2
-                    st.cache_data.clear()
+            col_add, col_crear = st.columns(2)
+            with col_add:
+                if st.button("➕ Añadir otro préstamo al grupo", key="prestamos_alta_add"):
+                    st.session_state["prestamos_alta_filas"] += 1
                     st.rerun()
-                else:
-                    st.error(msg)
+            with col_crear:
+                if filas_alta and st.button("💾 Crear grupo de préstamos", type="primary", key="prestamos_alta_confirmar"):
+                    ok, msg = crear_grupo_prestamos(filas_alta, pago_mensual_total_alta, pd.Timestamp(fecha_inicio_alta))
+                    if ok:
+                        st.success(msg)
+                        st.session_state["prestamos_alta_filas"] = 2
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
-    if not grupos:
+    df_reales = df_prestamos[~df_prestamos["id_prestamo"].astype(str).str.endswith("-INTERESES")] if not df_prestamos.empty else df_prestamos
+    if df_reales.empty:
         st.info("Todavía no hay ningún préstamo dado de alta.")
         return
 
-    st.markdown("---")
-    grupo_sel = st.selectbox("Grupo de préstamos", grupos, key="prestamos_grupo_sel") if len(grupos) > 1 else grupos[0]
+    capital_original_total = float(df_reales["capital_original"].sum())
+    capital_pendiente_total = float(df_reales["capital_pendiente"].sum())
+    kc1, kc2, kc3 = st.columns(3)
+    with kc1:
+        tarjeta_kpi("Capital prestado total", fmt(capital_original_total), f"{len(df_reales)} préstamo(s)", "normal")
+    with kc2:
+        tarjeta_kpi("Pendiente de amortizar", fmt(capital_pendiente_total), "Sigue siendo deuda de Yuri", "riesgo")
+    with kc3:
+        tarjeta_kpi("Ya amortizado", fmt(capital_original_total - capital_pendiente_total), "Ya reinvertido, genera beneficio", "positivo")
 
-    df_grupo = df_prestamos_reales[df_prestamos_reales["grupo_prestamo"] == grupo_sel].copy()
-
-    with st.expander("➕ Añadir otro préstamo a este grupo (recalcula las cuotas pro-rata solo)", expanded=False):
-        st.caption("Útil si se te olvidó dar de alta alguno al crear el grupo — se genera su fila en INVERSIONES y se recalculan las cuotas mensuales de todos los préstamos ACTIVOS del grupo para que sigan terminando el mismo mes.")
-        try:
-            inversores_conocidos_add = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]))
-        except Exception:
-            inversores_conocidos_add = []
-        ca1, ca2, ca3, ca4 = st.columns(4)
-        with ca1:
-            inv_add = st.selectbox("Inversor", ["—"] + inversores_conocidos_add + ["Otro (escribir)"], key="prestamos_add_inv")
-            if inv_add == "Otro (escribir)":
-                inv_add = st.text_input("Nombre del inversor", key="prestamos_add_inv_libre")
-        with ca2:
-            capital_add = st.number_input("Capital ($)", min_value=0.0, step=1000.0, key="prestamos_add_capital")
-        with ca3:
-            tasa_add = st.number_input("Tasa anual inversor (%)", min_value=0.0, max_value=100.0, step=0.5, key="prestamos_add_tasa")
-        with ca4:
-            fecha_add = st.date_input("Fecha de inicio", value=pd.Timestamp.today().date(), key="prestamos_add_fecha")
-        if st.button("💾 Añadir préstamo y recalcular cuotas", key="prestamos_add_confirmar"):
-            if inv_add and inv_add != "—" and capital_add > 0:
-                ok, msg = agregar_prestamo_a_grupo(grupo_sel, inv_add, capital_add, tasa_add, pd.Timestamp(fecha_add))
-                if ok:
-                    st.success(msg)
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error(msg)
-            else:
-                st.error("Falta el inversor o el capital.")
-
-    st.markdown("#### ✏️ Préstamos del grupo (editable)")
-    st.caption("Corrige aquí cuota, capital pendiente, tasa o estado si algo se cargó mal. Si cambias capital pendiente o tasa de un préstamo con fila abierta en INVERSIONES, se sincroniza también ahí.")
-    df_grupo["tasa_inversor_anual_pct"] = df_grupo["tasa_inversor_anual"] * 100
-    columnas_editor = ["id_prestamo", "inversor", "capital_original", "capital_pendiente", "cuota_mensual", "tasa_inversor_anual_pct", "estado"]
-    df_editor_base = df_grupo[columnas_editor].copy()
-    df_editado = st.data_editor(
-        df_editor_base, use_container_width=True, hide_index=True, key=f"prestamos_editor_{grupo_sel}",
-        column_config={
-            "id_prestamo": st.column_config.TextColumn("id_prestamo", disabled=True),
-            "inversor": st.column_config.TextColumn("inversor", disabled=True),
-            "capital_original": st.column_config.NumberColumn("capital_original", format="$%.2f"),
-            "capital_pendiente": st.column_config.NumberColumn("capital_pendiente", format="$%.2f"),
-            "cuota_mensual": st.column_config.NumberColumn("cuota_mensual", format="$%.2f"),
-            "tasa_inversor_anual_pct": st.column_config.NumberColumn("tasa_inversor_anual (%)", format="%.2f"),
-            "estado": st.column_config.SelectboxColumn("estado", options=["ACTIVO", "LIQUIDADO"]),
-        },
-    )
-    if st.button("💾 Guardar cambios de la tabla", key=f"prestamos_guardar_edicion_{grupo_sel}"):
-        ok, msg = guardar_edicion_prestamos(df_editado, df_grupo)
-        if ok:
-            st.success(msg)
-            st.cache_data.clear()
-            st.rerun()
-        else:
-            st.error(msg)
-
-    activos = df_grupo[df_grupo["estado"] == "ACTIVO"]
-    tipos_activo_conocidos = ["paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "otro"]
+    grupos = sorted(df_reales["grupo_prestamo"].dropna().astype(str).unique())
+    tipos_activo_conocidos = ["paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "nota", "otro"]
     tasas_fijas_activo = {"paraguay": 15.0, "bolivia": 15.0, "motoclick": 25.0, "futbol": 15.0, "bitcoin": 20.0}
 
-    if not activos.empty:
+    for grupo in grupos:
+        df_g = df_reales[df_reales["grupo_prestamo"] == grupo]
+        activos_g = int((df_g["estado"] == "ACTIVO").sum())
+        estado_grupo = "🟢 Totalmente liquidado (beneficio empresa)" if activos_g == 0 else f"🟡 {activos_g} préstamo(s) en amortización"
+        with st.expander(f"Grupo {grupo} — {estado_grupo}", expanded=len(grupos) == 1):
+            tabla = df_g[["id_prestamo", "inversor", "capital_original", "capital_pendiente", "cuota_mensual", "estado"]].copy()
+            tabla["tasa_inversor_anual"] = (df_g["tasa_inversor_anual"] * 100).round(2).astype(str) + "%"
+            for c in ["capital_original", "capital_pendiente", "cuota_mensual"]:
+                tabla[c] = tabla[c].apply(fmt)
+            st.dataframe(tabla, use_container_width=True, hide_index=True)
 
-        st.markdown("### 📅 Registrar pago del mes")
-        st.caption("El tramo que TODAVÍA no se reinvierte (lo que queda pendiente del préstamo) es breakeven — sin margen para la empresa. En cuanto un tramo se reinvierte de verdad en un activo, es una inversión más y la empresa gana su margen normal ahí.")
-        fecha_pago = st.date_input("Fecha de este pago", value=pd.Timestamp.today().date(), key="prestamos_fecha_pago")
-        destinos = {}
-        for _, r in activos.iterrows():
-            st.markdown(f"**{r['id_prestamo']} — {r['inversor']} — cuota {fmt(r['cuota_mensual'])} de {fmt(r['capital_pendiente'])} pendientes**")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                tipo_dest = st.selectbox("Destino de la reinversión", tipos_activo_conocidos, key=f"prestamos_dest_tipo_{r['id_prestamo']}")
-                if tipo_dest == "otro":
-                    tipo_dest = st.text_input("Escribe el tipo", key=f"prestamos_dest_tipo_libre_{r['id_prestamo']}")
-            with c2:
-                nombre_activo_dest = st.text_input("nombre_activo", value=tipo_dest, key=f"prestamos_dest_nombre_{r['id_prestamo']}")
-            with c3:
-                tasa_empresa = st.number_input(
-                    "Tasa anual que rinde para la empresa (%)", min_value=0.0, max_value=200.0, step=0.5,
-                    value=tasas_fijas_activo.get(str(tipo_dest).lower(), 0.0), key=f"prestamos_dest_tasa_{r['id_prestamo']}",
-                )
-            destinos[r["id_prestamo"]] = {"tipo_inversion": tipo_dest, "nombre_activo": nombre_activo_dest, "tasa_empresa_anual_pct": tasa_empresa}
+            if _es_yuri:
+                with st.popover("✏️ Editar este grupo"):
+                    df_g_edit = df_g.copy()
+                    df_g_edit["tasa_inversor_anual_pct"] = df_g_edit["tasa_inversor_anual"] * 100
+                    columnas_editor = ["id_prestamo", "inversor", "capital_original", "capital_pendiente", "cuota_mensual", "tasa_inversor_anual_pct", "estado"]
+                    df_editado = st.data_editor(
+                        df_g_edit[columnas_editor], use_container_width=True, hide_index=True, key=f"prestamos_editor_{grupo}",
+                        column_config={
+                            "id_prestamo": st.column_config.TextColumn("id_prestamo", disabled=True),
+                            "inversor": st.column_config.TextColumn("inversor", disabled=True),
+                            "capital_original": st.column_config.NumberColumn("capital_original", format="$%.2f"),
+                            "capital_pendiente": st.column_config.NumberColumn("capital_pendiente", format="$%.2f"),
+                            "cuota_mensual": st.column_config.NumberColumn("cuota_mensual", format="$%.2f"),
+                            "tasa_inversor_anual_pct": st.column_config.NumberColumn("tasa_inversor_anual (%)", format="%.2f"),
+                            "estado": st.column_config.SelectboxColumn("estado", options=["ACTIVO", "LIQUIDADO"]),
+                        },
+                    )
+                    if st.button("💾 Guardar cambios", key=f"prestamos_guardar_edicion_{grupo}"):
+                        ok, msg = guardar_edicion_prestamos(df_editado, df_g)
+                        if ok:
+                            st.success(msg)
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(msg)
 
-        if st.button("💾 Confirmar pago del mes y escribir en INVERSIONES", type="primary", key="prestamos_confirmar_pago"):
-            ok, msg = procesar_pago_mensual_prestamos(grupo_sel, pd.Timestamp(fecha_pago), destinos)
-            if ok:
-                st.success(msg)
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error(msg)
-    else:
-        st.success("🎉 Todos los préstamos de este grupo están liquidados. A partir de ahora, cada pago mensual se registra a nombre del inversor que elijas — el beneficio real de la empresa es solo el margen entre lo que rinde el activo de destino y lo que se le paga a ese inversor.")
-        st.markdown("### 📅 Registrar pago del mes")
-        fecha_pago_int = st.date_input("Fecha de este pago", value=pd.Timestamp.today().date(), key="prestamos_fecha_pago_intereses")
+                with st.popover("➕ Añadir otro préstamo a este grupo"):
+                    st.caption("Recalcula las cuotas pro-rata de todos los préstamos activos del grupo.")
+                    try:
+                        inversores_conocidos_add = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]))
+                    except Exception:
+                        inversores_conocidos_add = []
+                    ca1, ca2 = st.columns(2)
+                    with ca1:
+                        inv_add = st.selectbox("Inversor", ["—"] + inversores_conocidos_add + ["Otro (escribir)"], key=f"prestamos_add_inv_{grupo}")
+                        if inv_add == "Otro (escribir)":
+                            inv_add = st.text_input("Nombre del inversor", key=f"prestamos_add_inv_libre_{grupo}")
+                        capital_add = st.number_input("Capital ($)", min_value=0.0, step=1000.0, key=f"prestamos_add_capital_{grupo}")
+                    with ca2:
+                        tasa_add = st.number_input("Tasa anual inversor (%)", min_value=0.0, max_value=100.0, step=0.5, key=f"prestamos_add_tasa_{grupo}")
+                        fecha_add = st.date_input("Fecha de inicio", value=pd.Timestamp.today().date(), key=f"prestamos_add_fecha_{grupo}")
+                    if st.button("💾 Añadir préstamo y recalcular cuotas", key=f"prestamos_add_confirmar_{grupo}"):
+                        if inv_add and inv_add != "—" and capital_add > 0:
+                            ok, msg = agregar_prestamo_a_grupo(grupo, inv_add, capital_add, tasa_add, pd.Timestamp(fecha_add))
+                            if ok:
+                                st.success(msg)
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                        else:
+                            st.error("Falta el inversor o el capital.")
 
-        try:
-            inversores_conocidos_int = sorted(set(list(USUARIOS_INVERSORES.keys()) + ["CHAPARRO FERNANDEZ"]))
-        except Exception:
-            inversores_conocidos_int = ["CHAPARRO FERNANDEZ"]
-        c0a, c0b = st.columns(2)
-        with c0a:
-            inversor_int_sel = st.selectbox(
-                "¿A nombre de qué inversor se registra este pago?", inversores_conocidos_int + ["Otro (escribir)"],
-                key="prestamos_int_inversor_sel",
-                help="Usa 'CHAPARRO FERNANDEZ' solo si de verdad no hay ningún inversor detrás de este dinero (beneficio 100% de la empresa).",
-            )
-            if inversor_int_sel == "Otro (escribir)":
-                inversor_int_sel = st.text_input("Nombre del inversor", key="prestamos_int_inversor_libre")
-        with c0b:
-            tasa_inversor_int = st.number_input(
-                "Tasa anual que cobra ese inversor (%)", min_value=0.0, max_value=100.0, step=0.5,
-                value=0.0 if inversor_int_sel == "CHAPARRO FERNANDEZ" else 10.0, key="prestamos_int_tasa_inversor",
-            )
+            st.markdown("**Cuadro de amortización por préstamo**")
+            for _, r in df_g.iterrows():
+                meses_procesados = [m.strip() for m in str(r.get("meses_procesados", "") or "").split(",") if m.strip()]
+                liquidado = str(r["estado"]) == "LIQUIDADO"
+                etiqueta_estado = "liquidado — cuota actual = 100% beneficio empresa" if liquidado else f"quedan {fmt(r['capital_pendiente'])}"
+                with st.expander(f"{r['id_prestamo']} — {r['inversor']} — {fmt(r['capital_original'])} al {r['tasa_inversor_anual']*100:.2f}% — {etiqueta_estado}", expanded=False):
+                    df_amort = tabla_amortizacion_prestamo(r["capital_original"], r["cuota_mensual"], meses_procesados)
+                    if not df_amort.empty:
+                        df_amort_display = df_amort.copy()
+                        df_amort_display["cuota"] = df_amort_display["cuota"].apply(fmt)
+                        df_amort_display["saldo_pendiente_tras_cuota"] = df_amort_display["saldo_pendiente_tras_cuota"].apply(fmt)
+                        st.dataframe(df_amort_display, use_container_width=True, hide_index=True)
+                        st.caption(f"Amortización completa en {len(df_amort)} mes(es) a {fmt(r['cuota_mensual'])}/mes.")
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            tipo_dest_int = st.selectbox("Destino de la reinversión", tipos_activo_conocidos, key="prestamos_int_dest_tipo")
-            if tipo_dest_int == "otro":
-                tipo_dest_int = st.text_input("Escribe el tipo", key="prestamos_int_dest_tipo_libre")
-        with c2:
-            nombre_activo_int = st.text_input("nombre_activo", value=tipo_dest_int, key="prestamos_int_dest_nombre")
-        with c3:
-            tasa_empresa_int = st.number_input(
-                "Tasa anual que rinde para la empresa (%)", min_value=0.0, max_value=200.0, step=0.5,
-                value=tasas_fijas_activo.get(str(tipo_dest_int).lower(), 0.0), key="prestamos_int_dest_tasa",
-            )
-
-        if tasa_empresa_int < tasa_inversor_int:
-            st.warning(f"⚠️ La tasa de la empresa ({tasa_empresa_int:.2f}%) es menor que la del inversor ({tasa_inversor_int:.2f}%) — ese mes daría beneficio negativo para la empresa en este tramo. Revísalo si no es intencional.")
-
-        if st.button("💾 Confirmar pago del mes y escribir en INVERSIONES", type="primary", key="prestamos_confirmar_intereses"):
-            if not inversor_int_sel or not str(inversor_int_sel).strip():
-                st.error("Falta indicar a nombre de qué inversor se registra este pago.")
-            else:
-                ok, msg = registrar_intereses_mes_prestamos(
-                    grupo_sel, pd.Timestamp(fecha_pago_int),
-                    {"tipo_inversion": tipo_dest_int, "nombre_activo": nombre_activo_int, "tasa_empresa_anual_pct": tasa_empresa_int},
-                    inversor_int_sel, tasa_inversor_int,
-                )
-                if ok:
-                    st.success(msg)
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error(msg)
-
+                    if _es_yuri:
+                        st.markdown("**Registrar pago del mes**")
+                        fecha_pago = st.date_input("Fecha de este pago", value=pd.Timestamp.today().date(), key=f"prestamos_fecha_pago_{r['id_prestamo']}")
+                        cp1, cp2, cp3 = st.columns(3)
+                        with cp1:
+                            tipo_dest = st.selectbox("Destino de la reinversión", tipos_activo_conocidos, key=f"prestamos_dest_tipo_{r['id_prestamo']}")
+                            if tipo_dest == "otro":
+                                tipo_dest = st.text_input("Escribe el tipo", key=f"prestamos_dest_tipo_libre_{r['id_prestamo']}")
+                        with cp2:
+                            nombre_activo_dest = st.text_input("nombre_activo", value=tipo_dest, key=f"prestamos_dest_nombre_{r['id_prestamo']}")
+                        with cp3:
+                            tasa_empresa = st.number_input(
+                                "Tasa anual que rinde para la empresa (%)", min_value=0.0, max_value=200.0, step=0.5,
+                                value=tasas_fijas_activo.get(str(tipo_dest).lower(), 0.0), key=f"prestamos_dest_tasa_{r['id_prestamo']}",
+                            )
+                        if st.button("💾 Confirmar pago del mes", type="primary", key=f"prestamos_confirmar_pago_{r['id_prestamo']}"):
+                            ok, msg = registrar_pago_mensual_prestamo(
+                                r["id_prestamo"], pd.Timestamp(fecha_pago),
+                                {"tipo_inversion": tipo_dest, "nombre_activo": nombre_activo_dest, "tasa_empresa_anual_pct": tasa_empresa},
+                            )
+                            if ok:
+                                st.success(msg)
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(msg)
 
 
 def seccion_deuda_jordi():
@@ -15053,9 +14903,8 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         if _es_yuri:
             menu_opciones.insert(5, "Gestión de Excel")
             menu_opciones.insert(6, "➕ Nueva inversión")
-            menu_opciones.insert(7, "💰 Préstamos")
-            menu_opciones.insert(8, "📊 Uso IA")
-            menu_opciones.insert(9, "💰 Gastos")
+            menu_opciones.insert(7, "📊 Uso IA")
+            menu_opciones.insert(8, "💰 Gastos")
 
     menu = st.sidebar.selectbox("Menú principal", menu_opciones, key="menu_principal_selector")
 
@@ -15078,8 +14927,6 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
     elif menu == "➕ Nueva inversión" and _es_yuri:
         _df_inv_ni, _df_cal_ni, _df_control_ni = cargar_excel_completo()
         seccion_nueva_inversion(_df_inv_ni, _df_cal_ni, _df_control_ni)
-    elif menu == "💰 Préstamos" and _es_yuri:
-        seccion_prestamos()
     elif menu == "📊 Uso IA" and _es_yuri:
         seccion_uso_ia()
     elif menu == "💰 Gastos" and _es_yuri:
