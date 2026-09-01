@@ -1054,14 +1054,14 @@ def _texto_seguro_excel(valor) -> str:
 
 def _leer_hoja_usuarios() -> pd.DataFrame:
     """Lee la hoja USUARIOS (usuario, tipo_usuario, password, debe_cambiar_password, totp_secret,
-    totp_activo) del Excel del fondo. Si la hoja aún no existe (primera vez), devuelve un
+    totp_activo, email) del Excel del fondo. Si la hoja aún no existe (primera vez), devuelve un
     DataFrame vacío con las columnas correctas y el sistema cae automáticamente en las
     contraseñas iniciales del código."""
     _descargar_excel_para_credenciales()
     try:
         df = pd.read_excel(ARCHIVO, sheet_name=HOJA_USUARIOS)
         df.columns = [str(c).strip().lower() for c in df.columns]
-        for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
+        for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"]:
             if col in df.columns:
                 df[col] = df[col].apply(_texto_seguro_excel)
         if "debe_cambiar_password" not in df.columns:
@@ -1070,9 +1070,15 @@ def _leer_hoja_usuarios() -> pd.DataFrame:
             df["totp_secret"] = ""
         if "totp_activo" not in df.columns:
             df["totp_activo"] = "NO"
+        if "email" not in df.columns:
+            # Columna nueva (email de contacto para "olvidé mi contraseña", separada de
+            # totp_secret que solo se rellena si el usuario activó la verificación en dos
+            # pasos) — para filas ya existentes, se rellena sola con el email de 2FA si lo
+            # tenían, así no se pierde nada al añadir la columna.
+            df["email"] = df["totp_secret"] if "totp_secret" in df.columns else ""
         return df
     except Exception:
-        return pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"])
+        return pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"])
 
 
 def _guardar_hoja_usuarios(df_usuarios: pd.DataFrame) -> tuple[bool, str]:
@@ -1248,6 +1254,135 @@ def _2fa_email_de(usuario: str, tipo: str) -> str:
     if fila is None:
         return ""
     return str(fila.get("totp_secret", "") or "")
+
+
+def _email_contacto_de(usuario: str, tipo: str) -> str:
+    """Email 'oficial' de contacto de un usuario, usado para autoservicio (olvidé mi
+    contraseña). Prioridad: columna 'email' de USUARIOS y, si está vacía, el email de la
+    verificación en dos pasos (columna 'totp_secret') — por si el usuario tiene 2FA activado
+    pero, por lo que sea, la columna 'email' específica no se llegó a rellenar."""
+    fila = _fila_usuario(_leer_hoja_usuarios(), usuario, tipo)
+    if fila is None:
+        return ""
+    email = str(fila.get("email", "") or "").strip()
+    if email:
+        return email
+    return str(fila.get("totp_secret", "") or "").strip()
+
+
+@st.cache_resource
+def _estado_codigos_reset_password() -> dict:
+    """Códigos de un solo uso para 'olvidé mi contraseña', en memoria (no en Excel — son
+    efímeros, caducan solos a los 15 minutos). Compartido entre reruns con st.cache_resource,
+    igual que el estado de los códigos de 2FA (son dos flujos independientes a propósito: pedir
+    un código de reseteo no debe interferir con un login en curso con 2FA pendiente, y viceversa)."""
+    return {}
+
+
+def _clave_reset_password(usuario: str, tipo: str) -> str:
+    return f"{tipo}:{usuario.strip().lower()}"
+
+
+def _generar_y_enviar_codigo_reset_password(usuario: str, tipo: str, email_destino: str,
+                                             smtp_sender: str, smtp_password: str,
+                                             display_name: str = "Chaparro Fernández Wealth") -> tuple:
+    """Genera un código de 6 dígitos para restablecer la contraseña, lo guarda en memoria con
+    caducidad de 15 minutos, y lo envía por email a la dirección de contacto de este usuario."""
+    import secrets as _secrets
+    codigo = f"{_secrets.randbelow(1_000_000):06d}"
+    estado = _estado_codigos_reset_password()
+    estado[_clave_reset_password(usuario, tipo)] = (codigo, time.time() + 15 * 60)
+    try:
+        destinatarios = _parse_lista_emails(email_destino)
+        if not destinatarios:
+            return False, "El email registrado no es válido."
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = f"Restablecer tu contraseña — {display_name}"
+        msg["From"] = f"{display_name} <{smtp_sender}>"
+        msg["To"] = ", ".join(destinatarios)
+        cuerpo = f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="460" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(7,20,37,0.14);">
+        <tr><td style="background:linear-gradient(135deg,#0e2338 0%,#173b5c 60%,#bf9a5f 100%);padding:28px 40px;text-align:center;">
+          <div style="color:#ffffff;font-size:18px;font-weight:800;">{display_name}</div>
+        </td></tr>
+        <tr><td style="padding:32px 40px;text-align:center;">
+          <p style="color:#334155;font-size:14px;margin:0 0 8px;">Alguien (esperamos que tú, {usuario}) ha pedido restablecer la contraseña de esta cuenta.</p>
+          <p style="color:#334155;font-size:14px;margin:0 0 18px;">Tu código para elegir una nueva contraseña es:</p>
+          <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#0e2338;font-family:monospace;margin-bottom:18px;">{codigo}</div>
+          <p style="color:#94a3b8;font-size:12px;">Caduca en 15 minutos. Si no has sido tú, ignora este correo — tu contraseña actual sigue siendo válida y no se ha cambiado nada.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
+        msg.attach(MIMEText(cuerpo, "html", "utf-8"))
+        contexto = ssl.create_default_context()
+        with smtplib.SMTP("smtp.gmail.com", 587) as servidor:
+            servidor.ehlo()
+            servidor.starttls(context=contexto)
+            servidor.login(smtp_sender, smtp_password)
+            servidor.sendmail(smtp_sender, destinatarios, msg.as_bytes())
+        return True, ""
+    except smtplib.SMTPAuthenticationError:
+        return False, "Error de autenticación Gmail. Usa una contraseña de aplicación (no tu contraseña normal)."
+    except smtplib.SMTPRecipientsRefused:
+        return False, "El email registrado fue rechazado por el servidor de correo."
+    except Exception as e:
+        return False, str(e)
+
+
+def _verificar_codigo_reset_password(usuario: str, tipo: str, codigo_input: str) -> bool:
+    """Comprueba el código sin consumirlo todavía (se consume aparte, tras guardar la nueva
+    contraseña con éxito — así un fallo al guardar en Drive no obliga a pedir un código nuevo)."""
+    estado = _estado_codigos_reset_password()
+    clave = _clave_reset_password(usuario, tipo)
+    par = estado.get(clave)
+    if not par:
+        return False
+    codigo_guardado, expira = par
+    if time.time() > expira:
+        estado.pop(clave, None)
+        return False
+    return (codigo_input or "").strip() == codigo_guardado
+
+
+def _consumir_codigo_reset_password(usuario: str, tipo: str):
+    _estado_codigos_reset_password().pop(_clave_reset_password(usuario, tipo), None)
+
+
+def _fijar_password_autoservicio(usuario: str, tipo: str, nueva_password: str) -> tuple[bool, str]:
+    """Guarda la nueva contraseña elegida por el propio usuario tras verificar el código de
+    reseteo — crea su fila en USUARIOS si todavía no existía (usuario que seguía con la
+    contraseña inicial del código), o la actualiza si ya existía, preservando su email, y su
+    2FA (secreto/estado) intactos igual que hace formulario_cambiar_password. Quita el flag de
+    cambio obligatorio: el usuario acaba de elegir la contraseña él mismo, no hace falta
+    pedírsela otra vez en el próximo login."""
+    df_u = _leer_hoja_usuarios()
+    if df_u.empty or not {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
+        df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"])
+    for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"]:
+        if col not in df_u.columns:
+            df_u[col] = "NO" if col in ("debe_cambiar_password", "totp_activo") else ""
+        df_u[col] = df_u[col].astype(object)
+    _fila_previa = _fila_usuario(df_u, usuario, tipo)
+    _totp_secret_prev = str(_fila_previa.get("totp_secret", "") or "") if _fila_previa is not None else ""
+    _totp_activo_prev = str(_fila_previa.get("totp_activo", "NO") or "NO") if _fila_previa is not None else "NO"
+    _email_prev = str(_fila_previa.get("email", "") or "") if _fila_previa is not None else ""
+    mascara = (
+        (df_u["usuario"].astype(str).str.strip().str.lower() == usuario.strip().lower())
+        & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+    )
+    df_u = df_u[~mascara]
+    fila_nueva = pd.DataFrame([{
+        "usuario": usuario, "tipo_usuario": tipo,
+        "password": _hash_password(nueva_password), "debe_cambiar_password": "NO",
+        "totp_secret": _totp_secret_prev, "totp_activo": _totp_activo_prev, "email": _email_prev,
+    }])
+    df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
+    return _guardar_hoja_usuarios(df_u)
 
 
 @st.cache_resource
@@ -1494,19 +1629,21 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
             else:
                 df_u = _leer_hoja_usuarios()
                 if df_u.empty or not {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
-                    df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"])
+                    df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"])
                 # Todas las columnas como texto: si la hoja se creó vacía, pandas puede haberlas
                 # inferido como float64 (todo NaN), y asignar un string ahí con .loc revienta con
                 # TypeError en pandas 3.x (ya no hace upcast silencioso). Forzamos texto primero.
-                for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
+                for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"]:
                     if col not in df_u.columns:
                         df_u[col] = "NO" if col in ("debe_cambiar_password", "totp_activo") else ""
                     df_u[col] = df_u[col].astype(object)
-                # Conservamos el secreto TOTP y si está activo — cambiar la contraseña NUNCA debe
-                # desactivar la verificación en dos pasos de nadie.
+                # Conservamos el secreto TOTP, si está activo, y el email de contacto — cambiar
+                # la contraseña NUNCA debe desactivar la verificación en dos pasos ni borrar el
+                # email registrado de nadie (lo necesita 'olvidé mi contraseña' más adelante).
                 _fila_previa = _fila_usuario(df_u, usuario_actual, tipo)
                 _totp_secret_prev = str(_fila_previa.get("totp_secret", "") or "") if _fila_previa is not None else ""
                 _totp_activo_prev = str(_fila_previa.get("totp_activo", "NO") or "NO") if _fila_previa is not None else "NO"
+                _email_prev = str(_fila_previa.get("email", "") or "") if _fila_previa is not None else ""
                 mascara = (
                     (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_actual.strip().lower())
                     & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
@@ -1518,7 +1655,7 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
                 fila_nueva = pd.DataFrame([{
                     "usuario": usuario_actual, "tipo_usuario": tipo,
                     "password": _hash_password(pw_nueva), "debe_cambiar_password": "NO",
-                    "totp_secret": _totp_secret_prev, "totp_activo": _totp_activo_prev,
+                    "totp_secret": _totp_secret_prev, "totp_activo": _totp_activo_prev, "email": _email_prev,
                 }])
                 df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
                 exito, mensaje = _guardar_hoja_usuarios(df_u)
@@ -1527,6 +1664,47 @@ def formulario_cambiar_password(usuario_actual: str, tipo: str, usuarios_codigo:
                     st.success(f"✅ Contraseña actualizada. {mensaje}")
                 else:
                     st.warning(f"⚠️ Contraseña actualizada localmente. {mensaje}")
+
+
+def formulario_email_recuperacion(usuario_actual: str, tipo: str):
+    """Autoservicio para que cualquier usuario registre o actualice su propio email de
+    recuperación — el que se usa para 'olvidé mi contraseña' en la pantalla de login. No exige
+    la contraseña actual (a diferencia de cambiar la contraseña): quien ya inició sesión ya se
+    autenticó, y pedir la contraseña otra vez aquí no añade seguridad real, solo fricción."""
+    email_actual = _email_contacto_de(usuario_actual, tipo)
+    etiqueta = f"📧 Mi email de recuperación ({'registrado' if email_actual else 'sin registrar'})"
+    with st.sidebar.expander(etiqueta):
+        if email_actual:
+            _oculto = (email_actual[:2] + "***@" + email_actual.split("@")[-1]) if "@" in email_actual else email_actual
+            st.caption(f"Email actual: **{_oculto}**")
+        else:
+            st.caption("Todavía no tenés un email registrado — sin él, no vas a poder usar '¿Olvidaste tu contraseña?' en el login.")
+        with st.form(f"form_email_recuperacion_{tipo}_{usuario_actual}"):
+            nuevo_email = st.text_input("Email", key=f"input_email_recuperacion_{tipo}")
+            guardar_email = st.form_submit_button("Guardar email")
+        if guardar_email:
+            nuevo_email_limpio = (nuevo_email or "").strip()
+            if not nuevo_email_limpio or "@" not in nuevo_email_limpio:
+                st.error("Introduce un email válido.")
+            else:
+                df_u = _leer_hoja_usuarios()
+                for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"]:
+                    if col not in df_u.columns:
+                        df_u[col] = "NO" if col in ("debe_cambiar_password", "totp_activo") else ""
+                    df_u[col] = df_u[col].astype(object)
+                if _fila_usuario(df_u, usuario_actual, tipo) is None:
+                    st.error("Todavía no tenés una fila propia en el sistema — primero cambiá tu contraseña una vez en '🔑 Cambiar mi contraseña' (aunque sea por la misma), y después volvé a registrar tu email aquí.")
+                else:
+                    idx = df_u[
+                        (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_actual.strip().lower())
+                        & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
+                    ].index
+                    df_u.loc[idx, "email"] = nuevo_email_limpio
+                    exito, mensaje = _guardar_hoja_usuarios(df_u)
+                    if exito:
+                        st.success("✅ Email de recuperación guardado.")
+                    else:
+                        st.warning(f"⚠️ Guardado localmente. {mensaje}")
 
 
 def formulario_cambio_obligatorio_password(usuario_actual: str, tipo: str):
@@ -1555,14 +1733,15 @@ def formulario_cambio_obligatorio_password(usuario_actual: str, tipo: str):
         else:
             df_u = _leer_hoja_usuarios()
             if df_u.empty or not {"usuario", "password", "tipo_usuario"}.issubset(df_u.columns):
-                df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"])
-            for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo"]:
+                df_u = pd.DataFrame(columns=["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"])
+            for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "totp_secret", "totp_activo", "email"]:
                 if col not in df_u.columns:
                     df_u[col] = "NO" if col in ("debe_cambiar_password", "totp_activo") else ""
                 df_u[col] = df_u[col].astype(object)
             _fila_previa = _fila_usuario(df_u, usuario_actual, tipo)
             _totp_secret_prev = str(_fila_previa.get("totp_secret", "") or "") if _fila_previa is not None else ""
             _totp_activo_prev = str(_fila_previa.get("totp_activo", "NO") or "NO") if _fila_previa is not None else "NO"
+            _email_prev = str(_fila_previa.get("email", "") or "") if _fila_previa is not None else ""
             mascara = (
                 (df_u["usuario"].astype(str).str.strip().str.lower() == usuario_actual.strip().lower())
                 & (df_u["tipo_usuario"].astype(str).str.strip().str.lower() == tipo)
@@ -1571,7 +1750,7 @@ def formulario_cambio_obligatorio_password(usuario_actual: str, tipo: str):
             fila_nueva = pd.DataFrame([{
                 "usuario": usuario_actual, "tipo_usuario": tipo,
                 "password": _hash_password(pw_nueva), "debe_cambiar_password": "NO",
-                "totp_secret": _totp_secret_prev, "totp_activo": _totp_activo_prev,
+                "totp_secret": _totp_secret_prev, "totp_activo": _totp_activo_prev, "email": _email_prev,
             }])
             df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
             exito, mensaje = _guardar_hoja_usuarios(df_u)
@@ -1721,6 +1900,8 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         st.session_state.tipo_usuario = None  # "admin" o "inversor"
     if "totp_pendiente" not in st.session_state:
         st.session_state.totp_pendiente = None
+    if "reset_pw_pendiente" not in st.session_state:
+        st.session_state.reset_pw_pendiente = None  # {"usuario", "tipo"} tras pedir código de reseteo
 
     if not st.session_state.autenticado:
         st.markdown(
@@ -1775,6 +1956,56 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
                         st.error("Código incorrecto o caducado. Puedes pedir uno nuevo con 'Reenviar código'.")
             st.stop()
 
+        # ── "Olvidé mi contraseña" — paso 2: código recibido + nueva contraseña ──
+        if st.session_state.reset_pw_pendiente:
+            _pend_r = st.session_state.reset_pw_pendiente
+            _email_oculto_r = (_pend_r["email"][:2] + "***@" + _pend_r["email"].split("@")[-1]) if "@" in _pend_r["email"] else _pend_r["email"]
+            st.info(f"📧 Hola {_pend_r['usuario']}. Te hemos enviado un código a **{_email_oculto_r}** para restablecer tu contraseña. Revisa tu correo (y la carpeta de spam).")
+            with st.form("form_reset_pw_confirmar"):
+                codigo_reset = st.text_input("Código de 6 dígitos", key="input_codigo_reset_pw")
+                pw_reset_nueva = st.text_input("Nueva contraseña", type="password", key="input_pw_reset_nueva")
+                pw_reset_nueva2 = st.text_input("Repite la nueva contraseña", type="password", key="input_pw_reset_nueva2")
+                confirmar_reset = st.form_submit_button("Restablecer contraseña", use_container_width=True, type="primary")
+                c1r, c2r = st.columns(2)
+                reenviar_reset = c1r.form_submit_button("Reenviar código", use_container_width=True)
+                cancelar_reset = c2r.form_submit_button("Cancelar", use_container_width=True)
+            if cancelar_reset:
+                _consumir_codigo_reset_password(_pend_r["usuario"], _pend_r["tipo"])
+                st.session_state.reset_pw_pendiente = None
+                st.rerun()
+            if reenviar_reset:
+                try:
+                    _smtp_sender_r = st.secrets["email"]["sender"]
+                    _smtp_password_r = st.secrets["email"]["password"]
+                    _display_name_r = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+                    env_ok_r, env_msg_r = _generar_y_enviar_codigo_reset_password(
+                        _pend_r["usuario"], _pend_r["tipo"], _pend_r["email"], _smtp_sender_r, _smtp_password_r, _display_name_r,
+                    )
+                    st.success("Código reenviado.") if env_ok_r else st.error(f"No se pudo reenviar: {env_msg_r}")
+                except Exception:
+                    st.error("El email de envío no está configurado (Secrets → [email]).")
+            if confirmar_reset:
+                _bloqueado_r, _min_restantes_r = _login_bloqueado("reset_pw", _pend_r["usuario"])
+                if _bloqueado_r:
+                    st.error(f"🔒 Demasiados intentos fallidos. Inténtalo de nuevo en {_min_restantes_r} minuto(s).")
+                elif not _verificar_codigo_reset_password(_pend_r["usuario"], _pend_r["tipo"], codigo_reset):
+                    _registrar_intento_fallido("reset_pw", _pend_r["usuario"])
+                    st.error("Código incorrecto o caducado. Puedes pedir uno nuevo con 'Reenviar código'.")
+                elif len(pw_reset_nueva) < 8:
+                    st.error("La nueva contraseña debe tener al menos 8 caracteres.")
+                elif pw_reset_nueva != pw_reset_nueva2:
+                    st.error("Las dos contraseñas no coinciden.")
+                else:
+                    exito_r, mensaje_r = _fijar_password_autoservicio(_pend_r["usuario"], _pend_r["tipo"], pw_reset_nueva)
+                    if exito_r:
+                        _resetear_intentos_login("reset_pw", _pend_r["usuario"])
+                        _consumir_codigo_reset_password(_pend_r["usuario"], _pend_r["tipo"])
+                        st.session_state.reset_pw_pendiente = None
+                        st.success("✅ Contraseña actualizada. Ya puedes iniciar sesión con ella.")
+                    else:
+                        st.warning(f"⚠️ La contraseña se guardó localmente pero no se sincronizó con Drive. {mensaje_r} Prueba de nuevo antes de cerrar esta pestaña.")
+            st.stop()
+
         # Login único: no se distingue en pantalla entre "equipo interno" y "portal de
         # inversor" — nadie que vea la pantalla de entrada puede saber que el equipo interno
         # accede desde el mismo sitio. Se prueban las credenciales primero contra admin y,
@@ -1818,6 +2049,66 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
                     if not _bloq_inv:
                         _registrar_intento_fallido("inversor", usuario_txt or "")
                     st.error("Usuario o contraseña incorrectos")
+
+        # ── "Olvidé mi contraseña" — paso 1: pedir usuario y enviar código por email ──
+        with st.expander("¿Olvidaste tu contraseña?"):
+            st.caption("Te enviaremos un código de 6 dígitos al email que tengamos registrado para tu usuario.")
+            with st.form("form_reset_pw_solicitar"):
+                usuario_reset_txt = st.text_input("Tu usuario", key="input_usuario_reset_solicitar")
+                solicitar_reset = st.form_submit_button("Enviarme el código")
+            if solicitar_reset:
+                usuario_reset_limpio = (usuario_reset_txt or "").strip()
+                if not usuario_reset_limpio:
+                    st.error("Escribe tu usuario.")
+                else:
+                    # Igual que en el login: se prueba primero como admin y, si no coincide,
+                    # como inversor — el tipo se determina solo, sin pedirlo en pantalla.
+                    usuario_canon, tipo_canon = None, None
+                    fila_admin = _fila_usuario(_leer_hoja_usuarios(), usuario_reset_limpio, "admin")
+                    if fila_admin is not None:
+                        usuario_canon, tipo_canon = str(fila_admin["usuario"]), "admin"
+                    else:
+                        match_admin = next((u for u in USUARIOS if u.strip().lower() == usuario_reset_limpio.lower()), None)
+                        if match_admin:
+                            usuario_canon, tipo_canon = match_admin, "admin"
+                    if usuario_canon is None:
+                        fila_inv = _fila_usuario(_leer_hoja_usuarios(), usuario_reset_limpio, "inversor")
+                        if fila_inv is not None:
+                            usuario_canon, tipo_canon = str(fila_inv["usuario"]), "inversor"
+                        else:
+                            match_inv = next((u for u in USUARIOS_INVERSORES if u.strip().lower() == usuario_reset_limpio.lower()), None)
+                            if match_inv:
+                                usuario_canon, tipo_canon = match_inv, "inversor"
+                    if usuario_canon is None:
+                        # Mensaje deliberadamente genérico (no confirma si el usuario existe o
+                        # no) — evita que alguien use este formulario para descubrir usuarios
+                        # válidos por prueba y error.
+                        st.info("Si el usuario existe y tiene un email registrado, te llegará un código en unos segundos.")
+                    else:
+                        email_contacto = _email_contacto_de(usuario_canon, tipo_canon)
+                        if not email_contacto:
+                            st.error(
+                                "No hay ningún email de recuperación registrado para este usuario todavía. "
+                                "Pídele al administrador que te resetee la contraseña desde el panel — de paso, "
+                                "quedará tu email guardado para poder usar esta opción la próxima vez."
+                            )
+                        else:
+                            try:
+                                _smtp_sender_r2 = st.secrets["email"]["sender"]
+                                _smtp_password_r2 = st.secrets["email"]["password"]
+                                _display_name_r2 = st.secrets["email"].get("display_name", "Chaparro Fernández Wealth")
+                            except Exception:
+                                st.error("El email de envío no está configurado (Secrets → [email]). Pídele al administrador que te resetee la contraseña manualmente.")
+                                _smtp_sender_r2 = None
+                            if _smtp_sender_r2:
+                                env_ok_r2, env_msg_r2 = _generar_y_enviar_codigo_reset_password(
+                                    usuario_canon, tipo_canon, email_contacto, _smtp_sender_r2, _smtp_password_r2, _display_name_r2,
+                                )
+                                if env_ok_r2:
+                                    st.session_state.reset_pw_pendiente = {"usuario": usuario_canon, "tipo": tipo_canon, "email": email_contacto}
+                                    st.rerun()
+                                else:
+                                    st.error(f"No se pudo enviar el código: {env_msg_r2}")
         st.stop()
 
     # ── Timeout de sesión: expira por inactividad o por duración máxima absoluta ──
@@ -1873,6 +2164,7 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
     _usuarios_codigo_actual = USUARIOS if st.session_state.tipo_usuario == "admin" else USUARIOS_INVERSORES
     if str(st.session_state.usuario).strip().upper() != "DEMO":
         formulario_cambiar_password(st.session_state.usuario, st.session_state.tipo_usuario, _usuarios_codigo_actual)
+        formulario_email_recuperacion(st.session_state.usuario, st.session_state.tipo_usuario)
     # Verificación en dos pasos por email: equipo interno (admin) + inversores piloto autorizados.
     if st.session_state.tipo_usuario == "admin" or str(st.session_state.usuario).strip().upper() in INVERSORES_CON_2FA:
         seccion_configurar_totp(st.session_state.usuario, st.session_state.tipo_usuario)
@@ -3364,8 +3656,45 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
     return resultado
 
 
+def calcular_matriz_correlacion_tickers(tickers_datos: list) -> np.ndarray:
+    """Matriz de correlación histórica (retornos diarios log, ~1 año) entre los tickers de una
+    nota worst-of, calculada a partir del histórico de precios que YA se descargó para cada ticker
+    (historico_precios, de obtener_datos_fundamentales) — sin llamadas de red adicionales.
+    Si algún ticker no tiene histórico suficiente, esa fila/columna se queda en 0 de correlación
+    con el resto (supuesto conservador: nunca se inventa una correlación que no se puede medir)."""
+    n = len(tickers_datos)
+    if n <= 1:
+        return np.eye(max(n, 1))
+
+    series = {}
+    for td in tickers_datos:
+        hist = td.get("historico_precios")
+        if not hist:
+            continue
+        df_h = pd.DataFrame(hist)
+        df_h["fecha"] = pd.to_datetime(df_h["fecha"])
+        df_h = df_h.drop_duplicates(subset="fecha").set_index("fecha").sort_index()
+        retornos = np.log(df_h["close"] / df_h["close"].shift(1)).dropna()
+        if len(retornos) > 20:
+            series[td["ticker"]] = retornos
+
+    corr = np.eye(n)
+    tickers_ok = list(series.keys())
+    if len(tickers_ok) >= 2:
+        df_retornos = pd.DataFrame(series).dropna()
+        if len(df_retornos) > 20:
+            corr_calc = df_retornos.corr()
+            for i, tdi in enumerate(tickers_datos):
+                for j, tdj in enumerate(tickers_datos):
+                    ti, tj = tdi["ticker"], tdj["ticker"]
+                    if ti in corr_calc.index and tj in corr_calc.columns:
+                        corr[i, j] = corr_calc.loc[ti, tj]
+    return corr
+
+
 def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_simulaciones: int = 5000,
-                             tipo_proteccion: str = "barrera", tiene_memoria: bool = False) -> dict:
+                             tipo_proteccion: str = "barrera", tiene_memoria: bool = False,
+                             matriz_correlacion: np.ndarray = None) -> dict:
     """
     Simulación Monte Carlo (movimiento browniano geométrico con deriva configurable + shocks de
     earnings) para una nota worst-of con uno o varios tickers subyacentes.
@@ -3394,24 +3723,53 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
         de golpe TODOS los cupones acumulados desde el último pago (efecto retroactivo). Solo se
         pierden definitivamente los periodos acumulados que quedan sin recuperar hasta el vencimiento
         (la "cola" final si la nota nunca vuelve a cumplir la barrera antes de vencer).
+    matriz_correlacion: matriz n_tickers×n_tickers de correlación entre los subyacentes (típicamente
+        de calcular_matriz_correlacion_tickers, con la correlación histórica real). Si es None, se
+        asume independencia total entre tickers (matriz identidad) — comportamiento previo, más
+        conservador/simplificado en notas de un único ticker no cambia nada.
 
-    LIMITACIÓN HONESTA: asume independencia entre los distintos tickers (no modela correlación
-    real entre acciones) y usa volatilidad histórica (no implícita de opciones, más precisa pero
-    no disponible gratis). Es una estimación con supuestos simplificados, no una certeza.
+    LIMITACIÓN HONESTA: usa volatilidad histórica (no implícita de opciones, más precisa pero no
+    disponible gratis) y correlación histórica de precios (no correlación implícita de mercado de
+    opciones, que tampoco está disponible gratis). Es una estimación con supuestos simplificados
+    apoyados en datos reales, no una certeza.
     """
     np.random.seed(42)
     n_tickers = len(tickers_datos)
     max_dias = max(e["dias"] for e in dias_hasta_eventos) if dias_hasta_eventos else 1
+    pasos = max(max_dias, 1)
+    dt = 1 / 252
 
-    # Simular trayectorias diarias para cada ticker (GBM con deriva configurable + shocks de earnings)
+    if matriz_correlacion is None:
+        matriz_correlacion = np.eye(n_tickers)
+
+    # Cholesky para generar shocks diarios CORRELACIONADOS entre tickers (si hay más de uno) —
+    # antes cada ticker se simulaba de forma completamente independiente, lo cual subestima el
+    # riesgo real de una nota worst-of: si los subyacentes suelen moverse juntos (correlación
+    # positiva, lo habitual entre acciones del mismo sector), la probabilidad de que TODOS caigan
+    # a la vez es mayor que si se tratan como independientes.
+    try:
+        L = np.linalg.cholesky(matriz_correlacion)
+    except np.linalg.LinAlgError:
+        # La matriz no es semidefinida positiva (puede pasar con correlaciones estimadas de pocos
+        # datos, o si se pasa una matriz manual inconsistente) — se reconstruye la matriz de
+        # correlación válida más cercana recortando autovalores negativos a un mínimo positivo,
+        # en vez de romper la simulación.
+        valores, vectores = np.linalg.eigh(matriz_correlacion)
+        valores_clip = np.clip(valores, 1e-6, None)
+        matriz_psd = vectores @ np.diag(valores_clip) @ vectores.T
+        diag_sqrt = np.sqrt(np.diag(matriz_psd))
+        matriz_correlacion = matriz_psd / np.outer(diag_sqrt, diag_sqrt)  # renormaliza a diagonal 1
+        L = np.linalg.cholesky(matriz_correlacion)
+
+    z_indep = np.random.normal(0, 1, size=(n_simulaciones, pasos, n_tickers))
+    z_corr = z_indep @ L.T  # correlaciona entre tickers en cada paso; los pasos siguen siendo independientes entre sí
+
     precios_simulados = {}
-    for td in tickers_datos:
+    for k, td in enumerate(tickers_datos):
         s0 = td["precio_actual"]
         sigma = td["volatilidad_anual_pct"] / 100
         mu = td.get("drift_anual_pct", 0.0) / 100
-        dt = 1 / 252
-        pasos = max(max_dias, 1)
-        incrementos = np.random.normal((mu - 0.5 * sigma**2) * dt, sigma * np.sqrt(dt), size=(n_simulaciones, pasos))
+        incrementos = (mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * z_corr[:, :, k]
         # Shock de earnings: en vez de repartir ese riesgo uniformemente en el año (lo que hace un
         # GBM puro), lo concentramos en los días concretos donde cae un informe de resultados,
         # con la magnitud REAL que esta acción se ha movido en sus últimos informes.
@@ -3503,6 +3861,7 @@ def simular_montecarlo_nota(tickers_datos: list, dias_hasta_eventos: list, n_sim
         "tiene_memoria": tiene_memoria,
         "cupones_totales_esperados": cupones_totales_esperados,
         "cupones_perdidos_definitivo_esperado": cupones_perdidos_definitivo_esperado,
+        "matriz_correlacion": matriz_correlacion,
     }
 
 
@@ -5111,6 +5470,57 @@ def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control, prorratear_not
     fig = px.line(data, x="mes", y="beneficio", markers=True, title="Evolución del beneficio mensual estimado")
     fig.update_layout(height=420, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter", size=13), title_font=dict(size=20), xaxis_title="Mes", yaxis_title="Beneficio")
     st.plotly_chart(fig, use_container_width=True)
+
+
+def graficos_comparativos_notas(resultados_notas: list):
+    """Gráficos comparativos entre las notas candidatas del comparador: barras de score y barras
+    agrupadas de las tres probabilidades clave (cupón, call, pérdida de capital). Reutiliza
+    resultados_notas tal cual lo produce _tab_comparador_notas — no recalcula nada."""
+    if px is None:
+        st.warning("Falta plotly. Añade plotly a requirements.txt.")
+        return
+    if not resultados_notas:
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        df_score = pd.DataFrame([{"Nota": r["nombre"], "Score": r["score"]} for r in resultados_notas])
+        fig_score = px.bar(df_score, x="Nota", y="Score", text_auto=".0f", title="Score comparado (0-100)")
+        fig_score.update_traces(marker_color="#9A6B24")
+        fig_score.update_layout(
+            height=340, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Archivo, sans-serif", size=12), title_font=dict(size=15),
+            yaxis=dict(range=[0, 100]), showlegend=False,
+        )
+        st.plotly_chart(fig_score, use_container_width=True)
+
+    with col2:
+        filas_prob = []
+        for r in resultados_notas:
+            filas_prob.append({"Nota": r["nombre"], "Métrica": "Prob. cupón/periodo", "Valor": r["prob_cupon_media"] * 100})
+            filas_prob.append({"Nota": r["nombre"], "Métrica": "Prob. call (total)", "Valor": r["prob_call_total"] * 100})
+            filas_prob.append({"Nota": r["nombre"], "Métrica": "Prob. pérdida capital", "Valor": r["prob_perdida_capital"] * 100})
+        df_prob = pd.DataFrame(filas_prob)
+        fig_prob = px.bar(
+            df_prob, x="Nota", y="Valor", color="Métrica", barmode="group", text_auto=".0f",
+            title="Probabilidades clave por nota (%)",
+            color_discrete_map={"Prob. cupón/periodo": "#0E7C5A", "Prob. call (total)": "#9A6B24", "Prob. pérdida capital": "#B03A2E"},
+        )
+        fig_prob.update_layout(
+            height=340, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Archivo, sans-serif", size=12), title_font=dict(size=15),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.35), yaxis_title="%",
+        )
+        st.plotly_chart(fig_prob, use_container_width=True)
+
+    df_renta = pd.DataFrame([{"Nota": r["nombre"], "Rentabilidad neta esperada (anual %)": r["rentabilidad_esperada_neta"] * 100} for r in resultados_notas])
+    fig_renta = px.bar(df_renta, x="Nota", y="Rentabilidad neta esperada (anual %)", text_auto=".2f", title="Rentabilidad neta esperada anualizada")
+    fig_renta.update_traces(marker_color=["#0E7C5A" if v >= 0 else "#B03A2E" for v in df_renta["Rentabilidad neta esperada (anual %)"]])
+    fig_renta.update_layout(
+        height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Archivo, sans-serif", size=12), title_font=dict(size=15), showlegend=False,
+    )
+    st.plotly_chart(fig_renta, use_container_width=True)
 
 
 
@@ -8331,7 +8741,195 @@ def _informe_ia_a_pdf(titulo: str, texto_markdown: str) -> bytes:
     return output.getvalue()
 
 
-def _exportar_grafico_precio_png(datos: dict, precio_contingencia: float = None) -> bytes:
+def _exportar_grafico_barras_png(categorias: list, valores: list, titulo: str, color: str = "#9A6B24",
+                                  ylabel: str = "", pct: bool = True, colores_por_barra: list = None) -> bytes:
+    """Barra simple (matplotlib, Agg) para embeber en PDF — usada tanto para el score comparado
+    como para la rentabilidad neta esperada. Sin dependencias de sistema (ver nota sobre kaleido
+    en _exportar_grafico_precio_png)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(8.6, 3.0), dpi=150)
+        colores = colores_por_barra or [color] * len(categorias)
+        ax.bar(categorias, valores, color=colores)
+        ax.set_title(titulo, fontsize=11, color="#0E2338", fontweight="bold", loc="left")
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=9)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color("#cccccc")
+        ax.grid(axis="y", color="#e3e7ee", linewidth=0.8)
+        ax.tick_params(colors="#555555", labelsize=9)
+        for i, v in enumerate(valores):
+            etiqueta = f"{v:.1f}%" if pct else f"{v:.0f}"
+            ax.annotate(etiqueta, (i, v), textcoords="offset points", xytext=(0, 4), ha="center", fontsize=8.5, color="#333")
+        fig.tight_layout()
+        buf = BytesIO()
+        fig.savefig(buf, format="png", facecolor="white")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _exportar_grafico_barras_agrupadas_png(resultados_notas: list, titulo: str = "Probabilidades clave por nota") -> bytes:
+    """Barras agrupadas (prob. cupón / prob. call / prob. pérdida capital) por nota, para el PDF."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as _np
+
+        nombres = [r["nombre"] for r in resultados_notas]
+        cupon = [r["prob_cupon_media"] * 100 for r in resultados_notas]
+        call = [r["prob_call_total"] * 100 for r in resultados_notas]
+        perdida = [r["prob_perdida_capital"] * 100 for r in resultados_notas]
+
+        x = _np.arange(len(nombres))
+        w = 0.26
+        fig, ax = plt.subplots(figsize=(8.6, 3.2), dpi=150)
+        ax.bar(x - w, cupon, width=w, label="Prob. cupón/periodo", color="#0E7C5A")
+        ax.bar(x, call, width=w, label="Prob. call (total)", color="#9A6B24")
+        ax.bar(x + w, perdida, width=w, label="Prob. pérdida capital", color="#B03A2E")
+        ax.set_xticks(x)
+        ax.set_xticklabels(nombres, fontsize=9)
+        ax.set_title(titulo, fontsize=11, color="#0E2338", fontweight="bold", loc="left")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color("#cccccc")
+        ax.grid(axis="y", color="#e3e7ee", linewidth=0.8)
+        ax.tick_params(colors="#555555", labelsize=9)
+        ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, frameon=False)
+        fig.tight_layout()
+        buf = BytesIO()
+        fig.savefig(buf, format="png", facecolor="white")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _generar_informe_comparador_pdf(resultados_notas: list, texto_recomendacion: str,
+                                     capital_disponible: float, tasa_inversor_pct: float,
+                                     bloques_informe: list) -> bytes:
+    """Informe PDF del comparador de notas, con identidad CF Wealth: tabla de resultados, gráfico
+    de score y de probabilidades comparadas, ficha + noticias reales (con fuente y fecha) de cada
+    subyacente, y la recomendación de reparto razonada. Reemplaza al PDF anterior (texto plano sin
+    gráficos) — la parte narrativa (bloques_informe) se sigue generando igual que antes."""
+    import re as _re
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, HRFlowable
+    from reportlab.lib.styles import ParagraphStyle
+
+    NAVY = rl_colors.Color(14/255, 35/255, 56/255)
+    GOLD = rl_colors.Color(154/255, 107/255, 36/255)
+    GREY = rl_colors.Color(102/255, 112/255, 133/255)
+    LINE = rl_colors.Color(227/255, 231/255, 238/255)
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
+    story = []
+
+    style_eyebrow = ParagraphStyle("eyebrow", fontName="Helvetica-Bold", fontSize=8.5, textColor=GOLD, spaceAfter=2)
+    style_titulo = ParagraphStyle("titulo", fontName="Helvetica-Bold", fontSize=18, textColor=NAVY, spaceAfter=2)
+    style_sub = ParagraphStyle("sub", fontName="Helvetica", fontSize=9.5, textColor=GREY, spaceAfter=10)
+    style_h3 = ParagraphStyle("h3", fontName="Helvetica-Bold", fontSize=12, spaceBefore=12, spaceAfter=5, textColor=NAVY)
+    style_h4 = ParagraphStyle("h4", fontName="Helvetica-Bold", fontSize=10, spaceBefore=7, spaceAfter=3, textColor=rl_colors.Color(26/255, 63/255, 92/255))
+    style_normal = ParagraphStyle("normal", fontName="Helvetica", fontSize=9, leading=12.5, spaceAfter=5)
+    style_caption = ParagraphStyle("caption", fontName="Helvetica-Oblique", fontSize=7.5, textColor=GREY, spaceAfter=6)
+
+    story.append(Paragraph("CF WEALTH · COMPARADOR DE NOTAS", style_eyebrow))
+    story.append(Paragraph("Informe de comparación", style_titulo))
+    story.append(Paragraph(
+        f"Generado el {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} · Capital a repartir: ${capital_disponible:,.2f} · "
+        f"Tasa pagada al inversor: {tasa_inversor_pct*100:.2f}% anual · Documento interno de socios.", style_sub))
+    story.append(HRFlowable(width="100%", thickness=0.6, color=LINE, spaceAfter=8))
+
+    # --- Tabla resumen ---
+    filas_tabla = [["Nota", "Score", "Cupón anual", "Prob. cupón", "Prob. pérdida cap.", "Rent. neta esp."]]
+    for r in resultados_notas:
+        filas_tabla.append([
+            r["nombre"], f"{r['score']:.0f}/100", f"{r['cupon_anual']*100:.1f}%",
+            f"{r['prob_cupon_media']*100:.1f}%", f"{r['prob_perdida_capital']*100:.1f}%",
+            f"{r['rentabilidad_esperada_neta']*100:.2f}%",
+        ])
+    tabla = Table(filas_tabla, colWidths=[38*mm, 20*mm, 24*mm, 24*mm, 30*mm, 27*mm])
+    tabla.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white), ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.Color(0.97, 0.97, 0.98)]),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6), ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, LINE), ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+    ]))
+    story.append(tabla)
+
+    # --- Gráficos comparativos ---
+    png_score = _exportar_grafico_barras_png(
+        [r["nombre"] for r in resultados_notas], [r["score"] for r in resultados_notas],
+        "Score comparado (0-100)", color="#9A6B24", pct=False,
+    )
+    png_prob = _exportar_grafico_barras_agrupadas_png(resultados_notas)
+    png_renta = _exportar_grafico_barras_png(
+        [r["nombre"] for r in resultados_notas], [r["rentabilidad_esperada_neta"] * 100 for r in resultados_notas],
+        "Rentabilidad neta esperada anualizada (%)",
+        colores_por_barra=["#0E7C5A" if r["rentabilidad_esperada_neta"] >= 0 else "#B03A2E" for r in resultados_notas],
+    )
+    story.append(Paragraph("Comparativa visual", style_h3))
+    for png in (png_score, png_prob, png_renta):
+        if png:
+            story.append(RLImage(BytesIO(png), width=170*mm, height=170*mm*3.0/8.6))
+            story.append(Spacer(1, 3*mm))
+    if not (png_score or png_prob or png_renta):
+        story.append(Paragraph("Gráficos no disponibles en este PDF (falta matplotlib en el servidor).", style_caption))
+
+    # --- Contenido narrativo: ficha de cada subyacente + noticias con fuente/fecha ---
+    def _linea_a_html(linea):
+        return _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", linea)
+
+    story.append(Paragraph("Detalle por nota y compañía subyacente", style_h3))
+    for linea in "\n\n".join(bloques_informe).split("\n"):
+        linea_limpia = linea.strip()
+        if not linea_limpia:
+            story.append(Spacer(1, 2.5 * mm))
+            continue
+        if linea_limpia.startswith("#### "):
+            story.append(Paragraph(_linea_a_html(linea_limpia[5:]), style_h4))
+        elif linea_limpia.startswith("### "):
+            story.append(Paragraph(_linea_a_html(linea_limpia[4:]), style_h3))
+        elif linea_limpia.startswith("- ") or linea_limpia.startswith("* "):
+            story.append(Paragraph("• " + _linea_a_html(linea_limpia[2:]), style_normal))
+        else:
+            story.append(Paragraph(_linea_a_html(linea_limpia), style_normal))
+
+    # --- Noticias que avalan el análisis, por nota y ticker ---
+    story.append(Paragraph("Noticias que avalan el análisis", style_h3))
+    for r in resultados_notas:
+        noticias_ticker_dict = r.get("noticias_por_ticker") or {}
+        if not noticias_ticker_dict:
+            continue
+        story.append(Paragraph(r["nombre"], style_h4))
+        for ticker, noticias in noticias_ticker_dict.items():
+            if not noticias or (isinstance(noticias[0], dict) and "_error" in noticias[0]):
+                continue
+            for n in noticias[:5]:
+                prioridad = str(n.get("prioridad", "media")).upper()
+                story.append(Paragraph(f"<b>[{ticker}] {n.get('titular', 'Sin título')}</b>  <font size=7 color='#9A6B24'>[{prioridad}]</font>", style_normal))
+                story.append(Paragraph(f"{n.get('fuente', 'Fuente desconocida')} · {n.get('fecha', 'sin fecha')}", style_caption))
+                if n.get("url"):
+                    story.append(Paragraph(f"<link href='{n['url']}'><font color='#9A6B24'>{n['url']}</font></link>", style_caption))
+    story.append(Paragraph(
+        "Noticias generadas por IA a partir de búsqueda web pública. Documento interno — no constituye "
+        "asesoramiento de inversión ni una recomendación de compra/venta.", style_caption))
+
+    doc.build(story)
+    return output.getvalue()
+
+
+
     """Genera el gráfico de evolución de precio como PNG para incrustarlo en el PDF, usando
     matplotlib (backend Agg, sin GUI y sin dependencias de sistema) en vez de plotly+kaleido:
     kaleido moderno necesita Chrome instalado en el servidor, algo frágil en un contenedor
@@ -8882,7 +9480,7 @@ def generar_memo_directorio_notas_pptx(
         r_.font.bold = linea_txt.startswith("#")
         r_.font.name = "Calibri"
     add_text(s, 0.7, H - 0.5, 11, 0.3,
-             "Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.",
+             "Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, con correlación real entre tickers cuando está activada.",
              size=8.5, color=RGBColor(0x93, 0x9C, 0xD6))
 
     # ---------- Slide final: supuestos ----------
@@ -9100,11 +9698,21 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     "coupon' o similar, va marcado; si no lo dice, probablemente sea sin memoria."
                 ),
             )
+            modelar_correlacion = st.checkbox(
+                "Modelar correlación real entre tickers", value=True, key=f"comp_correl_{i}",
+                help=(
+                    "Solo aplica si la nota tiene más de un ticker (worst-of). Calcula la correlación histórica "
+                    "real (12 meses de precios diarios) entre los subyacentes y la usa en el Monte Carlo — si "
+                    "suelen moverse juntos (correlación positiva, lo habitual entre acciones del mismo sector), "
+                    "la probabilidad de que TODOS caigan a la vez es mayor que tratándolos como independientes. "
+                    "Desmarcalo para volver al supuesto anterior (independencia total entre tickers)."
+                ),
+            )
             notas_input.append({
                 "nombre": nombre, "tickers": tickers_nota, "cupon_anual": cupon_anual, "meses_venc": meses_venc,
                 "periodicidad": periodicidad, "frecuencia_call": frecuencia_call, "tipo_proteccion": tipo_proteccion,
                 "modo_deriva": modo_deriva, "deriva_manual_pct": deriva_manual_pct, "modelar_earnings": modelar_earnings,
-                "tiene_memoria": tiene_memoria,
+                "tiene_memoria": tiene_memoria, "modelar_correlacion": modelar_correlacion,
             })
 
     col_cap, col_tasa = st.columns(2)
@@ -9152,14 +9760,20 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     "volatilidad_anual_pct": fd["volatilidad_anual_pct"],
                     "barrera_cupon_pct": t["barrera_cupon_pct"], "barrera_capital_pct": t["barrera_capital_pct"], "call_level_pct": t["call_level_pct"],
                     "drift_anual_pct": drift_pct, "dias_earnings": dias_earnings, "salto_earnings_pct": salto_pct,
+                    "historico_precios": fd.get("historico_precios"),
                 })
                 fundamentales_nota.append(fd)
             if not tickers_datos:
                 continue
 
+            matriz_corr = None
+            if nota.get("modelar_correlacion") and len(tickers_datos) > 1:
+                matriz_corr = calcular_matriz_correlacion_tickers(tickers_datos)
+
             eventos = _generar_horario_eventos(nota["meses_venc"], nota["periodicidad"], nota["frecuencia_call"])
             sim = simular_montecarlo_nota(
                 tickers_datos, eventos, tipo_proteccion=nota["tipo_proteccion"], tiene_memoria=nota["tiene_memoria"],
+                matriz_correlacion=matriz_corr,
             )
 
             eventos_cupon = [e for e in sim["eventos"] if e["tipo"] == "cupon"]
@@ -9180,6 +9794,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 "tipo_proteccion": nota["tipo_proteccion"],
                 "modo_deriva": nota["modo_deriva"], "modelar_earnings": nota["modelar_earnings"],
                 "tiene_memoria": nota["tiene_memoria"],
+                "matriz_correlacion": sim.get("matriz_correlacion"),
                 "cupones_totales_esperados": sim["cupones_totales_esperados"],
                 "cupones_totales_periodos": len(eventos_cupon),
                 "cupones_perdidos_definitivo_esperado": sim.get("cupones_perdidos_definitivo_esperado"),
@@ -9264,6 +9879,9 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     } for r in resultados_notas])
     st.dataframe(df_resumen, use_container_width=True, hide_index=True)
 
+    st.markdown("#### 📈 Comparativa visual")
+    graficos_comparativos_notas(resultados_notas)
+
     # --- Ficha por compañía subyacente: a qué se dedica, noticias, precio objetivo (dato real) ---
     st.markdown("---")
     st.markdown("### 🏢 Compañías subyacentes de cada nota")
@@ -9287,6 +9905,14 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             f"Deriva simulación: {deriva_txt} · Shock de earnings: {earnings_txt} · Cupón: {memoria_txt} · "
             f"Cupones esperados: {r['cupones_totales_esperados']:.1f} de {r['cupones_totales_periodos']} periodos"
         )
+
+        # Matriz de correlación real entre los tickers de esta nota (si aplica: >1 ticker y activada)
+        matriz_corr = r.get("matriz_correlacion")
+        if matriz_corr is not None and len(r["tickers"]) > 1 and not np.allclose(matriz_corr, np.eye(len(r["tickers"]))):
+            st.caption("🔗 Correlación histórica real entre los subyacentes (12 meses), usada en el Monte Carlo:")
+            df_corr = pd.DataFrame(matriz_corr, index=r["tickers"], columns=r["tickers"]).round(2)
+            st.dataframe(df_corr.style.background_gradient(cmap="RdYlGn_r", vmin=-1, vmax=1).format("{:.2f}"), use_container_width=True)
+
         bloques_informe.append(f"### {r['nombre']} (score {r['score']:.0f}/100)")
         bloques_informe.append(
             f"Cupón nota: {r['cupon_anual']*100:.2f}% anual, pago {pago_txt}. Pagamos al inversor: {tasa_inversor_pct*100:.2f}% anual. "
@@ -9296,6 +9922,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
         )
         colchones_nota = []
         colchones_cupon_nota = []
+        noticias_por_ticker = {}
         for t_full, fd in zip(r["tickers_full"], r["fundamentales"]):
             ticker = t_full["ticker"]
             barrera_capital_pct = t_full["barrera_capital_pct"]
@@ -9343,6 +9970,14 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                     ficha_texto = generar_ficha_empresa_ia(ticker, fd.get("nombre") or ticker, barrera_capital_pct, colchon_pct, barrera_cupon_pct, colchon_cupon_pct)
                 st.markdown(_md_seguro(ficha_texto))
                 st.caption("⚠️ La explicación, las noticias y la opinión de riesgo son una síntesis de IA en base a fuentes públicas — el precio, el precio objetivo y los colchones de arriba sí son datos reales/calculados.")
+
+                # Noticias estructuradas (fuente, fecha y enlace por artículo) que avalan el análisis —
+                # complementan la síntesis narrativa de arriba con las noticias concretas, citables una a una.
+                st.markdown("##### 📰 Noticias que avalan este análisis")
+                noticias_ticker = buscar_noticias_libre(f"{fd.get('nombre') or ticker} ({ticker})")
+                noticias_por_ticker[ticker] = noticias_ticker
+                _renderizar_tarjetas_noticias(noticias_ticker)
+
                 bloques_informe.append(f"#### {fd.get('nombre') or ticker} ({ticker})")
                 bloques_informe.append(
                     f"Precio actual: ${fd.get('precio_actual', 0):,.2f} · Precio objetivo consenso analistas: "
@@ -9350,6 +9985,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                 )
                 bloques_informe.append(f"Colchón hasta barrera de cupón: {colchon_cupon_pct:.1f}% (barrera al {barrera_cupon_pct*100:.0f}%). Colchón hasta barrera de capital: {colchon_pct:.1f}% (barrera al {barrera_capital_pct*100:.0f}%).")
                 bloques_informe.append(ficha_texto)
+        r["noticias_por_ticker"] = noticias_por_ticker
 
     # Recomendación de reparto: razonada por Claude, usando SOLO los números ya calculados
     with st.spinner("Generando recomendación..."):
@@ -9434,7 +10070,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
 
     st.markdown("### 🎯 Recomendación de reparto")
     st.markdown(_md_seguro(texto_recomendacion) or "No se pudo generar una recomendación.")
-    st.caption("Simulación Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, sin deriva de precio, sin correlación entre tickers.")
+    st.caption("Simulación Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, con correlación real entre tickers cuando está activada (ver matriz por nota arriba).")
 
     bloques_informe.append("### 🎯 Recomendación de reparto")
     bloques_informe.append(texto_recomendacion or "No se pudo generar una recomendación.")
@@ -9444,7 +10080,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     col_pdf, col_pptx = st.columns(2)
     with col_pdf:
         with st.spinner("Preparando PDF..."):
-            pdf_bytes = _informe_ia_a_pdf("Comparador de notas — Informe", "\n\n".join(bloques_informe))
+            pdf_bytes = _generar_informe_comparador_pdf(resultados_notas, texto_recomendacion, capital_disponible, tasa_inversor_pct, bloques_informe)
         st.download_button(
             "⬇️ Descargar este informe en PDF",
             data=pdf_bytes,
@@ -12307,13 +12943,14 @@ def seccion_gestion_excel():
                     st.error(f"Ya existe un acceso '{tipo_nuevo}' para {usuario_nuevo_limpio}. Usa 'Resetear contraseña' más abajo.")
                 else:
                     password_temp = _generar_password_temporal()
-                    for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password"]:
+                    for col in ["usuario", "tipo_usuario", "password", "debe_cambiar_password", "email"]:
                         if col not in df_u.columns:
                             df_u[col] = "NO" if col == "debe_cambiar_password" else ""
                         df_u[col] = df_u[col].astype(object)
                     fila_nueva = pd.DataFrame([{
                         "usuario": usuario_nuevo_limpio, "tipo_usuario": tipo_nuevo,
                         "password": _hash_password(password_temp), "debe_cambiar_password": "SI",
+                        "email": email_nuevo_limpio,
                     }])
                     df_u = pd.concat([df_u, fila_nueva], ignore_index=True)
                     exito, mensaje = _guardar_hoja_usuarios(df_u)
@@ -12368,8 +13005,14 @@ def seccion_gestion_excel():
                         ].index
                         if "debe_cambiar_password" not in df_u.columns:
                             df_u["debe_cambiar_password"] = "NO"
+                        if "email" not in df_u.columns:
+                            df_u["email"] = ""
                         df_u.loc[idx, "password"] = _hash_password(password_temp)
                         df_u.loc[idx, "debe_cambiar_password"] = "SI"
+                        # Aprovechamos el reseteo para dejar registrado el email de contacto —
+                        # así, de ahora en adelante, este usuario puede usar 'olvidé mi
+                        # contraseña' por su cuenta sin depender de un admin.
+                        df_u.loc[idx, "email"] = email_reset
                         exito, mensaje = _guardar_hoja_usuarios(df_u)
                         if exito:
                             env_ok, env_msg = enviar_email_credenciales_nuevas(
