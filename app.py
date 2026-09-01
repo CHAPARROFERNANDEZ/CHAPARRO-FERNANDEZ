@@ -10075,32 +10075,35 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
     bloques_informe.append("### 🎯 Recomendación de reparto")
     bloques_informe.append(texto_recomendacion or "No se pudo generar una recomendación.")
 
-    # --- Descarga del informe completo: PDF y memo de directorio (PPTX) ---
+    # --- Descarga del informe completo: PDF + PowerPoint juntos en un único clic ---
+    # Un solo st.download_button solo puede entregar un archivo, así que se empaquetan los
+    # dos (PDF + PPTX) en un .zip.
     st.markdown("---")
-    col_pdf, col_pptx = st.columns(2)
-    with col_pdf:
-        with st.spinner("Preparando PDF..."):
-            pdf_bytes = _generar_informe_comparador_pdf(resultados_notas, texto_recomendacion, capital_disponible, tasa_inversor_pct, bloques_informe)
-        st.download_button(
-            "⬇️ Descargar este informe en PDF",
-            data=pdf_bytes,
-            file_name=f"comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf",
-            mime="application/pdf",
-        )
-    with col_pptx:
-        with st.spinner("Preparando memo de directorio (PowerPoint)..."):
-            try:
-                pptx_bytes = generar_memo_directorio_notas_pptx(
-                    resultados_notas, texto_recomendacion, capital_disponible, tasa_inversor_pct,
-                )
-                st.download_button(
-                    "📊 Descargar memo de directorio (PowerPoint)",
-                    data=pptx_bytes,
-                    file_name=f"memo_directorio_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                )
-            except Exception as e:
-                st.error(f"No se pudo generar el PowerPoint: {e}")
+    with st.spinner("Preparando informe (PDF + PowerPoint)..."):
+        pdf_bytes = _generar_informe_comparador_pdf(resultados_notas, texto_recomendacion, capital_disponible, tasa_inversor_pct, bloques_informe)
+        zip_buffer = BytesIO()
+        try:
+            pptx_bytes = generar_memo_directorio_notas_pptx(
+                resultados_notas, texto_recomendacion, capital_disponible, tasa_inversor_pct,
+            )
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(f"comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf", pdf_bytes)
+                zf.writestr(f"memo_directorio_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pptx", pptx_bytes)
+            st.download_button(
+                "⬇️ Descargar informe (PDF + PowerPoint)",
+                data=zip_buffer.getvalue(),
+                file_name=f"informe_comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.zip",
+                mime="application/zip",
+                type="primary",
+            )
+        except Exception as e:
+            st.error(f"No se pudo generar el PowerPoint: {e}. Descargando solo el PDF.")
+            st.download_button(
+                "⬇️ Descargar este informe en PDF",
+                data=pdf_bytes,
+                file_name=f"comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+            )
 
 
 
