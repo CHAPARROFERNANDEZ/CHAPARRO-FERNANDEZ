@@ -3207,6 +3207,12 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
         "retorno_implicito_analistas_pct": None,
         "variacion_1m_pct": None, "variacion_ytd_pct": None,
         "error": None, "aviso_analistas": None,
+        # --- Añadido para la ficha de subyacente rediseñada (rango 52 sem., PER, gráfico) ---
+        "precio_max_52sem": None, "precio_min_52sem": None,
+        "posicion_en_rango_52sem_pct": None, "pct_desde_max_52sem": None,
+        "trailing_pe": None, "forward_pe": None,
+        "variacion_dia_pct": None,
+        "historico_precios": None,  # lista [{"fecha": "YYYY-MM-DD", "close": float}, ...] ~1 año, para el gráfico
     }
     if yf is None:
         resultado["error"] = "yfinance no disponible"
@@ -3241,6 +3247,8 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
             resultado["target_bajo"] = info.get("targetLowPrice")
             resultado["n_analistas"] = info.get("numberOfAnalystOpinions")
             resultado["recomendacion"] = info.get("recommendationKey")
+            resultado["trailing_pe"] = info.get("trailingPE")
+            resultado["forward_pe"] = info.get("forwardPE")
             if info.get("targetMeanPrice") is None:
                 resultado["aviso_analistas"] = "Esta compañía no tiene cobertura de analistas en Yahoo Finance (dato real, no es un fallo)."
 
@@ -3281,6 +3289,28 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
             primer_dia_anio = cierres[cierres.index.year == cierres.index[-1].year]
             if len(primer_dia_anio) > 1:
                 resultado["variacion_ytd_pct"] = float((cierres.iloc[-1] / primer_dia_anio.iloc[0] - 1) * 100)
+            if len(cierres) > 1:
+                resultado["variacion_dia_pct"] = float((cierres.iloc[-1] / cierres.iloc[-2] - 1) * 100)
+
+            # Rango de 52 semanas (mismo tramo de 253 sesiones ~1 año usado para volatilidad, así
+            # que la barra visual y el % de recorrido son consistentes con el resto de la ficha).
+            resultado["precio_max_52sem"] = float(cierres.max())
+            resultado["precio_min_52sem"] = float(cierres.min())
+            if resultado["precio_max_52sem"] > resultado["precio_min_52sem"]:
+                resultado["posicion_en_rango_52sem_pct"] = float(
+                    (resultado["precio_actual"] - resultado["precio_min_52sem"])
+                    / (resultado["precio_max_52sem"] - resultado["precio_min_52sem"]) * 100
+                )
+            resultado["pct_desde_max_52sem"] = float(
+                (resultado["precio_actual"] / resultado["precio_max_52sem"] - 1) * 100
+            )
+
+            # Histórico de cierres para el gráfico de la ficha (últimos ~12 meses, serializado a
+            # lista de dicts para que sobreviva al cacheo de st.cache_data sin problemas).
+            resultado["historico_precios"] = [
+                {"fecha": fecha.strftime("%Y-%m-%d"), "close": float(valor)}
+                for fecha, valor in cierres.items()
+            ]
 
             # Salto histórico medio el día después de resultados — así el riesgo de earnings se mide
             # con el movimiento REAL de esta acción en sus últimos informes, no con la vol. media anual.
@@ -4111,6 +4141,137 @@ def tarjeta_kpi(titulo, valor, subtitulo="", estado="normal"):
         """,
         unsafe_allow_html=True,
     )
+
+
+def _fmt_market_cap(valor):
+    """Formatea capitalización bursátil en notación compacta (1,69 B$ / 174,9 MM$), con coma
+    decimal en español, para que las tarjetas de subyacente se lean como un panel financiero real."""
+    if valor is None or pd.isna(valor):
+        return "N/D"
+    valor = float(valor)
+    if valor >= 1e12:
+        return f"{valor / 1e12:.2f}".replace(".", ",") + " B$"
+    if valor >= 1e9:
+        return f"{valor / 1e9:.2f}".replace(".", ",") + " MM$"
+    if valor >= 1e6:
+        return f"{valor / 1e6:.1f}".replace(".", ",") + " M$"
+    return f"${valor:,.0f}"
+
+
+def _tarjeta_subyacente_html(datos: dict, notas_ticker: pd.DataFrame = None) -> str:
+    """HTML de una tarjeta de subyacente al estilo 'panel de cartera': precio, variación del día,
+    barra de posición en el rango de 52 semanas, y estadísticas clave (cap., PER, distancia a
+    la barrera más próxima de tus notas si aplica). Usa la misma paleta marino/dorado que
+    tarjeta_kpi para que no se vea como un componente aparte pegado con pegamento."""
+    ticker = datos.get("ticker", "")
+    nombre = datos.get("nombre") or ticker
+    precio = datos.get("precio_actual")
+    var_dia = datos.get("variacion_dia_pct")
+    minimo = datos.get("precio_min_52sem")
+    maximo = datos.get("precio_max_52sem")
+    posicion = datos.get("posicion_en_rango_52sem_pct")
+    pct_desde_max = datos.get("pct_desde_max_52sem")
+    market_cap = datos.get("market_cap")
+    pe = datos.get("trailing_pe")
+
+    subida = (var_dia is not None) and var_dia >= 0
+    color_chip = "#166534" if subida else "#991b1b"
+    fondo_chip = "#edf7ed" if subida else "#fee2e2"
+    signo = "+" if subida else ""
+    chip_html = (
+        f"<span style='display:inline-block;padding:3px 10px;border-radius:8px;font-size:13px;"
+        f"font-weight:700;background:{fondo_chip};color:{color_chip};font-family:ui-monospace,monospace;'>"
+        f"{signo}{var_dia:.2f}%</span>" if var_dia is not None else ""
+    )
+
+    if posicion is not None and minimo is not None and maximo is not None:
+        pos_clamp = max(0, min(100, posicion))
+        barra_html = f"""
+        <div style="margin-top:14px;">
+          <div style="display:flex;justify-content:space-between;font-family:ui-monospace,monospace;font-size:11px;color:#667085;margin-bottom:5px;">
+            <span>${minimo:,.2f}</span><span style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#9aa4b2;">rango 52 semanas · {pos_clamp:.0f}% del recorrido</span><span>${maximo:,.2f}</span>
+          </div>
+          <div style="position:relative;height:7px;border-radius:4px;background:linear-gradient(90deg,#eef1f6,#f0e4ce);border:1px solid #e3e7ee;">
+            <span style="position:absolute;top:50%;left:{pos_clamp:.1f}%;width:3px;height:17px;border-radius:2px;background:#0e2338;transform:translate(-50%,-50%);"></span>
+          </div>
+        </div>"""
+    else:
+        barra_html = "<div style='margin-top:10px;font-size:12px;color:#9aa4b2;'>Sin histórico suficiente para el rango de 52 semanas.</div>"
+
+    stats = []
+    stats.append(("Capitalización", _fmt_market_cap(market_cap)))
+    stats.append(("PER", f"{pe:.1f}" if pe else "N/D"))
+    stats.append(("Desde máx. 52 sem.", f"{pct_desde_max:+.1f}%" if pct_desde_max is not None else "N/D"))
+
+    if notas_ticker is not None and not notas_ticker.empty and precio:
+        peor_margen = None
+        for _, r in notas_ticker.iterrows():
+            barrera_cupon = r.get("barrera_cupon")
+            precio_compra = r.get("precio_compra")
+            if pd.notna(barrera_cupon) and pd.notna(precio_compra) and precio_compra:
+                margen = (precio / (precio_compra * barrera_cupon) - 1) * 100
+                if peor_margen is None or margen < peor_margen:
+                    peor_margen = margen
+        if peor_margen is not None:
+            stats.append(("Margen a barrera (peor nota)", f"{peor_margen:+.1f}%"))
+
+    stats_html = "".join(
+        f"<div style='display:flex;flex-direction:column;gap:1px;'>"
+        f"<span style='font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#9aa4b2;font-weight:600;'>{k}</span>"
+        f"<span style='font-family:ui-monospace,monospace;font-size:13.5px;color:#0e2338;'>{v}</span></div>"
+        for k, v in stats
+    )
+
+    return f"""
+    <div style="background:#fff;border:1px solid #e3e7ee;border-radius:14px;padding:20px 22px;
+                box-shadow:0 12px 32px rgba(15,35,55,0.06);display:flex;flex-direction:column;gap:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+        <div>
+          <p style="margin:0;font-family:ui-monospace,monospace;font-size:16px;font-weight:700;letter-spacing:.03em;color:#0e2338;">{ticker}</p>
+          <p style="margin:2px 0 0;font-size:13px;color:#667085;">{nombre}</p>
+        </div>
+        <div style="text-align:right;">
+          <p style="margin:0;font-family:ui-monospace,monospace;font-size:26px;font-weight:600;color:#0e2338;">
+            {f"${precio:,.2f}" if precio else "N/D"}</p>
+          <div style="margin-top:4px;">{chip_html}</div>
+        </div>
+      </div>
+      {barra_html}
+      <div style="display:flex;gap:22px;flex-wrap:wrap;border-top:1px solid #e3e7ee;padding-top:12px;">
+        {stats_html}
+      </div>
+    </div>
+    """
+
+
+def grafico_precio_subyacente(datos: dict, precio_contingencia: float = None):
+    """Gráfico de evolución de precio (~1 año) del subyacente, con línea de la barrera de
+    contingencia marcada si la ficha se está viendo desde el contexto de una nota concreta."""
+    if px is None:
+        st.warning("Falta plotly. Añade plotly a requirements.txt.")
+        return None
+    historico = datos.get("historico_precios")
+    if not historico:
+        st.info("Sin histórico de precio disponible para graficar.")
+        return None
+    df_hist = pd.DataFrame(historico)
+    df_hist["fecha"] = pd.to_datetime(df_hist["fecha"])
+    fig = px.line(df_hist, x="fecha", y="close", title=None)
+    fig.update_traces(line=dict(color="#9A6B24", width=2), hovertemplate="%{x|%d %b %Y}<br>$%{y:,.2f}<extra></extra>")
+    if precio_contingencia:
+        fig.add_hline(
+            y=precio_contingencia, line_dash="dash", line_color="#B03A2E", line_width=1.5,
+            annotation_text=f"Barrera contingencia ${precio_contingencia:,.2f}",
+            annotation_position="top left", annotation_font_color="#B03A2E", annotation_font_size=11,
+        )
+    fig.update_layout(
+        height=280, margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Archivo, sans-serif", size=12, color="#58616E"),
+        xaxis=dict(title=None, showgrid=False), yaxis=dict(title=None, showgrid=True, gridcolor="#EAEEF3"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
 
 def validar_base_datos(df_inv, df_cal, df_control):
@@ -7873,10 +8034,11 @@ def _render_comparacion_auditoria(numero_nota: int, df_inv: pd.DataFrame, df_cal
 
 def _tab_ficha_compania(df_control: pd.DataFrame):
     st.caption(
-        "Análisis fundamental de una compañía subyacente: precio objetivo de consenso de analistas, "
-        "volatilidad histórica, próxima fecha de resultados y noticias recientes. "
-        "**Todo dato de mercado es real (Yahoo Finance)** — la única parte generada por IA es el resumen "
-        "de noticias, que es una síntesis de fuentes públicas, no una predicción de precio."
+        "Análisis fundamental de una compañía subyacente: precio, rango de 52 semanas, PER, "
+        "consenso de analistas, volatilidad, próximo earnings, gráfico de evolución y noticias "
+        "recientes que avalan el análisis. **Todo dato de mercado es real (Yahoo Finance)** — la "
+        "única parte generada por IA es el resumen de noticias, síntesis de fuentes públicas, "
+        "nunca una predicción de precio."
     )
 
     tickers_disponibles = sorted(df_control["ticker"].dropna().unique()) if df_control is not None and not df_control.empty and "ticker" in df_control.columns else []
@@ -7895,31 +8057,34 @@ def _tab_ficha_compania(df_control: pd.DataFrame):
         with st.spinner(f"Consultando datos de mercado de {ticker}..."):
             datos = obtener_datos_fundamentales(ticker)
         st.session_state[f"ficha_{ticker}"] = datos
+        st.session_state.pop(f"ficha_{ticker}_noticias", None)  # fuerza rebuscar noticias tras un reanálisis
 
     datos = st.session_state.get(f"ficha_{ticker}")
     if not datos:
         return
 
-    if datos.get("error"):
+    if datos.get("error") and not datos.get("precio_actual"):
         st.error(f"No se pudieron obtener datos de {ticker}: {datos['error']}")
         return
 
+    # --- Notas actuales que incluyen este ticker (se calcula antes para poder marcar la barrera en el gráfico) ---
+    notas_con_ticker = pd.DataFrame()
+    if df_control is not None and not df_control.empty and "ticker" in df_control.columns:
+        notas_con_ticker = df_control[df_control["ticker"] == ticker].copy()
+
+    precio_contingencia_peor = None
+    if not notas_con_ticker.empty and datos.get("precio_actual"):
+        margenes = []
+        for _, r in notas_con_ticker.iterrows():
+            barrera_cupon, precio_compra = r.get("barrera_cupon"), r.get("precio_compra")
+            if pd.notna(barrera_cupon) and pd.notna(precio_compra) and precio_compra:
+                pc = precio_compra * barrera_cupon
+                margenes.append((datos["precio_actual"] / pc - 1, pc))
+        if margenes:
+            precio_contingencia_peor = min(margenes, key=lambda x: x[0])[1]
+
     st.markdown("---")
-    st.markdown(f"### {datos.get('nombre') or ticker} ({ticker})")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        tarjeta_kpi("Precio actual", f"${datos['precio_actual']:,.2f}" if datos.get("precio_actual") else "N/D", datos.get("sector") or "", "normal")
-    with c2:
-        if datos.get("target_medio"):
-            var_target = (datos["target_medio"] / datos["precio_actual"] - 1) * 100 if datos.get("precio_actual") else None
-            sub = f"{var_target:+.1f}% vs precio actual" if var_target is not None else ""
-            tarjeta_kpi("Precio objetivo (consenso)", f"${datos['target_medio']:,.2f}", sub, "positivo" if (var_target or 0) >= 0 else "negativo")
-        else:
-            tarjeta_kpi("Precio objetivo (consenso)", "N/D", "Ver aviso abajo", "normal")
-    with c3:
-        tarjeta_kpi("Volatilidad anual histórica", f"{datos['volatilidad_anual_pct']:.1f}%" if datos.get("volatilidad_anual_pct") else "N/D", "Últimos 12 meses", "riesgo" if (datos.get("volatilidad_anual_pct") or 0) > 40 else "normal")
-    with c4:
-        tarjeta_kpi("Variación 1 mes", f"{datos['variacion_1m_pct']:+.1f}%" if datos.get("variacion_1m_pct") is not None else "N/D", f"YTD: {datos['variacion_ytd_pct']:+.1f}%" if datos.get("variacion_ytd_pct") is not None else "", "positivo" if (datos.get("variacion_1m_pct") or 0) >= 0 else "negativo")
+    st.markdown(_tarjeta_subyacente_html(datos, notas_con_ticker), unsafe_allow_html=True)
 
     if datos.get("aviso_analistas"):
         st.info(f"ℹ️ {datos['aviso_analistas']}")
@@ -7929,40 +8094,74 @@ def _tab_ficha_compania(df_control: pd.DataFrame):
             obtener_datos_fundamentales.clear()
             st.rerun()
 
+    st.markdown("#### 📈 Evolución del precio (12 meses)")
+    grafico_precio_subyacente(datos, precio_contingencia=precio_contingencia_peor)
+    if precio_contingencia_peor:
+        st.caption(f"Línea roja: barrera de contingencia de la nota con menos margen (${precio_contingencia_peor:,.2f}).")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        tarjeta_kpi(
+            "Precio objetivo (consenso)",
+            f"${datos['target_medio']:,.2f}" if datos.get("target_medio") else "N/D",
+            (f"{(datos['target_medio'] / datos['precio_actual'] - 1) * 100:+.1f}% vs precio actual"
+             if datos.get("target_medio") and datos.get("precio_actual") else "Ver aviso arriba"),
+            "positivo" if datos.get("target_medio") and datos.get("precio_actual") and datos["target_medio"] >= datos["precio_actual"] else "normal",
+        )
+    with c2:
+        tarjeta_kpi(
+            "Volatilidad anual histórica", f"{datos['volatilidad_anual_pct']:.1f}%" if datos.get("volatilidad_anual_pct") else "N/D",
+            "Últimos 12 meses", "riesgo" if (datos.get("volatilidad_anual_pct") or 0) > 40 else "normal",
+        )
+
     if datos.get("target_alto") or datos.get("target_bajo"):
         st.caption(f"Rango de analistas: ${datos.get('target_bajo', 0):,.2f} — ${datos.get('target_alto', 0):,.2f}  |  {datos.get('n_analistas', '?')} analistas  |  Recomendación consenso: {datos.get('recomendacion', 'N/D')}")
     if datos.get("proxima_fecha_resultados"):
         st.warning(f"📅 Próxima fecha de resultados (earnings): {datos['proxima_fecha_resultados']} — la volatilidad suele dispararse alrededor de esta fecha.")
 
     # Notas actuales que incluyen este ticker, y su posición respecto a las barreras
-    if df_control is not None and not df_control.empty and "ticker" in df_control.columns:
-        notas_con_ticker = df_control[df_control["ticker"] == ticker]
-        if not notas_con_ticker.empty and datos.get("precio_actual"):
-            st.markdown("#### Tus notas con este ticker")
-            filas = []
-            for _, r in notas_con_ticker.iterrows():
-                precio_compra = r.get("precio_compra")
-                if pd.isna(precio_compra) or not precio_compra:
-                    continue
-                pct_vs_inicial = (datos["precio_actual"] / precio_compra - 1) * 100
-                barrera_cupon = r.get("barrera_cupon")
-                margen_barrera = (datos["precio_actual"] / (precio_compra * barrera_cupon) - 1) * 100 if pd.notna(barrera_cupon) else None
-                filas.append({
-                    "Nota": int(r.get("nota")) if pd.notna(r.get("nota")) else "?",
-                    "Precio compra": f"${precio_compra:,.2f}",
-                    "Precio actual": f"${datos['precio_actual']:,.2f}",
-                    "vs Inicial": f"{pct_vs_inicial:+.1f}%",
-                    "Margen a barrera cupón": f"{margen_barrera:+.1f}%" if margen_barrera is not None else "N/D",
-                })
-            if filas:
-                st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+    if not notas_con_ticker.empty and datos.get("precio_actual"):
+        st.markdown("#### Tus notas con este ticker")
+        filas = []
+        for _, r in notas_con_ticker.iterrows():
+            precio_compra = r.get("precio_compra")
+            if pd.isna(precio_compra) or not precio_compra:
+                continue
+            pct_vs_inicial = (datos["precio_actual"] / precio_compra - 1) * 100
+            barrera_cupon = r.get("barrera_cupon")
+            margen_barrera = (datos["precio_actual"] / (precio_compra * barrera_cupon) - 1) * 100 if pd.notna(barrera_cupon) else None
+            filas.append({
+                "Nota": int(r.get("nota")) if pd.notna(r.get("nota")) else "?",
+                "Precio compra": f"${precio_compra:,.2f}",
+                "Precio actual": f"${datos['precio_actual']:,.2f}",
+                "vs Inicial": f"{pct_vs_inicial:+.1f}%",
+                "Margen a barrera cupón": f"{margen_barrera:+.1f}%" if margen_barrera is not None else "N/D",
+            })
+        if filas:
+            st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
 
-    # Noticias recientes vía Claude con búsqueda web
+    # Noticias recientes vía Claude con búsqueda web — feed estructurado, no bloque de texto,
+    # cada noticia con su fuente, fecha y enlace directo, igual que el resto de la app.
     st.markdown("#### 📰 Noticias y contexto reciente")
-    with st.spinner("Buscando noticias recientes..."):
-        noticias = obtener_resumen_noticias_ia(ticker, datos.get("nombre") or ticker)
-    st.markdown(_md_seguro(noticias))
-    st.caption("⚠️ Este resumen es una síntesis de noticias públicas hecha por IA, no una recomendación de inversión ni una predicción de precio.")
+    clave_noticias = f"ficha_{ticker}_noticias"
+    if clave_noticias not in st.session_state:
+        with st.spinner("Buscando noticias recientes que avalen el análisis..."):
+            st.session_state[clave_noticias] = buscar_noticias_libre(f"{datos.get('nombre') or ticker} ({ticker})")
+    noticias_estructuradas = st.session_state[clave_noticias]
+    _renderizar_tarjetas_noticias(noticias_estructuradas)
+
+    # --- Informe PDF profesional para socios, con tarjeta, gráfico y noticias incluidas ---
+    st.markdown("---")
+    with st.spinner("Preparando informe PDF..."):
+        try:
+            pdf_bytes = _generar_informe_subyacente_pdf(datos, noticias_estructuradas, notas_con_ticker)
+            st.download_button(
+                f"⬇️ Descargar informe PDF de {ticker}", data=pdf_bytes,
+                file_name=f"informe_{ticker}_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf", type="primary",
+            )
+        except Exception as e:
+            st.error(f"No se pudo generar el PDF: {e}")
 
 
 @st.cache_data(show_spinner=False, ttl=21600)
@@ -8127,6 +8326,198 @@ def _informe_ia_a_pdf(titulo: str, texto_markdown: str) -> bytes:
             story.append(Paragraph("• " + _linea_a_html(linea_limpia[2:]), style_normal))
         else:
             story.append(Paragraph(_linea_a_html(linea_limpia), style_normal))
+
+    doc.build(story)
+    return output.getvalue()
+
+
+def _exportar_grafico_precio_png(datos: dict, precio_contingencia: float = None) -> bytes:
+    """Genera el gráfico de evolución de precio como PNG para incrustarlo en el PDF, usando
+    matplotlib (backend Agg, sin GUI y sin dependencias de sistema) en vez de plotly+kaleido:
+    kaleido moderno necesita Chrome instalado en el servidor, algo frágil en un contenedor
+    Railway — matplotlib genera la imagen de forma puramente local y siempre funciona igual."""
+    historico = datos.get("historico_precios")
+    if not historico:
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+
+        df_hist = pd.DataFrame(historico)
+        df_hist["fecha"] = pd.to_datetime(df_hist["fecha"])
+
+        fig, ax = plt.subplots(figsize=(9.8, 3.6), dpi=150)
+        ax.plot(df_hist["fecha"], df_hist["close"], color="#9A6B24", linewidth=2)
+        if precio_contingencia:
+            ax.axhline(y=precio_contingencia, color="#B03A2E", linestyle="--", linewidth=1.3)
+            ax.annotate(f"Barrera ${precio_contingencia:,.2f}", xy=(df_hist["fecha"].iloc[0], precio_contingencia),
+                        xytext=(4, 4), textcoords="offset points", color="#B03A2E", fontsize=9)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color("#cccccc")
+        ax.grid(axis="y", color="#e3e7ee", linewidth=0.8)
+        ax.tick_params(colors="#555555", labelsize=9)
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+        fig.tight_layout()
+
+        buf = BytesIO()
+        fig.savefig(buf, format="png", facecolor="white")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
+    except Exception:
+        return None  # el PDF se genera igual, solo sin gráfico, si algo falla
+
+
+def _generar_informe_subyacente_pdf(datos: dict, noticias: list, notas_ticker: pd.DataFrame = None) -> bytes:
+    """Informe PDF profesional de un subyacente para socios (Yuri/Alan/Jordi): ficha con precio,
+    rango de 52 semanas y PER, consenso de analistas, gráfico de evolución con la barrera marcada,
+    tus notas expuestas a este ticker, y las noticias reales que avalan el análisis (con fuente y
+    fecha). Estilo marino/dorado consistente con el resto de informes de la app (comparador,
+    memo de directorio)."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, HRFlowable
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_RIGHT
+
+    NAVY = rl_colors.Color(14/255, 35/255, 56/255)
+    GOLD = rl_colors.Color(154/255, 107/255, 36/255)
+    GREY = rl_colors.Color(102/255, 112/255, 133/255)
+    GREEN = rl_colors.Color(22/255, 101/255, 52/255)
+    RED = rl_colors.Color(153/255, 27/255, 27/255)
+    LINE = rl_colors.Color(227/255, 231/255, 238/255)
+
+    ticker = datos.get("ticker", "")
+    nombre = datos.get("nombre") or ticker
+    precio = datos.get("precio_actual")
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
+    story = []
+
+    style_eyebrow = ParagraphStyle("eyebrow", fontName="Helvetica-Bold", fontSize=8.5, textColor=GOLD, spaceAfter=2)
+    style_titulo = ParagraphStyle("titulo", fontName="Helvetica-Bold", fontSize=20, textColor=NAVY, spaceAfter=2)
+    style_sub = ParagraphStyle("sub", fontName="Helvetica", fontSize=10, textColor=GREY, spaceAfter=10)
+    style_h3 = ParagraphStyle("h3", fontName="Helvetica-Bold", fontSize=12, spaceBefore=14, spaceAfter=6, textColor=NAVY)
+    style_normal = ParagraphStyle("normal", fontName="Helvetica", fontSize=9.5, leading=13.5, spaceAfter=5, textColor=rl_colors.Color(0.15, 0.17, 0.2))
+    style_caption = ParagraphStyle("caption", fontName="Helvetica-Oblique", fontSize=7.5, textColor=GREY, spaceAfter=8)
+    style_precio = ParagraphStyle("precio", fontName="Helvetica-Bold", fontSize=22, textColor=NAVY, alignment=TA_RIGHT)
+    style_chip = ParagraphStyle("chip", fontName="Helvetica-Bold", fontSize=10, alignment=TA_RIGHT)
+
+    story.append(Paragraph("CF WEALTH · INFORME DE SUBYACENTE", style_eyebrow))
+    story.append(Paragraph(f"{nombre} ({ticker})", style_titulo))
+    story.append(Paragraph(
+        f"Generado el {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')} · Documento interno de socios — no es "
+        f"asesoramiento de inversión ni una recomendación de compra/venta.", style_sub))
+    story.append(HRFlowable(width="100%", thickness=0.6, color=LINE, spaceAfter=10))
+
+    # --- Cabecera de precio ---
+    var_dia = datos.get("variacion_dia_pct")
+    chip_texto = f"{'+' if (var_dia or 0) >= 0 else ''}{var_dia:.2f}%" if var_dia is not None else "N/D"
+    style_chip.textColor = GREEN if (var_dia or 0) >= 0 else RED
+    cabecera = Table([[
+        Paragraph(f"${precio:,.2f}" if precio else "N/D", style_precio),
+        Paragraph(chip_texto + " hoy", style_chip),
+    ]], colWidths=[110 * mm, 55 * mm])
+    cabecera.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    story.append(cabecera)
+
+    # --- Tabla de métricas clave ---
+    minimo, maximo = datos.get("precio_min_52sem"), datos.get("precio_max_52sem")
+    rango_txt = f"${minimo:,.2f} — ${maximo:,.2f}" if minimo and maximo else "N/D"
+    pe_txt = f"{datos['trailing_pe']:.1f}" if datos.get("trailing_pe") else "N/D"
+    cap_txt = _fmt_market_cap(datos.get("market_cap"))
+    target_txt = f"${datos['target_medio']:,.2f}" if datos.get("target_medio") else "N/D"
+    vol_txt = f"{datos['volatilidad_anual_pct']:.1f}%" if datos.get("volatilidad_anual_pct") else "N/D"
+    earn_txt = str(datos.get("proxima_fecha_resultados") or "N/D")[:10]
+
+    filas_tabla = [
+        ["Rango 52 semanas", rango_txt, "PER", pe_txt],
+        ["Capitalización", cap_txt, "Precio objetivo consenso", target_txt],
+        ["Volatilidad anual", vol_txt, "Próximo earnings", earn_txt],
+    ]
+    tabla_metricas = Table(filas_tabla, colWidths=[42 * mm, 45 * mm, 45 * mm, 45 * mm])
+    tabla_metricas.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TEXTCOLOR", (0, 0), (0, -1), GREY), ("TEXTCOLOR", (2, 0), (2, -1), GREY),
+        ("FONTNAME", (1, 0), (1, -1), "Helvetica-Bold"), ("FONTNAME", (3, 0), (3, -1), "Helvetica-Bold"),
+        ("TEXTCOLOR", (1, 0), (1, -1), NAVY), ("TEXTCOLOR", (3, 0), (3, -1), NAVY),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7), ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, LINE),
+    ]))
+    story.append(Spacer(1, 4 * mm))
+    story.append(tabla_metricas)
+
+    # --- Gráfico de evolución ---
+    precio_contingencia_peor = None
+    if notas_ticker is not None and not notas_ticker.empty and precio:
+        margenes = []
+        for _, r in notas_ticker.iterrows():
+            barrera_cupon, precio_compra = r.get("barrera_cupon"), r.get("precio_compra")
+            if pd.notna(barrera_cupon) and pd.notna(precio_compra) and precio_compra:
+                pc = precio_compra * barrera_cupon
+                margenes.append((precio / pc - 1, pc))
+        if margenes:
+            precio_contingencia_peor = min(margenes, key=lambda x: x[0])[1]
+
+    png_grafico = _exportar_grafico_precio_png(datos, precio_contingencia_peor)
+    story.append(Paragraph("Evolución del precio (12 meses)", style_h3))
+    if png_grafico:
+        img_buffer = BytesIO(png_grafico)
+        story.append(RLImage(img_buffer, width=170 * mm, height=66 * mm))
+    else:
+        story.append(Paragraph("Gráfico no disponible en este PDF (falta la librería kaleido en el servidor).", style_caption))
+
+    # --- Tus notas con este ticker ---
+    if notas_ticker is not None and not notas_ticker.empty and precio:
+        story.append(Paragraph("Notas expuestas a este ticker", style_h3))
+        filas_notas = [["Nota", "Precio compra", "vs inicial", "Margen a barrera"]]
+        for _, r in notas_ticker.iterrows():
+            precio_compra = r.get("precio_compra")
+            if pd.isna(precio_compra) or not precio_compra:
+                continue
+            pct_vs_inicial = (precio / precio_compra - 1) * 100
+            barrera_cupon = r.get("barrera_cupon")
+            margen = (precio / (precio_compra * barrera_cupon) - 1) * 100 if pd.notna(barrera_cupon) else None
+            filas_notas.append([
+                str(int(r.get("nota"))) if pd.notna(r.get("nota")) else "?",
+                f"${precio_compra:,.2f}", f"{pct_vs_inicial:+.1f}%",
+                f"{margen:+.1f}%" if margen is not None else "N/D",
+            ])
+        if len(filas_notas) > 1:
+            tabla_notas = Table(filas_notas, colWidths=[25 * mm, 40 * mm, 35 * mm, 40 * mm])
+            tabla_notas.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white), ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.Color(0.97, 0.97, 0.98)]),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6), ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.3, LINE),
+            ]))
+            story.append(tabla_notas)
+
+    # --- Noticias que avalan el informe ---
+    story.append(Paragraph("Noticias recientes que avalan el análisis", style_h3))
+    if noticias and isinstance(noticias[0], dict) and "_error" in noticias[0]:
+        story.append(Paragraph(f"No se pudieron obtener noticias: {noticias[0]['_error']}", style_normal))
+    elif not noticias:
+        story.append(Paragraph("No se encontraron noticias relevantes recientes tras buscar.", style_normal))
+    else:
+        for n in noticias[:8]:
+            prioridad = str(n.get("prioridad", "media")).upper()
+            story.append(Paragraph(f"<b>{n.get('titular', 'Sin título')}</b>  <font size=7 color='#9A6B24'>[{prioridad}]</font>", style_normal))
+            story.append(Paragraph(f"{n.get('fuente', 'Fuente desconocida')} · {n.get('fecha', 'sin fecha')}", style_caption))
+            story.append(Paragraph(n.get("resumen", ""), style_normal))
+            if n.get("url"):
+                story.append(Paragraph(f"<link href='{n['url']}'><font color='#9A6B24'>{n['url']}</font></link>", style_caption))
+            story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph(
+        "Noticias generadas por IA a partir de búsqueda web pública, en español y con enlace a la fuente original. "
+        "No constituyen recomendación de inversión ni predicción de precio.", style_caption))
 
     doc.build(story)
     return output.getvalue()
