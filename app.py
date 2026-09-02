@@ -4545,15 +4545,16 @@ def _tarjeta_subyacente_html(datos: dict, notas_ticker: pd.DataFrame = None) -> 
 
     if posicion is not None and minimo is not None and maximo is not None:
         pos_clamp = max(0, min(100, posicion))
-        barra_html = f"""
-        <div style="margin-top:14px;">
-          <div style="display:flex;justify-content:space-between;font-family:ui-monospace,monospace;font-size:11px;color:#667085;margin-bottom:5px;">
-            <span>${minimo:,.2f}</span><span style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#9aa4b2;">rango 52 semanas · {pos_clamp:.0f}% del recorrido</span><span>${maximo:,.2f}</span>
-          </div>
-          <div style="position:relative;height:7px;border-radius:4px;background:linear-gradient(90deg,#eef1f6,#f0e4ce);border:1px solid #e3e7ee;">
-            <span style="position:absolute;top:50%;left:{pos_clamp:.1f}%;width:3px;height:17px;border-radius:2px;background:#0e2338;transform:translate(-50%,-50%);"></span>
-          </div>
-        </div>"""
+        barra_html = (
+            f'<div style="margin-top:14px;">'
+            f'<div style="display:flex;justify-content:space-between;font-family:ui-monospace,monospace;font-size:11px;color:#667085;margin-bottom:5px;">'
+            f'<span>${minimo:,.2f}</span><span style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#9aa4b2;">rango 52 semanas · {pos_clamp:.0f}% del recorrido</span><span>${maximo:,.2f}</span>'
+            f'</div>'
+            f'<div style="position:relative;height:7px;border-radius:4px;background:linear-gradient(90deg,#eef1f6,#f0e4ce);border:1px solid #e3e7ee;">'
+            f'<span style="position:absolute;top:50%;left:{pos_clamp:.1f}%;width:3px;height:17px;border-radius:2px;background:#0e2338;transform:translate(-50%,-50%);"></span>'
+            f'</div>'
+            f'</div>'
+        )
     else:
         barra_html = "<div style='margin-top:10px;font-size:12px;color:#9aa4b2;'>Sin histórico suficiente para el rango de 52 semanas.</div>"
 
@@ -8929,7 +8930,7 @@ def _generar_informe_comparador_pdf(resultados_notas: list, texto_recomendacion:
     return output.getvalue()
 
 
-
+def _exportar_grafico_precio_png(datos: dict, precio_contingencia: float = None) -> bytes:
     """Genera el gráfico de evolución de precio como PNG para incrustarlo en el PDF, usando
     matplotlib (backend Agg, sin GUI y sin dependencias de sistema) en vez de plotly+kaleido:
     kaleido moderno necesita Chrome instalado en el servidor, algo frágil en un contenedor
