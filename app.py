@@ -8891,13 +8891,21 @@ def _generar_informe_comparador_pdf(resultados_notas: list, texto_recomendacion:
     def _linea_a_html(linea):
         return _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", linea)
 
+    style_conclusion = ParagraphStyle("conclusion", fontName="Helvetica-Bold", fontSize=13, textColor=GOLD, spaceBefore=6, spaceAfter=10)
+
     story.append(Paragraph("Detalle por nota y compañía subyacente", style_h3))
     for linea in "\n\n".join(bloques_informe).split("\n"):
         linea_limpia = linea.strip()
         if not linea_limpia:
             story.append(Spacer(1, 2.5 * mm))
             continue
-        if linea_limpia.startswith("#### "):
+        if _re.match(r"^\**Conclusi[óo]n:", linea_limpia, _re.IGNORECASE):
+            # La línea de conclusión (primera de la recomendación, ver prompt en el comparador)
+            # se destaca en dorado y más grande para que ancle visualmente todo el análisis que
+            # sigue — el mismo tratamiento que recibe en el PowerPoint, para que ambos documentos
+            # transmitan el mismo mensaje de principio a fin, no solo en el párrafo final.
+            story.append(Paragraph(_linea_a_html(linea_limpia.strip("*")), style_conclusion))
+        elif linea_limpia.startswith("#### "):
             story.append(Paragraph(_linea_a_html(linea_limpia[5:]), style_h4))
         elif linea_limpia.startswith("### "):
             story.append(Paragraph(_linea_a_html(linea_limpia[4:]), style_h3))
@@ -9125,6 +9133,7 @@ def _generar_informe_subyacente_pdf(datos: dict, noticias: list, notas_ticker: p
 def generar_memo_directorio_notas_pptx(
     resultados_notas: list, texto_recomendacion: str,
     capital_disponible: float, tasa_inversor_pct: float,
+    veredicto_nota_recomendada: str = None,
 ) -> bytes:
     """
     Arma un memo de directorio (.pptx) a partir de lo que YA calculó el comparador de notas
@@ -9151,6 +9160,7 @@ def generar_memo_directorio_notas_pptx(
     ICE = RGBColor(0xCA, 0xDC, 0xFC)
     WHITE = RGBColor(0xFF, 0xFF, 0xFF)
     RED = RGBColor(0xC0, 0x39, 0x2B)
+    GOLD = RGBColor(0x9A, 0x6B, 0x24)
     GREEN = RGBColor(0x2E, 0x7D, 0x32)
     AMBER = RGBColor(0xD6, 0x89, 0x10)
     GREY = RGBColor(0x5A, 0x5A, 0x5A)
@@ -9365,10 +9375,19 @@ def generar_memo_directorio_notas_pptx(
 
     banda = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.7), Inches(5.15), Inches(11.93), Inches(1.15))
     banda.adjustments[0] = 0.06
-    banda.fill.solid(); banda.fill.fore_color.rgb = veredicto_color(ganador["prob_perdida_capital"])
     banda.line.fill.background(); banda.shadow.inherit = False
-    add_text(s, 1.0, 5.28, 8, 0.28, "MEJOR CANDIDATA POR SCORE", size=10.5, bold=True, color=WHITE, letter_spacing=1.5)
-    add_text(s, 1.0, 5.58, 11, 0.6, f"{ganador['nombre']} — {ganador['score']:.0f}/100", size=21, bold=True, color=WHITE, font="Cambria")
+    if veredicto_nota_recomendada is None:
+        # La recomendación (texto de Claude) concluye NO asignar capital a ninguna nota — el
+        # banner tiene que decir justo eso, no puede mostrar "mejor candidata por score": ese
+        # ranking es solo un componente más, y mostrarlo aquí como si fuera la conclusión final
+        # es lo que generaba la contradicción entre la portada y la recomendación del memo.
+        banda.fill.solid(); banda.fill.fore_color.rgb = RED
+        add_text(s, 1.0, 5.28, 10, 0.28, "RECOMENDACIÓN FINAL", size=10.5, bold=True, color=WHITE, letter_spacing=1.5)
+        add_text(s, 1.0, 5.58, 11, 0.6, "Rechazar todas las notas — ver justificación en la recomendación de reparto", size=18, bold=True, color=WHITE, font="Cambria")
+    else:
+        banda.fill.solid(); banda.fill.fore_color.rgb = veredicto_color(ganador["prob_perdida_capital"])
+        add_text(s, 1.0, 5.28, 10, 0.28, "NOTA RECOMENDADA", size=10.5, bold=True, color=WHITE, letter_spacing=1.5)
+        add_text(s, 1.0, 5.58, 11, 0.6, f"{veredicto_nota_recomendada}", size=21, bold=True, color=WHITE, font="Cambria")
     add_text(s, 0.7, H - 0.55, 10, 0.3, f"Chaparro Fernández Wealth · Confidencial · {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}",
              size=9, color=RGBColor(0x93, 0x9C, 0xD6))
 
@@ -9472,13 +9491,22 @@ def generar_memo_directorio_notas_pptx(
             continue
         p = tf.paragraphs[0] if primero else tf.add_paragraph()
         primero = False
+        es_conclusion = bool(_re.match(r"^Conclusi[óo]n:", linea_txt, _re.IGNORECASE))
         p.line_spacing = 1.22
-        p.space_after = Pt(7)
+        p.space_after = Pt(12 if es_conclusion else 7)
         r_ = p.add_run()
         r_.text = ("•  " + linea_txt[2:]) if linea_txt.startswith(("- ", "* ")) else linea_txt
-        r_.font.size = Pt(12.5)
-        r_.font.color.rgb = ICE if linea_txt.startswith("#") else WHITE
-        r_.font.bold = linea_txt.startswith("#")
+        if es_conclusion:
+            # La línea de conclusión (primera del texto, ver prompt) se destaca en dorado y más
+            # grande para que ancle visualmente todo el análisis que viene después — así el
+            # lector no puede perderla ni confundirla con un punto intermedio del razonamiento.
+            r_.font.size = Pt(15)
+            r_.font.color.rgb = GOLD
+            r_.font.bold = True
+        else:
+            r_.font.size = Pt(12.5)
+            r_.font.color.rgb = ICE if linea_txt.startswith("#") else WHITE
+            r_.font.bold = linea_txt.startswith("#")
         r_.font.name = "Calibri"
     add_text(s, 0.7, H - 0.5, 11, 0.3,
              "Monte Carlo con 5.000 escenarios por nota, volatilidad histórica de 12 meses, con correlación real entre tickers cuando está activada.",
@@ -10055,10 +10083,33 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
                         "secundario, no decisivo por sí solo.\n\n"
                         "5) La frecuencia de call cercana a 3 meses es preferible — factor MENOR, casi un desempate, "
                         "no debe pesar más que el cupón, el margen o el riesgo de capital.\n\n"
+                        "ESTRUCTURA OBLIGATORIA DE LA RESPUESTA — esto es tan importante como el análisis en sí: "
+                        "la PRIMERA línea de toda tu respuesta, antes de cualquier título, tabla o punto de análisis, "
+                        "tiene que ser el veredicto final resumido en una frase, así (formato exacto): "
+                        "'**Conclusión: <frase breve, ej. \"Rechazar ambas notas\" o \"Invertir $X en Nota Y\">**'. "
+                        "A partir de ahí, absolutamente TODO el análisis punto por punto que escribas tiene que sonar "
+                        "coherente con esa conclusión desde la primera frase de cada punto — nunca escribas un punto "
+                        "que, leído solo y sin el resto del informe, parezca apuntar a una conclusión distinta de la "
+                        "que ya diste en la primera línea. Si un criterio concreto favorece a la nota que NO vas a "
+                        "recomendar, preséntalo siempre como una observación parcial ligada de inmediato a por qué NO "
+                        "cambia la conclusión general (ej. 'Nota 2 cobra el cupón con más probabilidad que Nota 1, "
+                        "pero esto no basta para recomendarla porque su margen es insuficiente frente al riesgo que "
+                        "asume el fondo') — nunca lo presentes como si fuera el argumento que va ganando, aunque el "
+                        "resto del informe lo vaya a matizar después. Alguien que lea solo la primera línea, o solo "
+                        "un punto intermedio, o solo el cierre, tiene que llevarse siempre el mismo mensaje — este "
+                        "informe se reparte tal cual en PDF y en PowerPoint para el directorio, y ambos usan este "
+                        "mismo texto, así que una contradicción interna aquí se ve en los dos documentos a la vez.\n\n"
                         "Puede recomendar repartir entre varias notas o poner todo el capital en una sola si está "
                         f"claramente justificado. Capital disponible total: ${capital_disponible:,.2f}. Da una "
                         "recomendación de reparto de capital en dólares para cada nota, con el razonamiento concreto "
-                        "siguiendo el orden de prioridad anterior, en español, conciso pero completo."
+                        "siguiendo el orden de prioridad anterior, en español, conciso pero completo.\n\n"
+                        "Termina tu respuesta con una última línea, sola, en este formato EXACTO (sin negrita, sin "
+                        "texto adicional en esa línea) para que un programa la pueda leer automáticamente:\n"
+                        "VEREDICTO: <nombre exacto de la nota recomendada, o 'ninguna' si tu recomendación final es "
+                        "no asignar capital a ninguna nota>\n"
+                        "Esta línea VEREDICTO tiene que decir exactamente lo mismo que tu 'Conclusión' de la primera "
+                        "línea — si recomiendas rechazar todas, pon 'ninguna'; si repartes entre varias sin que una "
+                        "domine claramente, pon también 'ninguna'."
                     ),
                     "messages": [{"role": "user", "content": f"Notas candidatas:\n{resumen_texto}\n\nRecomienda cómo repartir el capital disponible."}],
                 },
@@ -10068,6 +10119,20 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
             texto_recomendacion = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
         except Exception as e:
             texto_recomendacion = f"[No se pudo generar la recomendación: {e}]"
+
+    # --- Veredicto estructurado, extraído de la última línea de la recomendación (ver prompt
+    # arriba) — esto es lo que decide el banner del memo, NO el ganador del Score por separado,
+    # para que la portada del PowerPoint nunca contradiga lo que dice el texto de la recomendación. ---
+    veredicto_nota_recomendada = None
+    _match_veredicto = re.search(r"VEREDICTO:\s*(.+?)\s*$", (texto_recomendacion or "").strip(), re.IGNORECASE | re.MULTILINE)
+    if _match_veredicto:
+        _veredicto_txt = _match_veredicto.group(1).strip()
+        texto_recomendacion = texto_recomendacion[:_match_veredicto.start()].rstrip()  # se quita del texto visible, es solo para el banner
+        if _veredicto_txt.lower() not in ("ninguna", "ningún", "ninguno", "ninguna nota", "n/a"):
+            veredicto_nota_recomendada = next(
+                (r["nombre"] for r in resultados_notas if r["nombre"].strip().lower() == _veredicto_txt.strip().lower()),
+                _veredicto_txt,
+            )
 
     st.markdown("### 🎯 Recomendación de reparto")
     st.markdown(_md_seguro(texto_recomendacion) or "No se pudo generar una recomendación.")
@@ -10086,6 +10151,7 @@ def _tab_comparador_notas(df_control: pd.DataFrame):
         try:
             pptx_bytes = generar_memo_directorio_notas_pptx(
                 resultados_notas, texto_recomendacion, capital_disponible, tasa_inversor_pct,
+                veredicto_nota_recomendada=veredicto_nota_recomendada,
             )
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr(f"comparador_notas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.pdf", pdf_bytes)
