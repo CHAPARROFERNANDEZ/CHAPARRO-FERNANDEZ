@@ -57,6 +57,7 @@ HOJA_INVERSIONES = "INVERSIONES"
 HOJA_CALENDARIO = "CALENDARIO_NOTAS"
 HOJA_CONTROL = "CONTROL_NOTAS"
 HOJA_MOTOCLICK = "MOVIMIENTOS_MOTOCLICK"
+HOJA_MOVIMIENTOS_BANCO = "MOVIMIENTOS_BANCO"
 
 TASA_ANUAL_FUTBOL = 0.15
 TASA_ANUAL_MOTOCLICK = 0.25
@@ -2457,6 +2458,110 @@ def _leer_auditoria_notas_cached() -> pd.DataFrame:
     no cambia cada segundo, así que no hace falta leerla en tiempo real en cada clic.
     """
     return leer_hoja_excel("AUDITORIA_NOTAS")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _leer_movimientos_banco_cached() -> pd.DataFrame:
+    """Versión cacheada de leer_hoja_excel('MOVIMIENTOS_BANCO') — histórico de movimientos ya
+    importados desde extractos del broker (custodio de las notas estructuradas). Vacío si
+    todavía no se ha importado ningún extracto (la hoja ni siquiera existe en el Excel)."""
+    return leer_hoja_excel(HOJA_MOVIMIENTOS_BANCO)
+
+
+ETIQUETAS_CATEGORIA_BANCO = {
+    "RUIDO_SWEEP": "Barrido de caja (FDIC Sweep)",
+    "INTERES_COBRADO": "Interés cobrado",
+    "ALTA_INVERSION": "Alta de inversión",
+    "CANCELACION_INVERSION": "Cancelación / vencimiento",
+    "APORTACION_CAPITAL": "Aportación de capital",
+    "TRASPASO_INTERNO": "Traspaso interno",
+    "COMISION_GASTO": "Comisión / gasto",
+    "SIN_CLASIFICAR": "Sin clasificar",
+}
+
+
+def clasificar_movimiento_extracto_banco(fila) -> str:
+    """Clasifica una fila del extracto del broker (custodio de las notas estructuradas) en las
+    categorías contables del fondo. Ver ETIQUETAS_CATEGORIA_BANCO para el texto de cada una."""
+    tipo = str(fila.get("Tipo de Transacción", "")).strip()
+    accion = str(fila.get("Acción", "")).strip()
+    desc_trans = str(fila.get("Descripción de Transacción", "")).strip().upper()
+
+    if tipo == "FDIC Sweep":
+        # Barrido automático de efectivo: compra/vende el fondo de barrido cada vez que hay
+        # actividad de caja en la cuenta. Se anula solo con el tiempo — no es un ingreso/gasto
+        # real del fondo, pero SÍ forma parte del saldo real de la cuenta, así que se incluye
+        # en el saldo aunque se excluya de los totales por categoría.
+        return "RUIDO_SWEEP"
+    if tipo == "Dividends and Interest":
+        return "INTERES_COBRADO"
+    if tipo == "Trade Activity":
+        return "ALTA_INVERSION" if accion == "Buy" else "CANCELACION_INVERSION"
+    if tipo == "Withdrawal":
+        # La mayoría de las salidas vistas hasta ahora son la comisión de Aragon Capital, pero
+        # cualquier "Withdrawal" cae aquí — revisar en la tabla de importación antes de guardar
+        # si el concepto no es una comisión reconocible.
+        return "COMISION_GASTO"
+    if tipo == "Deposit":
+        return "APORTACION_CAPITAL"
+    if tipo == "Journal":
+        return "TRASPASO_INTERNO"
+    return "SIN_CLASIFICAR"
+
+
+def parsear_extracto_banco_bytes(contenido: bytes) -> pd.DataFrame:
+    """Lee el Excel de movimientos exportado del broker y devuelve un DataFrame clasificado en
+    las categorías contables del fondo, con un identificador único por fila (id_movimiento) para
+    poder detectar duplicados si se reimporta un extracto que se solape con uno ya guardado."""
+    df = pd.read_excel(BytesIO(contenido))
+    df.columns = [str(c).strip() for c in df.columns]
+
+    columnas_esperadas = [
+        "Fecha", "Monto", "Tipo de Transacción", "Descripción de Activo",
+        "Descripción de Transacción", "Acción", "Símbolo / ID",
+    ]
+    faltan = [c for c in columnas_esperadas if c not in df.columns]
+    if faltan:
+        raise ValueError(
+            "El archivo no tiene el formato esperado del extracto del broker — "
+            f"faltan columnas: {', '.join(faltan)}"
+        )
+
+    df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+    df["Monto"] = pd.to_numeric(df["Monto"], errors="coerce").fillna(0)
+    df["categoria"] = df.apply(clasificar_movimiento_extracto_banco, axis=1)
+    df["cusip"] = df["Símbolo / ID"].astype(str).str.strip().str.upper()
+    df.loc[df["cusip"].isin(["—", "NAN", "NONE", ""]), "cusip"] = ""
+
+    def _id_movimiento(fila):
+        partes = [
+            fila["Fecha"].strftime("%Y-%m-%d") if pd.notna(fila["Fecha"]) else "SINFECHA",
+            f"{float(fila['Monto']):.2f}",
+            str(fila.get("Símbolo / ID", "")).strip(),
+            str(fila.get("Descripción de Transacción", "")).strip()[:40],
+        ]
+        return "|".join(partes)
+
+    df["id_movimiento"] = df.apply(_id_movimiento, axis=1)
+    return df
+
+
+def matchear_movimientos_con_notas(df_mov: pd.DataFrame, df_control: pd.DataFrame) -> pd.DataFrame:
+    """Añade la columna nota_asociada a df_mov cruzando la columna cusip contra el CUSIP guardado
+    en CONTROL_NOTAS. Si CONTROL_NOTAS todavía no tiene columna cusip (o está vacía), no casa nada
+    en vez de fallar."""
+    df_mov = df_mov.copy()
+    if df_control is None or df_control.empty or "cusip" not in df_control.columns or "nota" not in df_control.columns:
+        df_mov["nota_asociada"] = pd.NA
+        return df_mov
+    mapa_cusip = (
+        df_control[df_control["cusip"].astype(str).str.strip() != ""]
+        .assign(cusip_norm=lambda d: d["cusip"].astype(str).str.strip().str.upper())
+        .drop_duplicates("cusip_norm")
+        .set_index("cusip_norm")["nota"]
+    )
+    df_mov["nota_asociada"] = df_mov["cusip"].map(mapa_cusip)
+    return df_mov
 
 
 def preparar_tabla_monetaria(df: pd.DataFrame, columnas_monetarias) -> pd.DataFrame:
@@ -12341,6 +12446,205 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         archivos.append((nombre_archivo, formatear_extracto_excel_bytes(excel_crudo, str(inversor), fecha_corte), excel_crudo))
     return archivos
 
+def _tab_importar_extracto_banco(df_control: pd.DataFrame):
+    st.caption(
+        "Sube el Excel de movimientos que descargas del broker (custodio de las notas "
+        "estructuradas). La app clasifica cada fila, la casa con su NOTA por CUSIP cuando "
+        "corresponde, y te enseña un resumen antes de guardar nada. Si subes un extracto que se "
+        "solapa en fechas con uno ya importado, los movimientos repetidos se detectan solos y no "
+        "se duplican."
+    )
+
+    archivo = st.file_uploader("Extracto del broker (.xlsx)", type=["xlsx"], key="importar_extracto_banco_file")
+    if archivo is None:
+        return
+
+    try:
+        df_nuevo = parsear_extracto_banco_bytes(archivo.read())
+    except Exception as e:
+        st.error(f"No se pudo leer el archivo: {e}")
+        return
+
+    df_nuevo = matchear_movimientos_con_notas(df_nuevo, df_control)
+
+    ya_importados = _leer_movimientos_banco_cached()
+    ids_ya_importados = (
+        set(ya_importados["id_movimiento"].astype(str))
+        if not ya_importados.empty and "id_movimiento" in ya_importados.columns else set()
+    )
+    df_nuevo["ya_importado"] = df_nuevo["id_movimiento"].isin(ids_ya_importados)
+
+    n_nuevos = int((~df_nuevo["ya_importado"]).sum())
+    n_repetidos = int(df_nuevo["ya_importado"].sum())
+    st.info(
+        f"{len(df_nuevo)} movimiento(s) leído(s) del archivo: {n_nuevos} nuevo(s), "
+        f"{n_repetidos} ya estaban importados (se ignoran)."
+    )
+
+    df_mostrar = df_nuevo[~df_nuevo["ya_importado"]].copy()
+    ocultar_sweep = st.checkbox(
+        "Ocultar barrido de caja (FDIC Sweep) de esta vista previa", value=True, key="ocultar_sweep_importar",
+        help="El sweep se guarda igualmente (forma parte del saldo real de la cuenta) — esto solo oculta las filas en esta tabla para que se vea más claro.",
+    )
+    if ocultar_sweep:
+        df_mostrar = df_mostrar[df_mostrar["categoria"] != "RUIDO_SWEEP"]
+
+    if df_mostrar.empty:
+        st.caption("Nada que mostrar con el filtro actual.")
+    else:
+        df_preview = df_mostrar.copy()
+        df_preview["Categoría"] = df_preview["categoria"].map(ETIQUETAS_CATEGORIA_BANCO).fillna(df_preview["categoria"])
+        df_preview["Nota"] = pd.to_numeric(df_preview["nota_asociada"], errors="coerce").apply(
+            lambda n: f"NOTA_{int(n):02d}" if pd.notna(n) else "—"
+        )
+        cols_preview = ["Fecha", "Categoría", "Monto", "cusip", "Nota", "Descripción de Activo", "Descripción de Transacción"]
+        st.dataframe(
+            df_preview[cols_preview].rename(columns={"cusip": "CUSIP"}).sort_values("Fecha"),
+            use_container_width=True, hide_index=True,
+        )
+
+    sin_clasificar = int((df_nuevo.loc[~df_nuevo["ya_importado"], "categoria"] == "SIN_CLASIFICAR").sum())
+    if sin_clasificar:
+        st.warning(
+            f"⚠️ {sin_clasificar} movimiento(s) nuevo(s) no se pudieron clasificar automáticamente "
+            "— revísalos en la tabla (desmarca 'Ocultar barrido de caja' si hace falta) antes de guardar."
+        )
+
+    if n_nuevos == 0:
+        st.caption("No hay movimientos nuevos que guardar.")
+        return
+
+    if st.button(f"💾 Guardar {n_nuevos} movimiento(s) nuevo(s) en contabilidad", type="primary"):
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas:
+            st.error("No se pudo leer el Excel actual para guardar.")
+            return
+
+        df_guardar = df_nuevo[~df_nuevo["ya_importado"]].copy()
+        df_guardar["fecha_importacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        df_guardar = df_guardar.rename(columns={
+            "Fecha": "fecha", "Monto": "monto",
+            "Descripción de Activo": "emisor", "Descripción de Transacción": "descripcion",
+        })
+        df_guardar["fecha"] = df_guardar["fecha"].dt.strftime("%Y-%m-%d")
+        columnas_guardar = [
+            "id_movimiento", "fecha", "categoria", "monto", "cusip", "nota_asociada",
+            "emisor", "descripcion", "fecha_importacion",
+        ]
+        df_guardar = df_guardar[columnas_guardar]
+
+        existente = hojas.get(HOJA_MOVIMIENTOS_BANCO)
+        if existente is None or existente.empty:
+            hojas[HOJA_MOVIMIENTOS_BANCO] = df_guardar
+        else:
+            existente.columns = [str(c).strip().lower() for c in existente.columns]
+            hojas[HOJA_MOVIMIENTOS_BANCO] = pd.concat([existente, df_guardar], ignore_index=True)
+
+        guardar_excel_completo_desde_hojas(hojas)
+        st.cache_data.clear()
+        st.success(f"{n_nuevos} movimiento(s) guardado(s) en contabilidad.")
+        st.rerun()
+
+
+def _tab_dashboard_contabilidad():
+    df_mov = _leer_movimientos_banco_cached()
+    if df_mov.empty:
+        st.info("Todavía no se ha importado ningún extracto — ve a la pestaña '📥 Importar extracto' para empezar.")
+        return
+
+    df_mov = df_mov.copy()
+    df_mov["fecha"] = pd.to_datetime(df_mov.get("fecha"), errors="coerce")
+    df_mov["monto"] = pd.to_numeric(df_mov.get("monto"), errors="coerce").fillna(0)
+    df_mov = df_mov.dropna(subset=["fecha"])
+    if df_mov.empty:
+        st.info("No hay movimientos con fecha válida guardados todavía.")
+        return
+
+    st.caption(
+        "Esta vista cubre solo la cuenta de custodia del broker (donde están las notas "
+        "estructuradas) — no incluye Paraguay, MotoClick, Fútbol, Bolivia ni Bitcoin, que se "
+        "siguen viendo en el Dashboard financiero general."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fecha_desde = st.date_input("Desde", value=df_mov["fecha"].min().date(), key="contab_fecha_desde")
+    with c2:
+        fecha_hasta = st.date_input("Hasta", value=df_mov["fecha"].max().date(), key="contab_fecha_hasta")
+
+    df_rango = df_mov[(df_mov["fecha"] >= pd.Timestamp(fecha_desde)) & (df_mov["fecha"] <= pd.Timestamp(fecha_hasta))]
+
+    # El saldo bancario SÍ incluye el sweep (es efectivo real de la cuenta); los totales por
+    # categoría de abajo lo excluyen porque no aporta información económica, solo barrido interno.
+    saldo_actual = float(df_mov["monto"].sum())
+    ingresos_interes = float(df_rango.loc[df_rango["categoria"] == "INTERES_COBRADO", "monto"].sum())
+    comisiones_gastos = float(df_rango.loc[df_rango["categoria"] == "COMISION_GASTO", "monto"].sum())
+    aportaciones = float(df_rango.loc[df_rango["categoria"] == "APORTACION_CAPITAL", "monto"].sum())
+    altas_inversion = float(df_rango.loc[df_rango["categoria"] == "ALTA_INVERSION", "monto"].sum())
+    cancelaciones = float(df_rango.loc[df_rango["categoria"] == "CANCELACION_INVERSION", "monto"].sum())
+
+    st.markdown("#### Resumen")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        tarjeta_kpi("Saldo de la cuenta (histórico completo)", f"${saldo_actual:,.2f}", "Todos los movimientos importados, incluye sweep")
+    with c2:
+        tarjeta_kpi("Interés cobrado", f"${ingresos_interes:,.2f}", "En el rango seleccionado", "positivo")
+    with c3:
+        tarjeta_kpi("Comisiones y gastos", f"${comisiones_gastos:,.2f}", "En el rango seleccionado", "negativo" if comisiones_gastos < 0 else "normal")
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        tarjeta_kpi("Aportaciones de capital", f"${aportaciones:,.2f}", "En el rango seleccionado")
+    with c5:
+        tarjeta_kpi("Altas de inversión", f"${altas_inversion:,.2f}", "En el rango seleccionado")
+    with c6:
+        tarjeta_kpi("Cancelaciones / vencimientos", f"${cancelaciones:,.2f}", "En el rango seleccionado")
+
+    st.markdown("---")
+    st.markdown("#### Evolución del saldo")
+    df_saldo_orden = df_mov.sort_values("fecha").copy()
+    df_saldo_orden["saldo_acumulado"] = df_saldo_orden["monto"].cumsum()
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_saldo_orden["fecha"], y=df_saldo_orden["saldo_acumulado"],
+        mode="lines", line=dict(color="#0e2338", width=2), fill="tozeroy",
+    ))
+    fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="Saldo ($)")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("#### Movimientos")
+    categoria_filtro = st.selectbox(
+        "Filtrar por categoría", ["Todas"] + list(ETIQUETAS_CATEGORIA_BANCO.values()), key="contab_filtro_categoria",
+    )
+    df_tabla = df_rango.copy()
+    df_tabla["Categoría"] = df_tabla["categoria"].map(ETIQUETAS_CATEGORIA_BANCO).fillna(df_tabla["categoria"])
+    if categoria_filtro != "Todas":
+        df_tabla = df_tabla[df_tabla["Categoría"] == categoria_filtro]
+    df_tabla["Nota"] = pd.to_numeric(df_tabla.get("nota_asociada"), errors="coerce").apply(
+        lambda n: f"NOTA_{int(n):02d}" if pd.notna(n) else "—"
+    )
+    cols_tabla = [c for c in ["fecha", "Categoría", "monto", "cusip", "Nota", "emisor", "descripcion"] if c in df_tabla.columns]
+    st.dataframe(
+        df_tabla[cols_tabla].rename(columns={
+            "fecha": "Fecha", "monto": "Monto", "cusip": "CUSIP", "emisor": "Emisor", "descripcion": "Descripción",
+        }).sort_values("Fecha", ascending=False),
+        use_container_width=True, hide_index=True,
+    )
+
+
+def seccion_contabilidad_banco():
+    df_inv, df_cal, df_control = cargar_excel_completo()
+    st.header("🏦 Contabilidad")
+
+    tab_dashboard, tab_importar = st.tabs(["📊 Contabilidad", "📥 Importar extracto"])
+    with tab_dashboard:
+        _tab_dashboard_contabilidad()
+    with tab_importar:
+        _tab_importar_extracto_banco(df_control)
+
+
 def seccion_extractos():
     df_inv, _, _ = cargar_excel_completo()
     st.header("📤 Extractos")
@@ -15546,7 +15850,7 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
     else:
         menu_opciones = [
             "Dashboard financiero", "Centro de control",
-            "Notas estructuradas", "Alertas y calendario", "Extractos",
+            "Notas estructuradas", "Alertas y calendario", "Extractos", "🏦 Contabilidad",
             "📰 Noticias",
             "🏦 Deuda Jordi Chaparro", "✨ Asistente IA",
         ]
@@ -15572,6 +15876,9 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
 
     elif menu == "Extractos":
         seccion_extractos()
+
+    elif menu == "🏦 Contabilidad":
+        seccion_contabilidad_banco()
     elif menu == "📰 Noticias":
         seccion_noticias()
     elif menu == "Gestión de Excel" and _es_yuri:
