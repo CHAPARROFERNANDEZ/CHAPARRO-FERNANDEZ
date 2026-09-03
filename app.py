@@ -2489,9 +2489,12 @@ def clasificar_movimiento_extracto_banco(fila) -> str:
 
     if tipo == "FDIC Sweep":
         # Barrido automático de efectivo: compra/vende el fondo de barrido cada vez que hay
-        # actividad de caja en la cuenta. Se anula solo con el tiempo — no es un ingreso/gasto
-        # real del fondo, pero SÍ forma parte del saldo real de la cuenta, así que se incluye
-        # en el saldo aunque se excluya de los totales por categoría.
+        # actividad de caja en la cuenta. NO se anula solo con el tiempo mientras quede saldo
+        # vivo en el sweep — ese saldo vivo es efectivo real de la cuenta. Por eso se EXCLUYE
+        # del cálculo del "saldo de cuenta" (ver _tab_dashboard_contabilidad): sumar el sweep
+        # ahí duplicaría la resta de ese efectivo, que ya sale reflejado como caída de saldo
+        # operativo en el resto de movimientos. Se mantiene como categoría aparte solo para
+        # trazabilidad/auditoría.
         return "RUIDO_SWEEP"
     if tipo == "Dividends and Interest":
         return "INTERES_COBRADO"
@@ -2506,6 +2509,13 @@ def clasificar_movimiento_extracto_banco(fila) -> str:
         return "APORTACION_CAPITAL"
     if tipo == "Journal":
         return "TRASPASO_INTERNO"
+    # Salvaguarda: algunos brokers etiquetan las cancelaciones anticipadas / autocalls de notas
+    # con un "Tipo de Transacción" distinto de "Trade Activity" (p. ej. "Called", "Redemption",
+    # "Maturity"), pero mantienen "Acción" = "Sell". Si viene un CUSIP y una venta, es una
+    # cancelación/vencimiento aunque el tipo no se reconozca literalmente — antes esto caía en
+    # SIN_CLASIFICAR y el dinero desaparecía del KPI de cancelaciones sin avisar.
+    if accion == "Sell":
+        return "CANCELACION_INVERSION"
     return "SIN_CLASIFICAR"
 
 
@@ -12574,9 +12584,13 @@ def _tab_dashboard_contabilidad():
 
     df_rango = df_mov[(df_mov["fecha"] >= pd.Timestamp(fecha_desde)) & (df_mov["fecha"] <= pd.Timestamp(fecha_hasta))]
 
-    # El saldo bancario SÍ incluye el sweep (es efectivo real de la cuenta); los totales por
-    # categoría de abajo lo excluyen porque no aporta información económica, solo barrido interno.
-    saldo_actual = float(df_mov["monto"].sum())
+    # El saldo de cuenta EXCLUYE el sweep (RUIDO_SWEEP). El sweep es solo el traspaso interno del
+    # mismo efectivo entre la cuenta operativa y el fondo de barrido FDIC — no es dinero que entra
+    # o sale del fondo. Si se sumara también el sweep, el efectivo que ahora mismo está aparcado en
+    # el barrido (sin haberse vuelto a mover) se restaría dos veces del saldo real. El resto de
+    # movimientos (aportaciones, intereses, altas, cancelaciones, comisiones) ya reflejan
+    # correctamente el efectivo disponible, incluyendo lo que hoy está sentado en el sweep.
+    saldo_actual = float(df_mov.loc[df_mov["categoria"] != "RUIDO_SWEEP", "monto"].sum())
     ingresos_interes = float(df_rango.loc[df_rango["categoria"] == "INTERES_COBRADO", "monto"].sum())
     comisiones_gastos = float(df_rango.loc[df_rango["categoria"] == "COMISION_GASTO", "monto"].sum())
     aportaciones = float(df_rango.loc[df_rango["categoria"] == "APORTACION_CAPITAL", "monto"].sum())
@@ -12586,7 +12600,7 @@ def _tab_dashboard_contabilidad():
     st.markdown("#### Resumen")
     c1, c2, c3 = st.columns(3)
     with c1:
-        tarjeta_kpi("Saldo de la cuenta (histórico completo)", f"${saldo_actual:,.2f}", "Todos los movimientos importados, incluye sweep")
+        tarjeta_kpi("Saldo de la cuenta (histórico completo)", f"${saldo_actual:,.2f}", "Todos los movimientos importados, excluye barrido de caja (FDIC Sweep)")
     with c2:
         tarjeta_kpi("Interés cobrado", f"${ingresos_interes:,.2f}", "En el rango seleccionado", "positivo")
     with c3:
@@ -12602,7 +12616,9 @@ def _tab_dashboard_contabilidad():
 
     st.markdown("---")
     st.markdown("#### Evolución del saldo")
-    df_saldo_orden = df_mov.sort_values("fecha").copy()
+    # Igual que el KPI de arriba: se excluye RUIDO_SWEEP del acumulado para no distorsionar la
+    # curva con el traspaso interno hacia/desde el fondo de barrido FDIC.
+    df_saldo_orden = df_mov[df_mov["categoria"] != "RUIDO_SWEEP"].sort_values("fecha").copy()
     df_saldo_orden["saldo_acumulado"] = df_saldo_orden["monto"].cumsum()
     import plotly.graph_objects as go
     fig = go.Figure()
