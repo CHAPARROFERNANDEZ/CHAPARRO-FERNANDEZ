@@ -7022,6 +7022,7 @@ Devuelve ÚNICAMENTE un JSON válido, sin texto antes ni después, sin backticks
 
 {
   "emisor": "string, ej. BNP Paribas",
+  "cusip": "string, el identificador CUSIP de 9 caracteres de la nota (letras y números, ej. 05619JGD6). Busca la etiqueta 'CUSIP' o 'CUSIP No.' en la portada o en la sección de términos generales del documento. Si el documento solo trae ISIN y no CUSIP, usa el ISIN aquí tal cual. Si no aparece ninguno de los dos, usa 'REVISAR'.",
   "cupon_anual_pct": number entre 0 y 1 (ej. 0.375 para 37.5%),
   "fecha_vencimiento": "YYYY-MM-DD",
   "fecha_inicio_nota": "YYYY-MM-DD, la Initial Valuation Date (o Pricing Date si no hay Initial Valuation Date separada) de la nota",
@@ -7791,7 +7792,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
 
     st.markdown("---")
     st.markdown(f"### Nota {numero_nota}")
-    st.markdown(f"**Emisor:** {_marcar(extraido.get('emisor'))}  |  **Cupón anual:** {_marcar(extraido.get('cupon_anual_pct'))}  |  **Vencimiento:** {_marcar(extraido.get('fecha_vencimiento'))}")
+    st.markdown(f"**Emisor:** {_marcar(extraido.get('emisor'))}  |  **CUSIP:** {_marcar(extraido.get('cusip'))}  |  **Cupón anual:** {_marcar(extraido.get('cupon_anual_pct'))}  |  **Vencimiento:** {_marcar(extraido.get('fecha_vencimiento'))}")
     etiquetas = []
     if extraido.get("tiene_memoria") is True:
         etiquetas.append("🧠 Memoria")
@@ -7825,6 +7826,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
             "TIENE_MEMORIA": "SI" if extraido.get("tiene_memoria") is True else "NO",
             "TIENE_ONE_STAR": "SI" if extraido.get("tiene_one_star") is True else "NO",
             "EMISOR": _marcar(extraido.get("emisor")),
+            "CUSIP": _marcar(extraido.get("cusip")),
         })
     df_control_preview = pd.DataFrame(filas_control)
     df_control_editado = st.data_editor(df_control_preview, use_container_width=True, num_rows="dynamic", key=f"editor_control_nota_{numero_nota}")
@@ -7879,6 +7881,7 @@ def _tab_añadir_nota_nueva(df_control: pd.DataFrame, df_cal: pd.DataFrame, df_c
             ("precio_compra", "PRECIO_COMPRA"), ("barrera_cupon", "BARRERA_CUPON"),
             ("barrera_capital", "BARRERA_CAPITAL"), ("call_level", "CALL_LEVEL"),
             ("emisor", "EMISOR"), ("tiene_memoria", "TIENE_MEMORIA"), ("tiene_one_star", "TIENE_ONE_STAR"),
+            ("cusip", "CUSIP"),
         ]
         filas_comparacion = []
         for _, fila_nueva in df_control_editado.iterrows():
@@ -8283,6 +8286,12 @@ def _render_comparacion_auditoria(numero_nota: int, df_inv: pd.DataFrame, df_cal
         col_bc = "barrera_capital" if "barrera_capital" in fila_excel.index else "contingency"
         _comparar(f"{ticker}: barrera capital", fila_excel.get(col_bc), t.get("barrera_capital_pct"))
         _comparar(f"{ticker}: call level", fila_excel.get("call_level"), t.get("call_level_pct"))
+
+    # --- CUSIP (comparado contra CONTROL_NOTAS de esa nota) ---
+    if not control_nota.empty:
+        cusip_excel = control_nota.iloc[0].get("cusip") if "cusip" in control_nota.columns else None
+        cusip_excel = cusip_excel if cusip_excel and str(cusip_excel).strip() else None
+        _comparar("CUSIP", cusip_excel, extraido.get("cusip"))
 
     # --- Cupón anual (comparado contra INVERSIONES de esa nota) ---
     nombre_nota = f"NOTA_{numero_nota:02d}"
@@ -10758,6 +10767,72 @@ def _tab_pdfs_notas(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.D
         if sin_local:
             mensaje += f" {sin_local} nota(s) sin PDF en el servidor (no había nada que subir)."
         st.success(mensaje)
+
+    st.markdown("---")
+    st.markdown("#### 🔎 Recuperar CUSIP de notas ya guardadas")
+    st.caption(
+        "Vuelve a leer el PDF ya guardado de cada nota que todavía no tiene CUSIP en CONTROL_NOTAS "
+        "y lo rellena. No toca ningún otro dato de la nota — solo añade el CUSIP."
+    )
+
+    control_cusip = df_control.copy() if df_control is not None else pd.DataFrame()
+    if "cusip" not in control_cusip.columns:
+        control_cusip["cusip"] = None
+    notas_sin_cusip = [
+        n for n in notas_existentes
+        if control_cusip.loc[pd.to_numeric(control_cusip.get("nota"), errors="coerce") == n, "cusip"]
+        .apply(lambda v: v is None or pd.isna(v) or str(v).strip() == "" or str(v).strip().upper() == "REVISAR")
+        .all()
+    ]
+
+    if not notas_sin_cusip:
+        st.success("Todas las notas con datos en CONTROL_NOTAS ya tienen CUSIP guardado.")
+    else:
+        st.caption(f"{len(notas_sin_cusip)} nota(s) sin CUSIP: {', '.join(str(n) for n in notas_sin_cusip)}")
+        if st.button("🔍 Extraer CUSIP de esas notas"):
+            resultados_backfill = {}
+            with st.spinner("Leyendo PDFs y extrayendo CUSIP..."):
+                for n in notas_sin_cusip:
+                    pdf_n = leer_pdf_nota_guardado(n)
+                    if not pdf_n:
+                        resultados_backfill[n] = {"cusip": None, "estado": "⚠️ Sin PDF guardado"}
+                        continue
+                    extraido_n = extraer_datos_nota_con_ia(pdf_n)
+                    if "error" in extraido_n:
+                        resultados_backfill[n] = {"cusip": None, "estado": f"⚠️ Error: {extraido_n['error']}"}
+                        continue
+                    cusip_n = extraido_n.get("cusip")
+                    if not cusip_n or str(cusip_n).strip().upper() == "REVISAR":
+                        resultados_backfill[n] = {"cusip": None, "estado": "⚠️ IA no lo encontró en el PDF"}
+                    else:
+                        resultados_backfill[n] = {"cusip": str(cusip_n).strip(), "estado": "✅ Extraído"}
+            st.session_state["backfill_cusip_resultados"] = resultados_backfill
+
+    resultados_backfill = st.session_state.get("backfill_cusip_resultados")
+    if resultados_backfill:
+        df_preview_cusip = pd.DataFrame([
+            {"Nota": n, "CUSIP extraído": r["cusip"] or "—", "Estado": r["estado"]}
+            for n, r in resultados_backfill.items()
+        ]).sort_values("Nota")
+        st.dataframe(df_preview_cusip, use_container_width=True, hide_index=True)
+
+        n_ok_cusip = sum(1 for r in resultados_backfill.values() if r["cusip"])
+        if n_ok_cusip > 0 and st.button(f"💾 Guardar {n_ok_cusip} CUSIP en CONTROL_NOTAS", type="primary"):
+            hojas = leer_todas_las_hojas_excel()
+            if not hojas or "CONTROL_NOTAS" not in hojas:
+                st.error("No se pudo leer el Excel actual para guardar los CUSIP.")
+            else:
+                df_ctrl = hojas["CONTROL_NOTAS"]
+                if "CUSIP" not in df_ctrl.columns:
+                    df_ctrl["CUSIP"] = None
+                for n, r in resultados_backfill.items():
+                    if r["cusip"]:
+                        df_ctrl.loc[pd.to_numeric(df_ctrl["NOTA"], errors="coerce") == n, "CUSIP"] = r["cusip"]
+                hojas["CONTROL_NOTAS"] = df_ctrl
+                guardar_excel_completo_desde_hojas(hojas)
+                st.success(f"CUSIP guardado para {n_ok_cusip} nota(s).")
+                del st.session_state["backfill_cusip_resultados"]
+                st.rerun()
 
     st.markdown("---")
     for n in notas_existentes:
