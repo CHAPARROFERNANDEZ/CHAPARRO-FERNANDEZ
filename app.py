@@ -1002,9 +1002,13 @@ INVERSORES_ADICIONALES_VISIBLES = {
 # por el portal de inversor — cambiando de vista con un simple selector en la barra lateral.
 # Clave = usuario admin (tal cual está en USUARIOS, sin distinguir mayúsculas/minúsculas),
 # valor = lista de nombres de inversor (tal cual en INVERSIONES) que puede ver desde su sesión.
-# EN PRUEBAS: solo con Yuri por ahora, viendo el perfil de PAM. Si funciona bien, se añade Jordi.
+# Nota: al entrar a un perfil de inversor por aquí, ese perfil sigue aplicando sus propias
+# excepciones de INVERSORES_ADICIONALES_VISIBLES (p.ej. JORDI CHAPARRO también ve PAM, JEP,
+# JR REAL ESTATE, 2012 JACC GROUP y JORDI ESPECIAL desde ese portal), así que no hace falta
+# repetir esa lista aquí.
 ADMIN_VISTAS_INVERSOR_ADICIONALES = {
     "YURI": ["PAM"],
+    "JORDI": ["JORDI CHAPARRO"],
 }
 
 # Inversores piloto con verificación en dos pasos por email disponible en su portal.
