@@ -2366,7 +2366,7 @@ def _cargar_excel_completo_desde_drive():
     if "unnamed: 6" in inv.columns and "cuenta_cobro" not in inv.columns:
         inv = inv.rename(columns={"unnamed: 6": "cuenta_cobro"})
 
-    for col in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "metodo_calculo", "activo_generador_interes", "tipo_operacion", "capital_nuevo_real", "cuenta_cobro", "motivo"]:
+    for col in ["id_inversion", "inversor", "tipo_inversion", "subtipo_inversion", "nombre_activo", "metodo_calculo", "activo_generador_interes", "tipo_operacion", "capital_nuevo_real", "cuenta_cobro", "motivo", "id_inversion_origen", "cierre_definitivo"]:
         if col in inv.columns:
             inv[col] = inv[col].fillna("").astype(str).str.strip()
 
@@ -3241,7 +3241,7 @@ def _construir_datos_demo_inversor():
     df_inv = pd.DataFrame(filas)
     for col in ["id_inversion", "inversor", "tipo_operacion", "tipo_inversion", "subtipo_inversion",
                 "nombre_activo", "metodo_calculo", "activo_generador_interes", "capital_nuevo_real",
-                "cuenta_cobro", "motivo"]:
+                "cuenta_cobro", "motivo", "id_inversion_origen", "cierre_definitivo"]:
         if col not in df_inv.columns:
             df_inv[col] = ""
         df_inv[col] = df_inv[col].fillna("").astype(str).str.strip()
@@ -12261,14 +12261,31 @@ def formatear_extracto_excel_bytes(contenido_raw: bytes, inversor: str, fecha_co
 def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | None, anio: int, mes: int, solo_notas: bool = False):
     """Genera extractos para inversores.
 
-    REGLA DEFINITIVA PARA EXTRACTOS:
-    - SOLO se tienen en cuenta las filas cuya columna tipo_operacion sea exactamente NUEVA.
-    - NO se tienen en cuenta reinversiones, canceladas, vacías ni cualquier otro valor.
-    - Las reinversiones no modifican el extracto del inversor: el inversor cobra según su operación matriz NUEVA.
-    """
-    df = df_inv.copy()
+    REGLA DE EXTRACTOS (actualizada 10/09/2026 — cadena de cierres/reinversiones):
+    - Solo generan interés propio las posiciones NACIDAS como NUEVA (id_inversion_origen vacío).
+      Las nacidas como REINVERSION nunca generan su propia fila — son el destino físico del
+      capital, ya representado por la cadena de la posición que las originó.
+    - Si una posición NUNCA se cierra (sin fecha_final_inversion): interés hasta la fecha de corte.
+    - Si se cierra (fecha_final_inversion rellena) y cierre_definitivo = SI, o el campo está
+      vacío (compatibilidad con datos antiguos, anteriores a que existiera esta columna): el
+      interés se corta ahí, en fecha_final_inversion. Igual que siempre.
+    - Si se cierra con cierre_definitivo = NO (call/reinversión pendiente, no definitivo): el
+      interés NO se corta — sigue devengándose con el capital y la tasa de la posición ORIGINAL,
+      siguiendo la cadena hacia la REINVERSION vinculada por id_inversion_origen (y de ahí, si esa
+      también se cierra por call, hacia la siguiente, y así sucesivamente) hasta encontrar un
+      cierre DEFINITIVO (se corta en su fecha) o quedarse sin más eslabones registrados todavía
+      (sigue contando hasta la fecha de corte).
 
-    # Normalizamos columnas de texto necesarias.
+    IMPORTANTE — bug corregido el 10/09/2026: el cierre de una posición se detecta por tener
+    fecha_final_inversion rellena, NO por el valor de tipo_operacion (que durante mucho tiempo se
+    quedaba en NUEVA/REINVERSION aunque la posición ya estuviera cerrada, porque el wizard de
+    cierre no lo actualizaba). Esto es intencional: así el corte de interés funciona también para
+    todo el histórico ya cerrado, sin tener que retocar filas antiguas a mano.
+    """
+    df_completo = df_inv.copy()
+
+    # Normalizamos columnas de texto necesarias — incluye id_inversion_origen y
+    # cierre_definitivo, imprescindibles para reconstruir la cadena.
     for col in [
         "inversor",
         "tipo_inversion",
@@ -12278,25 +12295,101 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
         "capital_nuevo_real",
         "motivo",
         "id_inversion",
+        "id_inversion_origen",
+        "cierre_definitivo",
     ]:
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str).str.strip()
+        if col in df_completo.columns:
+            df_completo[col] = df_completo[col].fillna("").astype(str).str.strip()
+        else:
+            df_completo[col] = ""
 
-    # ==========================================
-    # FILTRO PRINCIPAL DE EXTRACTOS
-    # ==========================================
-    # Según la regla definida: para extractos SOLO cuenta columna O / tipo_operacion = NUEVA.
-    # Todo lo demás queda fuera: reinversion, cancelada, call, vacío, etc.
-    if "tipo_operacion" not in df.columns:
+    if "tipo_operacion" not in df_inv.columns:
         st.error("Falta la columna tipo_operacion en la hoja INVERSIONES. Para generar extractos debe existir y contener 'NUEVA'.")
         return []
 
-    df["tipo_operacion_normalizada"] = df["tipo_operacion"].astype(str).str.strip().str.upper()
+    df_completo["tipo_operacion_normalizada"] = df_completo["tipo_operacion"].str.upper()
+    df_completo["fecha_inversion"] = parsear_fecha_robusta(df_completo.get("fecha_inversion"))
+    df_completo["fecha_final_inversion"] = parsear_fecha_robusta(df_completo.get("fecha_final_inversion"))
+    df_completo["capital_invertido"] = pd.to_numeric(df_completo.get("capital_invertido"), errors="coerce").fillna(0)
+    df_completo["interes_inversor_anual"] = pd.to_numeric(df_completo.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-    # NUEVA: incluir, calcular hasta fecha de corte (ignorar fecha_final)
-    # CANCELADA: incluir, calcular hasta fecha_final_inversion
-    # REINVERSION y cualquier otro: excluir
-    df = df[df["tipo_operacion_normalizada"].isin(["NUEVA", "CANCELADA"])].copy()
+    fecha_corte = datetime(anio, mes, ultimo_dia_mes(anio, mes))
+
+    # ── Índices para recorrer la cadena de cierres/reinversiones ──────────────────────
+    # id_inversion -> fila completa (para poder consultar fecha_final_inversion,
+    # cierre_definitivo y demás de CUALQUIER eslabón de la cadena, no solo el inicial).
+    mapa_por_id = {}
+    for _, fila in df_completo.iterrows():
+        id_f = str(fila.get("id_inversion", "")).strip()
+        if id_f:
+            mapa_por_id[id_f] = fila
+
+    # id_inversion_origen -> [id_inversion de la(s) REINVERSION que nacieron de él]
+    # (soporta varios orígenes por fila, separados por coma, tal y como ya se guardan).
+    mapa_siguiente = {}
+    for _, fila in df_completo.iterrows():
+        origenes_raw = str(fila.get("id_inversion_origen", "") or "").strip()
+        if not origenes_raw:
+            continue
+        id_propio = str(fila.get("id_inversion", "")).strip()
+        for id_origen in [x.strip() for x in origenes_raw.split(",") if x.strip()]:
+            mapa_siguiente.setdefault(id_origen, []).append(id_propio)
+
+    avisos_cadena = []
+
+    def _resolver_fecha_fin(id_inicial: str, _visitados=None) -> datetime:
+        """Sigue la cadena de cierres/reinversiones a partir de id_inicial y devuelve hasta
+        cuándo hay que devengar interés (topado siempre por fecha_corte)."""
+        if _visitados is None:
+            _visitados = set()
+        if id_inicial in _visitados:
+            avisos_cadena.append(
+                f"Referencia circular detectada en la cadena de reinversiones alrededor de "
+                f"{id_inicial} — se corta ahí para no colgar el cálculo. Revísalo a mano."
+            )
+            return fecha_corte
+        _visitados.add(id_inicial)
+
+        fila = mapa_por_id.get(id_inicial)
+        if fila is None:
+            return fecha_corte
+
+        ff = fila.get("fecha_final_inversion")
+        if pd.isna(ff):
+            # Sin fecha de cierre registrada todavía -> sigue activa.
+            return fecha_corte
+        fecha_cierre = pd.Timestamp(ff).to_pydatetime()
+
+        cierre_def = str(fila.get("cierre_definitivo", "") or "").strip().upper()
+        # Vacío (dato antiguo, anterior a esta columna) o SI -> definitivo, se corta aquí.
+        # Solo NO significa "no definitivo, la cadena continúa".
+        es_definitivo = cierre_def != "NO"
+        if es_definitivo:
+            return min(fecha_cierre, fecha_corte)
+
+        siguientes = mapa_siguiente.get(id_inicial, [])
+        if not siguientes:
+            # Cerrada por call/no-definitivo pero sin reinversión registrada todavía -> sigue
+            # devengando con el capital original hasta que se dé de alta esa reinversión.
+            return fecha_corte
+        if len(siguientes) > 1:
+            avisos_cadena.append(
+                f"{id_inicial}: cerrada como no-definitiva pero vinculada a {len(siguientes)} "
+                f"reinversiones distintas ({', '.join(siguientes)}) — no se sabe repartir el "
+                f"capital original entre varias, así que de momento sigue contando como activa "
+                f"hasta la fecha de corte. Revísalo a mano."
+            )
+            return fecha_corte
+        return _resolver_fecha_fin(siguientes[0], _visitados)
+
+    # ── Solo las posiciones NACIDAS como NUEVA (id_inversion_origen vacío) generan cadena
+    # propia de interés. Las nacidas como REINVERSION nunca son raíz.
+    es_raiz = (
+        (df_completo["id_inversion_origen"].astype(str).str.strip() == "")
+        & (df_completo["tipo_operacion_normalizada"] != "")
+        & (df_completo["fecha_inversion"].notna())
+    )
+    df = df_completo[es_raiz].copy()
 
     # Filtro solo notas (subtipo estructurada)
     if solo_notas:
@@ -12311,8 +12404,6 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
     if df.empty:
         return []
 
-    fecha_corte = datetime(anio, mes, ultimo_dia_mes(anio, mes))
-
     filas = []
     for _, row in df.iterrows():
         fecha_inicio = row.get("fecha_inversion")
@@ -12320,16 +12411,8 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
             continue
 
         fecha_inicio_dt = pd.Timestamp(fecha_inicio).to_pydatetime()
-        tipo_op = str(row.get("tipo_operacion_normalizada", "")).strip().upper()
-        fecha_final_excel = row.get("fecha_final_inversion")
-
-        if tipo_op == "CANCELADA":
-            if pd.isna(fecha_final_excel):
-                continue
-            fecha_fin = min(pd.Timestamp(fecha_final_excel).to_pydatetime(), fecha_corte)
-        else:
-            # NUEVA: siempre hasta fecha de corte
-            fecha_fin = fecha_corte
+        id_actual = str(row.get("id_inversion", "")).strip()
+        fecha_fin = _resolver_fecha_fin(id_actual) if id_actual else fecha_corte
 
         if fecha_inicio_dt > fecha_fin:
             continue
@@ -12402,6 +12485,10 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
                 })
 
             actual = datetime(actual.year + 1, 1, 1) if actual.month == 12 else datetime(actual.year, actual.month + 1, 1)
+
+    if avisos_cadena:
+        for aviso in avisos_cadena:
+            st.warning(f"⚠️ Cadena de reinversión: {aviso}")
 
     resultado = pd.DataFrame(filas)
     if resultado.empty:
@@ -14059,6 +14146,25 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
         motivo_sel = st.selectbox("Motivo del cierre", motivos_conocidos + ["Otro (escribir)"], index=default_motivo_idx, key="cancelada_motivo_sel")
         motivo_final = st.text_input("Escribe el motivo", key="cancelada_motivo_libre") if motivo_sel == "Otro (escribir)" else motivo_sel
 
+        cierre_definitivo_opciones = [
+            "Definitivo — el capital sale del fondo, deja de contar del todo (también para el extracto)",
+            "No definitivo — habrá reinversión (call): el interés del inversor sigue corriendo con el capital original hasta que se cierre definitivamente",
+        ]
+        cierre_definitivo_sel = st.radio(
+            "¿Este cierre es definitivo o va a haber reinversión?",
+            cierre_definitivo_opciones,
+            index=0,
+            key="cancelada_cierre_definitivo_sel",
+            help=(
+                "DEFINITIVO: el dinero sale de verdad — el extracto del inversor deja de contar interés "
+                "en la fecha de cierre de arriba.\n\n"
+                "NO DEFINITIVO (call/reinversión): el extracto sigue calculando interés sin cortar, con el "
+                "capital y la tasa de la posición original, hasta que en algún momento se cierre esa cadena "
+                "con un cierre marcado como DEFINITIVO (o mientras no haya más eslabones registrados)."
+            ),
+        )
+        cierre_definitivo_final = "SI" if cierre_definitivo_sel == cierre_definitivo_opciones[0] else "NO"
+
         # Si es una nota y hay una hoja CALENDARIO_CALLS con fechas de posible call para esa
         # nota, ofrece marcar ese call como ejecutado a la vez que se cierran las posiciones —
         # para no dejar el calendario de calls desactualizado.
@@ -14088,6 +14194,7 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
             "ids_a_cerrar": ids_a_cerrar,
             "fecha_final_inversion": str(fecha_final),
             "motivo": motivo_final,
+            "cierre_definitivo": cierre_definitivo_final,
         }
 
         col_a, col_g = st.columns(2)
@@ -14107,6 +14214,12 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                     col_id = mapa.get("id_inversion")
                     col_ff = mapa.get("fecha_final_inversion")
                     col_mot = mapa.get("motivo")
+                    col_tipo_op = mapa.get("tipo_operacion")
+                    col_cierre_def = mapa.get("cierre_definitivo")
+                    if not col_cierre_def:
+                        # Columna nueva — si el Excel todavía no la tiene, la creamos sola.
+                        col_cierre_def = "cierre_definitivo"
+                        df_raw[col_cierre_def] = ""
                     if not col_id or not col_ff:
                         st.error("No se encontraron las columnas id_inversion / fecha_final_inversion en la hoja INVERSIONES — revisa los nombres de columna a mano.")
                     else:
@@ -14117,6 +14230,12 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                             df_raw.loc[mascara, col_ff] = pd.Timestamp(fecha_final)
                             if col_mot:
                                 df_raw.loc[mascara, col_mot] = motivo_final
+                            if col_tipo_op:
+                                # Bug corregido 10/09/2026: antes este cierre NO actualizaba
+                                # tipo_operacion — se quedaba en NUEVA/REINVERSION para siempre,
+                                # así que el extracto nunca cortaba el interés en la práctica.
+                                df_raw.loc[mascara, col_tipo_op] = "CANCELADA"
+                            df_raw.loc[mascara, col_cierre_def] = cierre_definitivo_final
                             hojas["INVERSIONES"] = df_raw
 
                             if marcar_call_calendario and "CALENDARIO_CALLS" in hojas:
@@ -14142,7 +14261,8 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
                             borrar_borrador_inversion(clave)
                             st.session_state["inversion_wizard_datos"] = {}
                             st.session_state["inversion_wizard_clave_actual"] = ""
-                            st.success(f"{len(ids_a_cerrar)} posición(es) cerrada(s) el {fecha_final} (motivo: {motivo_final}): {', '.join(ids_a_cerrar)}.")
+                            etiqueta_definitivo = "definitivo" if cierre_definitivo_final == "SI" else "NO definitivo (el interés sigue corriendo)"
+                            st.success(f"{len(ids_a_cerrar)} posición(es) cerrada(s) el {fecha_final} (motivo: {motivo_final}, cierre {etiqueta_definitivo}): {', '.join(ids_a_cerrar)}.")
                             st.cache_data.clear()
         return
 
