@@ -28,14 +28,15 @@ from sqlalchemy import create_engine, text
 
 GDRIVE_FILE_ID = "1CImiIbg7kSLrYNpWgzPHEBCmI3KRVlBX"
 
-# Hojas que se migran automáticamente "tal cual" (estructura inferida de sus columnas actuales).
-# USUARIOS se trata aparte, con esquema explícito, por ser la más sensible.
-HOJAS_AUTOMATICAS = [
-    "INVERSIONES", "REINVERSIONES", "CONTROL_NOTAS", "CALENDARIO_NOTAS",
-    "CALENDARIO_CALLS", "DEUDA_JORDI", "TRANSFERENCIAS_JORDI",
-    "MOVIMIENTOS_MOTOCLICK", "REPARTO_DIVIDENDOS", "BORRADORES_NOTAS",
-    "BORRADORES_INVERSIONES", "AUDITORIA_NOTAS", "LOG_IA_USO",
-]
+# Hojas que se tratan APARTE, con lógica propia, en vez de pasar por el volcado automático
+# genérico (sincronizar_hoja_automatica). USUARIOS tiene su propio esquema explícito por ser
+# la más sensible (contraseñas, TOTP) y usa upsert por clave en vez de "replace" completo.
+#
+# Cualquier hoja que NO esté en este set se sincroniza automáticamente sin tocar código: se
+# añade o se quita en Drive y el siguiente deploy la recoge o la deja de recoger sola. Si en
+# el futuro otra hoja necesita tratamiento especial (upsert, validaciones, esquema propio),
+# se añade aquí y se le escribe su propia función, igual que USUARIOS.
+HOJAS_EXCLUIDAS_DE_SINCRONIZACION_AUTOMATICA = {"USUARIOS"}
 
 
 def log(msg: str):
@@ -251,7 +252,7 @@ def main() -> dict:
 
     try:
         hojas = descargar_excel()
-        log(f"Excel descargado de Drive: {len(hojas)} hoja(s) encontradas.")
+        log(f"Excel descargado de Drive: {len(hojas)} hoja(s) encontradas: {sorted(hojas.keys())}")
     except Exception as e:
         msg = f"AVISO: no se pudo descargar el Excel de Drive ({e}) — se omite la sincronización."
         log(msg)
@@ -266,7 +267,14 @@ def main() -> dict:
         log(f"ERROR sincronizando USUARIOS: {e}")
         detalle.append(f"USUARIOS: ERROR ({e})")
 
-    for nombre_hoja in HOJAS_AUTOMATICAS:
+    # Descubrimiento automático: cualquier hoja del Excel que no esté en la lista de
+    # excepciones se sincroniza sola, sin tocar este script. Si mañana añades o quitas una
+    # pestaña en Drive, el siguiente deploy la recoge (o deja de recogerla) automáticamente.
+    nombres_hojas_automaticas = sorted(
+        nombre for nombre in hojas.keys()
+        if nombre not in HOJAS_EXCLUIDAS_DE_SINCRONIZACION_AUTOMATICA
+    )
+    for nombre_hoja in nombres_hojas_automaticas:
         try:
             n = sincronizar_hoja_automatica(engine, nombre_hoja, hojas.get(nombre_hoja))
             detalle.append(f"{nombre_hoja}: {n} fila(s)")
