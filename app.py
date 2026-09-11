@@ -64,6 +64,7 @@ TASA_ANUAL_MOTOCLICK = 0.25
 TASA_ANUAL_PARAGUAY = 0.15
 TASA_ANUAL_BOLIVIA = 0.15
 TASA_ANUAL_BITCOIN = 0.20
+TASA_ANUAL_ASPIRA = 0.30
 
 # Posición real del fondo en el ETF de Bitcoin, según confirmación de compra StoneX/Aragon Capital
 BITCOIN_ETF_TICKER = "IBIT"
@@ -2615,6 +2616,43 @@ def filtrar_activo(df_base: pd.DataFrame, activo: str) -> pd.DataFrame:
     return df_base[subtipo.eq(activo_l) | nombre.eq(activo_l)].copy()
 
 
+ACTIVOS_FIJOS_CONOCIDOS = [
+    ("paraguay", TASA_ANUAL_PARAGUAY),
+    ("bolivia", TASA_ANUAL_BOLIVIA),
+    ("motoclick", TASA_ANUAL_MOTOCLICK),
+    ("futbol", TASA_ANUAL_FUTBOL),
+    ("bitcoin", TASA_ANUAL_BITCOIN),
+    ("aspira", TASA_ANUAL_ASPIRA),
+]
+
+
+def lista_activos_fijos(df_inv: pd.DataFrame) -> list:
+    """Activos fijos a procesar en informes/cálculos: los conocidos de siempre (con su tasa fija
+    en el código) MÁS cualquier subtipo_inversion nuevo que aparezca en el Excel y no sea
+    nota/préstamo/uno de los ya conocidos.
+
+    Para un activo nuevo (cualquiera que se añada en el futuro, distinto de los ya conocidos) NO
+    hace falta tocar el código: basta con escribir su subtipo_inversion y su tasa_empresa_anual al
+    dar de alta la primera fila — se descubre solo. La tasa devuelta es None para estos, señal de
+    que detalle_activo_mes debe leerla de la columna tasa_empresa_anual de cada fila en vez de una
+    constante compartida.
+    """
+    conocidos = {clave for clave, _ in ACTIVOS_FIJOS_CONOCIDOS}
+    excluir = conocidos | {"notas", "nota", "prestamo", "préstamo", "otros", ""}
+    descubiertos = set()
+    if df_inv is not None and "tipo_inversion" in df_inv.columns:
+        tipo_l = df_inv["tipo_inversion"].astype(str).str.strip().str.lower()
+        base = df_inv[~tipo_l.isin(["nota", "prestamo", "préstamo"])]
+    else:
+        base = df_inv
+    for col in ("subtipo_inversion", "nombre_activo"):
+        if base is not None and col in base.columns:
+            for val in base[col].dropna().astype(str).str.strip().str.lower().unique():
+                if val and val not in excluir:
+                    descubiertos.add(val)
+    return ACTIVOS_FIJOS_CONOCIDOS + [(clave, None) for clave in sorted(descubiertos)]
+
+
 def dias_activos_en_mes(fecha_inicio, fecha_fin, anio: int, mes: int) -> int:
     inicio_mes = pd.Timestamp(anio, mes, 1)
     fin_mes = pd.Timestamp(anio, mes, ultimo_dia_mes(anio, mes))
@@ -2724,7 +2762,9 @@ def ajustar_ingreso_motoclick(d_fijos: pd.DataFrame, df_inv: pd.DataFrame, anio:
     return d_fijos
 
 
-def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, anio: int, mes: int) -> pd.DataFrame:
+def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: "float | None", anio: int, mes: int) -> pd.DataFrame:
+    """tasa_anual: la tasa fija conocida (Paraguay/MotoClick/...), o None para activos nuevos sin
+    constante en el código — en ese caso se lee de la columna tasa_empresa_anual de cada fila."""
     df_activo = filtrar_activo(df_base, activo)
     dias_mes = ultimo_dia_mes(anio, mes)
     filas = []
@@ -2734,7 +2774,15 @@ def detalle_activo_mes(df_base: pd.DataFrame, activo: str, tasa_anual: float, an
             continue
         proporcion = dias / dias_mes
         capital = float(fila.get("capital_invertido", 0))
-        ingreso_bruto = capital * tasa_anual / 12 * proporcion
+        if tasa_anual is not None:
+            tasa_efectiva = tasa_anual
+        else:
+            val = fila.get("tasa_empresa_anual")
+            try:
+                tasa_efectiva = float(val) if val not in (None, "") and not pd.isna(val) else 0.0
+            except (TypeError, ValueError):
+                tasa_efectiva = 0.0
+        ingreso_bruto = capital * tasa_efectiva / 12 * proporcion
         pago_inversor = capital * float(fila.get("interes_inversor_anual", 0)) / 12 * proporcion
         filas.append({
             "id_inversion": fila.get("id_inversion", ""), "inversor": fila.get("inversor", ""),
@@ -3441,7 +3489,7 @@ def total_ingresado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa
     return float(total)
 
 
-def totales_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: float) -> dict:
+def totales_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: "float | None") -> dict:
     """Recorre mes a mes, desde la primera inversión del activo hasta el mes actual incluido,
     y devuelve el ingreso acumulado de la compañía y el pago acumulado a inversores, con
     desglose por año.
@@ -4560,16 +4608,20 @@ def proximo_evento_nota(df_cal: pd.DataFrame, nota: int, tipo: str):
 # GLOBAL Y DASHBOARD
 # =========================
 def detectar_activo(row):
+    """Clasifica la fila por activo. Genérico: cualquier subtipo_inversion (o nombre_activo)
+    nuevo se convierte automáticamente en su propio "activo" sin tocar código — ya no hace falta
+    mantener una lista de nombres conocidos aquí."""
     tipo = limpiar_texto(row.get("tipo_inversion", ""))
     subtipo = limpiar_texto(row.get("subtipo_inversion", ""))
     nombre = limpiar_texto(row.get("nombre_activo", ""))
     if tipo == "nota" or nombre.startswith("nota"):
         return "notas"
-    if tipo == "prestamo":
+    if tipo == "prestamo" or "prestamo" in subtipo or "préstamo" in subtipo or "prestamo" in nombre or "préstamo" in nombre:
         return "prestamo"
-    for activo in ["paraguay", "bolivia", "motoclick", "futbol", "fútbol", "bitcoin", "prestamo", "préstamo"]:
-        if activo in subtipo or activo in nombre:
-            return "futbol" if activo == "fútbol" else ("prestamo" if activo == "préstamo" else activo)
+    if subtipo:
+        return "futbol" if subtipo == "fútbol" else subtipo
+    if nombre:
+        return "futbol" if nombre == "fútbol" else nombre
     return "otros"
 
 
@@ -4966,7 +5018,7 @@ def calcular_rentabilidad_inversiones_mes(df_inv, df_cal, df_control, anio: int,
             })
 
     # Activos con rentabilidad fija / operativa
-    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
+    for activo, tasa in lista_activos_fijos(df_inv):
         det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
         if det is None or det.empty:
             continue
@@ -5443,7 +5495,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
     capital_total = activas["capital_invertido"].sum() if not activas.empty else 0
     c_notas, p_notas, b_notas, detalle_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, int(anio), int(mes), prorratear=prorratear_notas)
     detalles_fijos = []
-    for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
+    for activo, tasa in lista_activos_fijos(df_inv):
         det = detalle_activo_mes(df_inv, activo, tasa, int(anio), int(mes))
         if not det.empty:
             det["activo"] = activo
@@ -5491,6 +5543,7 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
         "Paraguay": "paraguay",
         "Bolivia": "bolivia",
         "Bitcoin": "bitcoin",
+        "Aspira Capital": "aspira",
         "Préstamo": "prestamo",
     }
     activo_filtrado = mapa_vista_activo.get(str(vista_activo), None)
@@ -5578,7 +5631,7 @@ def grafico_beneficio_mensual(df_inv_calculo, df_cal, df_control, prorratear_not
         anio, mes = fecha.year, fecha.month
         _, _, b_notas, _, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes, prorratear=prorratear_notas)
         detalles_fijos = []
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
+        for activo, tasa in lista_activos_fijos(df_inv):
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if not det.empty:
                 detalles_fijos.append(det)
@@ -5917,7 +5970,7 @@ def construir_movimientos_historico_proyeccion(df_inv: pd.DataFrame, df_cal: pd.
                 })
 
         # 2) Activos con ingreso fijo o operativo.
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
+        for activo, tasa in lista_activos_fijos(df_inv):
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if det is None or det.empty:
                 continue
@@ -6440,7 +6493,7 @@ def dashboard_financiero():
     col_activo, col_periodo_1, col_periodo_2, col_chaparro, col_prorrateo, col_devengo = st.columns([1.2, 0.8, 0.8, 1.0, 1.0, 1.0])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
-        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin", "Préstamo"],
+        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin", "Aspira Capital", "Préstamo"],
         key="dashboard_vista_activo",
     )
     incluir_chaparro = col_chaparro.checkbox(
@@ -11507,7 +11560,7 @@ def seccion_sistema_fondo():
         mes = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month))
         c_notas, p_notas, b_notas, d_notas, _ = resumen_notas_mes(df_inv, df_cal, df_control, anio, mes)
         detalles = []
-        for activo, tasa in [("paraguay", TASA_ANUAL_PARAGUAY), ("bolivia", TASA_ANUAL_BOLIVIA), ("motoclick", TASA_ANUAL_MOTOCLICK), ("futbol", TASA_ANUAL_FUTBOL), ("bitcoin", TASA_ANUAL_BITCOIN)]:
+        for activo, tasa in lista_activos_fijos(df_inv):
             det = detalle_activo_mes(df_inv, activo, tasa, anio, mes)
             if not det.empty:
                 det["activo"] = activo; detalles.append(det)
@@ -13793,11 +13846,15 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
     df_reparto = cargar_reparto_dividendos()
     df_transferencias = cargar_transferencias_jordi()
 
+    # Activos fijos a incluir: los conocidos (con su etiqueta bonita de siempre) + cualquier
+    # activo nuevo descubierto solo a partir del Excel (ver lista_activos_fijos).
+    ETIQUETAS_CONOCIDAS = {
+        "paraguay": "Paraguay", "motoclick": "MotoClick", "futbol": "Fútbol",
+        "bolivia": "Bolivia", "bitcoin": "Bitcoin", "aspira": "Aspira Capital",
+    }
     ACTIVOS_FIJOS = [
-        ("Paraguay",  "paraguay",  TASA_ANUAL_PARAGUAY),
-        ("MotoClick", "motoclick", TASA_ANUAL_MOTOCLICK),
-        ("Fútbol",    "futbol",    TASA_ANUAL_FUTBOL),
-        ("Bolivia",   "bolivia",   TASA_ANUAL_BOLIVIA),
+        (ETIQUETAS_CONOCIDAS.get(clave, clave.title()), clave, tasa)
+        for clave, tasa in lista_activos_fijos(df_inv)
     ]
 
     while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
@@ -15343,9 +15400,7 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         )
         tot_ing_fijos = 0.0
         tot_pag_fijos = 0.0
-        for activo, tasa in [("futbol",TASA_ANUAL_FUTBOL),("paraguay",TASA_ANUAL_PARAGUAY),
-                              ("bolivia",TASA_ANUAL_BOLIVIA),("motoclick",TASA_ANUAL_MOTOCLICK),
-                              ("bitcoin",TASA_ANUAL_BITCOIN)]:
+        for activo, tasa in lista_activos_fijos(df_inv):
             t_hist = totales_activo_desde_inicio(df_inv, activo, tasa)
             tot_ing_fijos += t_hist["ingresado"]
             tot_pag_fijos += t_hist["pagado"]
