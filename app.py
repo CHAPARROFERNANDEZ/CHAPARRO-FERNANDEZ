@@ -3681,15 +3681,10 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
 
         # El endpoint "info" es el más inestable de yfinance/Yahoo — reintenta con espera creciente.
         info = {}
-        for intento in range(4):
-            try:
-                info = t.info or {}
-                if info and len(info) > 5:
-                    break
-            except Exception:
-                pass
-            if intento < 3:
-                time.sleep(1.5 * (intento + 1))  # 1.5s, 3s, 4.5s — da tiempo real a que se libere el límite
+        try:
+            info = t.info or {}
+        except Exception:
+            pass
 
         if not info or len(info) <= 5:
             resultado["aviso_analistas"] = (
@@ -3727,15 +3722,10 @@ def obtener_datos_fundamentales(ticker: str) -> dict:
                 pass
 
         hist = None
-        for intento in range(2):
-            try:
-                hist = t.history(period="2y")  # 2 años: 1 para volatilidad, más margen para earnings pasados
-                if hist is not None and not hist.empty:
-                    break
-            except Exception:
-                pass
-            if intento == 0:
-                time.sleep(1.0)
+        try:
+            hist = t.history(period="2y")  # 2 años: 1 para volatilidad, más margen para earnings pasados
+        except Exception:
+            pass
 
         if hist is not None and not hist.empty:
             cierres_todo = hist["Close"].dropna()
