@@ -1018,6 +1018,7 @@ INVERSORES_CON_2FA = {"EVA CHAPARRO", "JORDI CHAPARRO", "PEDRO MAGAÑA"}
 HOJA_USUARIOS = "USUARIOS"
 HOJA_LOG_IA = "LOG_IA_USO"
 HOJA_GASTOS_PLATAFORMA = "GASTOS_PLATAFORMA"
+HOJA_REINVERSION_CONFIG = "REINVERSION_CONFIG"
 # Precio por millón de tokens (USD) de cada modelo de IA usado en la app, para estimar el coste
 # de cada llamada al guardar el log de uso. Si cambia la tarifa de Anthropic o el modelo usado,
 # actualiza este diccionario — es la ÚNICA fuente del cálculo de coste en toda la app.
@@ -2922,6 +2923,342 @@ def calcular_intereses_acumulados_inversor(df_inv: pd.DataFrame, inversor: str, 
         "tasa_media": tasa_media,
         "fecha_inicio": fecha_inicio_global,
     }
+
+
+# =========================
+# MÓDULO REINVERSIÓN DE INTERESES
+# =========================
+# Cada inversor puede programar cuándo capitalizar (reinvertir) sus intereses ganados:
+#   - PERIODICO: cada N meses (ej. cada 3 meses), independientemente del importe acumulado.
+#   - UMBRAL: en cuanto el interés acumulado desde la última reinversión alcanza un importe fijo
+#     (ej. cada $50.000). El aviso siempre va SOLO a Yuri (yuri.fernandez1821@gmail.com) — nunca
+#     al inversor — porque quien ejecuta la reinversión en el Excel es él.
+
+COLUMNAS_REINVERSION_CONFIG = [
+    "INVERSOR", "TIPO_DISPARADOR", "VALOR", "FECHA_ULTIMA_REINVERSION",
+    "ACTIVO", "FECHA_ULTIMO_AVISO",
+]
+EMAIL_ALERTAS_REINVERSION = "yuri.fernandez1821@gmail.com"
+
+
+def leer_config_reinversion() -> pd.DataFrame:
+    """Lee la configuración de reinversión por inversor (hoja REINVERSION_CONFIG).
+    Si la hoja todavía no existe (primer uso), devuelve un DataFrame vacío con las
+    columnas esperadas, igual que hacen el resto de hojas opcionales de la app."""
+    df = leer_hoja_excel(HOJA_REINVERSION_CONFIG)
+    if df.empty:
+        return pd.DataFrame(columns=[c.lower() for c in COLUMNAS_REINVERSION_CONFIG])
+    df["inversor"] = df.get("inversor", "").fillna("").astype(str).str.strip()
+    df["tipo_disparador"] = df.get("tipo_disparador", "").fillna("").astype(str).str.strip().str.upper()
+    df["valor"] = pd.to_numeric(df.get("valor", 0), errors="coerce").fillna(0)
+    df["fecha_ultima_reinversion"] = parsear_fecha_robusta(df.get("fecha_ultima_reinversion", pd.Series(dtype=object)))
+    df["fecha_ultimo_aviso"] = parsear_fecha_robusta(df["fecha_ultimo_aviso"]) if "fecha_ultimo_aviso" in df.columns else pd.NaT
+    if "activo" in df.columns:
+        df["activo"] = df["activo"].astype(str).str.strip().str.upper().isin(["SI", "SÍ", "TRUE", "1", "X"])
+    else:
+        df["activo"] = True
+    return df
+
+
+def guardar_config_reinversion(df_config: pd.DataFrame) -> tuple[bool, str]:
+    """Guarda la hoja REINVERSION_CONFIG completa (la reemplaza entera), conservando el resto
+    de hojas del Excel intactas. Usa exactamente el mismo patrón que ya usa el resto de la app
+    (leer todas las hojas -> sustituir una -> guardar_excel_completo_desde_hojas), así que sube
+    a Drive y sincroniza Postgres automáticamente sin código nuevo para eso."""
+    try:
+        hojas = leer_todas_las_hojas_excel()
+        if not hojas:
+            return False, "No se pudo leer el Excel actual desde Drive."
+        salida = df_config.copy()
+        salida.columns = [str(c).strip().upper() for c in salida.columns]
+        for col in ["FECHA_ULTIMA_REINVERSION", "FECHA_ULTIMO_AVISO"]:
+            if col in salida.columns:
+                salida[col] = pd.to_datetime(salida[col], errors="coerce").dt.strftime("%d/%m/%Y")
+        if "ACTIVO" in salida.columns:
+            salida["ACTIVO"] = salida["ACTIVO"].apply(lambda v: "SI" if v else "NO")
+        hojas[HOJA_REINVERSION_CONFIG] = salida
+        guardar_excel_completo_desde_hojas(hojas)
+        return True, "Configuración de reinversión guardada."
+    except Exception as e:
+        return False, f"No se pudo guardar la configuración de reinversión: {e}"
+
+
+def _proximo_disparo_periodico(fecha_ultima: pd.Timestamp, meses: float) -> pd.Timestamp:
+    if pd.isna(fecha_ultima) or not meses or meses <= 0:
+        return pd.NaT
+    return fecha_ultima + pd.DateOffset(months=int(meses))
+
+
+def calcular_reinversiones_pendientes(df_inv: pd.DataFrame, df_config: pd.DataFrame,
+                                       fecha_hoy: "pd.Timestamp | None" = None) -> pd.DataFrame:
+    """
+    Para cada inversor con configuración activa, calcula el interés generado desde su última
+    reinversión y si toca avisar hoy (PERIODICO cada N meses, o UMBRAL al superar un importe).
+    Reutiliza calcular_intereses_acumulados_inversor —el mismo cálculo que ya validan los
+    extractos— tomando la diferencia entre el acumulado hasta hoy y el acumulado hasta la
+    última reinversión, en vez de reimplementar el prorrateo de intereses.
+    """
+    hoy = pd.Timestamp(fecha_hoy).normalize() if fecha_hoy is not None else pd.Timestamp.today().normalize()
+    columnas = ["inversor", "tipo_disparador", "valor", "fecha_ultima_reinversion",
+                "intereses_acumulados", "dispara", "detalle"]
+    if df_config.empty:
+        return pd.DataFrame(columns=columnas)
+
+    filas = []
+    for _, cfg in df_config.iterrows():
+        if not bool(cfg.get("activo", True)):
+            continue
+        inversor = str(cfg["inversor"]).strip()
+        if not inversor:
+            continue
+        tipo = str(cfg["tipo_disparador"]).strip().upper()
+        valor = float(cfg["valor"] or 0)
+        fecha_ultima = cfg["fecha_ultima_reinversion"]
+        if pd.isna(fecha_ultima):
+            info_inicio = calcular_intereses_acumulados_inversor(df_inv, inversor, fecha_fin=hoy)
+            fecha_ultima = info_inicio.get("fecha_inicio") or hoy
+
+        acumulado_hasta_hoy = calcular_intereses_acumulados_inversor(df_inv, inversor, fecha_fin=hoy)["total_intereses"]
+        acumulado_hasta_ultima = calcular_intereses_acumulados_inversor(df_inv, inversor, fecha_fin=fecha_ultima)["total_intereses"]
+        intereses_periodo = round(acumulado_hasta_hoy - acumulado_hasta_ultima, 2)
+
+        dispara, detalle = False, ""
+        if tipo == "PERIODICO":
+            proximo = _proximo_disparo_periodico(fecha_ultima, valor)
+            dispara = pd.notna(proximo) and hoy >= proximo
+            detalle = f"Cada {int(valor)} meses · próximo: {proximo.strftime('%d/%m/%Y') if pd.notna(proximo) else '—'}"
+        elif tipo == "UMBRAL":
+            dispara = valor > 0 and intereses_periodo >= valor
+            detalle = f"Cada ${valor:,.2f} acumulados"
+        else:
+            detalle = f"Disparador desconocido: '{tipo}'"
+
+        filas.append({
+            "inversor": inversor, "tipo_disparador": tipo, "valor": valor,
+            "fecha_ultima_reinversion": fecha_ultima, "intereses_acumulados": intereses_periodo,
+            "dispara": dispara, "detalle": detalle,
+        })
+    return pd.DataFrame(filas, columns=columnas)
+
+
+def marcar_reinversion_hecha(inversor: str, fecha: "pd.Timestamp | None" = None) -> tuple[bool, str]:
+    """Marca que la reinversión de un inversor ya se ha ejecutado hoy (o en la fecha indicada),
+    reiniciando su contador de periodo/umbral desde esa fecha."""
+    fecha = pd.Timestamp(fecha).normalize() if fecha is not None else pd.Timestamp.today().normalize()
+    df_config = leer_config_reinversion()
+    mascara = df_config["inversor"].str.upper() == inversor.strip().upper()
+    if not mascara.any():
+        return False, f"No hay configuración de reinversión para '{inversor}'."
+    df_config.loc[mascara, "fecha_ultima_reinversion"] = fecha
+    return guardar_config_reinversion(df_config)
+
+
+def _construir_cuerpo_html_alerta_reinversion(pendientes: pd.DataFrame) -> str:
+    filas_html = "".join(f"""
+        <tr>
+          <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;color:#0e2338;font-weight:600;">{r['inversor']}</td>
+          <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;color:#475569;">{r['detalle']}</td>
+          <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;color:#0e2338;font-weight:700;text-align:right;">${r['intereses_acumulados']:,.2f}</td>
+        </tr>""" for _, r in pendientes.iterrows())
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 40px rgba(7,20,37,0.14);">
+        <tr>
+          <td style="background:linear-gradient(135deg,#0e2338 0%,#173b5c 60%,#bf9a5f 100%);padding:28px 36px;">
+            <div style="color:#ffffff;font-size:19px;font-weight:800;">Chaparro Fernández Wealth</div>
+            <div style="color:rgba(255,255,255,0.75);font-size:13px;">Reinversiones pendientes de ejecutar</div>
+          </td>
+        </tr>
+        <tr><td style="padding:28px 36px;">
+          <p style="color:#334155;font-size:14px;margin:0 0 20px;">{len(pendientes)} inversor(es) tienen una reinversión pendiente hoy:</p>
+          <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+            <tr>
+              <td style="padding:8px 14px;font-size:11px;color:#64748b;text-transform:uppercase;">Inversor</td>
+              <td style="padding:8px 14px;font-size:11px;color:#64748b;text-transform:uppercase;">Disparador</td>
+              <td style="padding:8px 14px;font-size:11px;color:#64748b;text-transform:uppercase;text-align:right;">Importe a reinvertir</td>
+            </tr>
+            {filas_html}
+          </table>
+          <p style="color:#94a3b8;font-size:12px;margin:24px 0 0;">Márcalas como hechas desde el panel "Reinversiones" en cuanto las ejecutes, para reiniciar su contador.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def enviar_alerta_reinversion_email(pendientes: pd.DataFrame, smtp_sender: str, smtp_password: str,
+                                     destinatario: str = EMAIL_ALERTAS_REINVERSION) -> tuple[bool, str]:
+    """Envía UN email a Yuri (nunca a los inversores) listando las reinversiones que tocan hoy.
+    Reutiliza las mismas credenciales SMTP (Gmail + contraseña de aplicación) que ya usa el envío
+    de extractos, pero sin adjuntos: es solo un aviso interno."""
+    if pendientes.empty:
+        return True, "No hay reinversiones pendientes; no se envía email."
+    try:
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = f"[CF Wealth] {len(pendientes)} reinversión(es) pendiente(s) — {datetime.now().strftime('%d/%m/%Y')}"
+        msg["From"] = f"Chaparro Fernández Wealth <{smtp_sender}>"
+        msg["To"] = destinatario
+        msg.attach(MIMEText(_construir_cuerpo_html_alerta_reinversion(pendientes), "html", "utf-8"))
+
+        contexto = ssl.create_default_context()
+        with smtplib.SMTP("smtp.gmail.com", 587) as servidor:
+            servidor.ehlo()
+            servidor.starttls(context=contexto)
+            servidor.login(smtp_sender, smtp_password)
+            servidor.sendmail(smtp_sender, [destinatario], msg.as_bytes())
+        return True, ""
+    except smtplib.SMTPAuthenticationError:
+        return False, "Error de autenticación Gmail. Usa una contraseña de aplicación (no tu contraseña normal)."
+    except Exception as e:
+        return False, str(e)
+
+
+def _credenciales_smtp_reinversion() -> tuple[str, str]:
+    try:
+        return st.secrets["email"]["sender"], st.secrets["email"]["password"]
+    except Exception:
+        return os.environ.get("SMTP_SENDER", ""), os.environ.get("SMTP_PASSWORD", "")
+
+
+def ejecutar_chequeo_reinversiones(enviar_email: bool = True) -> pd.DataFrame:
+    """
+    Punto de entrada único del chequeo de reinversiones: calcula qué hay pendiente HOY y, si hay
+    algo nuevo que no se avisó ya hoy, envía el email a Yuri y marca 'fecha_ultimo_aviso' para no
+    repetir el mismo aviso varias veces el mismo día. Se llama tanto desde el botón manual del
+    panel como desde el cron externo (reinversion_check.py) — misma lógica en los dos sitios.
+    """
+    df_inv, _, _ = cargar_excel_completo()
+    df_config = leer_config_reinversion()
+    pendientes = calcular_reinversiones_pendientes(df_inv, df_config)
+    disparadas = pendientes[pendientes["dispara"]].copy() if not pendientes.empty else pendientes
+
+    hoy = pd.Timestamp.today().normalize()
+    if not disparadas.empty and not df_config.empty:
+        avisos = df_config.set_index(df_config["inversor"].str.upper())["fecha_ultimo_aviso"]
+        ya_avisados_hoy = {inv for inv in avisos.index
+                            if pd.notna(avisos.get(inv)) and pd.Timestamp(avisos.get(inv)).normalize() == hoy}
+        disparadas_nuevas = disparadas[~disparadas["inversor"].str.upper().isin(ya_avisados_hoy)]
+    else:
+        disparadas_nuevas = disparadas
+
+    if enviar_email and not disparadas_nuevas.empty:
+        smtp_sender, smtp_password = _credenciales_smtp_reinversion()
+        if smtp_sender and smtp_password:
+            exito, _msg = enviar_alerta_reinversion_email(disparadas_nuevas, smtp_sender, smtp_password)
+            if exito and not df_config.empty:
+                mascara = df_config["inversor"].str.upper().isin(disparadas_nuevas["inversor"].str.upper())
+                df_config.loc[mascara, "fecha_ultimo_aviso"] = hoy
+                guardar_config_reinversion(df_config)
+    return pendientes
+
+
+def seccion_reinversiones():
+    """Panel de administración de reinversión de intereses (solo Yuri): configurar por inversor
+    cada cuánto/cuándo reinvierte, ver qué toca hoy y marcar como hecho tras ejecutarlo."""
+    df_inv, _, _ = cargar_excel_completo()
+    st.markdown("## 🔁 Reinversiones")
+    st.caption("Programa cada cuánto reinvierte cada inversor sus intereses y recibe un aviso por email cuando toque.")
+
+    inversores_conocidos = sorted(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique())
+    tab_pendientes, tab_config = st.tabs(["📬 Pendientes hoy", "⚙️ Configuración por inversor"])
+
+    with tab_pendientes:
+        df_config = leer_config_reinversion()
+        pendientes = calcular_reinversiones_pendientes(df_inv, df_config)
+        if pendientes.empty:
+            st.info("Todavía no hay ningún inversor con configuración de reinversión. Ve a la pestaña 'Configuración por inversor'.")
+        else:
+            disparadas = pendientes[pendientes["dispara"]]
+            if disparadas.empty:
+                st.success("Ningún inversor tiene una reinversión pendiente hoy.")
+            else:
+                st.warning(f"{len(disparadas)} inversor(es) tienen una reinversión pendiente hoy.")
+
+            tabla = pendientes.copy()
+            tabla["fecha_ultima_reinversion"] = pd.to_datetime(tabla["fecha_ultima_reinversion"]).dt.strftime("%d/%m/%Y")
+            tabla["intereses_acumulados"] = tabla["intereses_acumulados"].apply(lambda v: f"${v:,.2f}")
+            tabla["dispara"] = tabla["dispara"].map({True: "🔴 Sí", False: "—"})
+            st.dataframe(
+                tabla.rename(columns={
+                    "inversor": "Inversor", "detalle": "Disparador", "fecha_ultima_reinversion": "Última reinversión",
+                    "intereses_acumulados": "Interés acumulado", "dispara": "¿Toca hoy?",
+                })[["Inversor", "Disparador", "Última reinversión", "Interés acumulado", "¿Toca hoy?"]],
+                use_container_width=True,
+            )
+
+            c1, c2 = st.columns(2)
+            if c1.button("📧 Enviar aviso por email ahora", key="btn_enviar_aviso_reinversion"):
+                with st.spinner("Comprobando y enviando aviso si corresponde..."):
+                    resultado = ejecutar_chequeo_reinversiones(enviar_email=True)
+                if not resultado[resultado["dispara"]].empty:
+                    st.success(f"Aviso enviado a {EMAIL_ALERTAS_REINVERSION} (o ya se había avisado hoy).")
+                else:
+                    st.info("No había nada pendiente que avisar.")
+                st.rerun()
+
+            if not disparadas.empty:
+                inversor_marcar = c2.selectbox("Marcar como reinvertido", disparadas["inversor"].tolist(), key="sel_marcar_reinvertido")
+                if c2.button("✅ Marcar reinversión hecha", key="btn_marcar_reinversion_hecha"):
+                    exito, mensaje = marcar_reinversion_hecha(inversor_marcar)
+                    (st.success if exito else st.error)(mensaje)
+                    if exito:
+                        st.rerun()
+
+    with tab_config:
+        df_config = leer_config_reinversion()
+        st.markdown("#### Inversores configurados")
+        if df_config.empty:
+            st.caption("Ningún inversor tiene todavía una configuración de reinversión.")
+        else:
+            tabla_cfg = df_config.copy()
+            tabla_cfg["fecha_ultima_reinversion"] = pd.to_datetime(tabla_cfg["fecha_ultima_reinversion"]).dt.strftime("%d/%m/%Y")
+            tabla_cfg["fecha_ultimo_aviso"] = pd.to_datetime(tabla_cfg["fecha_ultimo_aviso"]).dt.strftime("%d/%m/%Y")
+            tabla_cfg["activo"] = tabla_cfg["activo"].map({True: "Sí", False: "No"})
+            st.dataframe(
+                tabla_cfg.rename(columns={
+                    "inversor": "Inversor", "tipo_disparador": "Tipo", "valor": "Valor",
+                    "fecha_ultima_reinversion": "Última reinversión", "activo": "Activo",
+                    "fecha_ultimo_aviso": "Último aviso",
+                }),
+                use_container_width=True,
+            )
+
+        st.markdown("#### Añadir o editar configuración")
+        with st.form("form_config_reinversion"):
+            col1, col2 = st.columns(2)
+            inversor_sel = col1.selectbox("Inversor", inversores_conocidos, key="cfg_reinversion_inversor")
+            tipo_sel = col2.selectbox("Tipo de disparador", ["PERIODICO", "UMBRAL"], key="cfg_reinversion_tipo")
+            if tipo_sel == "PERIODICO":
+                valor_sel = st.number_input("Cada cuántos meses reinvierte", min_value=1, max_value=60, value=3, step=1, key="cfg_reinversion_meses")
+            else:
+                valor_sel = st.number_input("Reinvierte al acumular (importe en $)", min_value=0.0, value=50000.0, step=1000.0, format="%.2f", key="cfg_reinversion_umbral")
+            fecha_desde_sel = st.date_input("Contar desde (última reinversión / inicio)", value=pd.Timestamp.today().date(), key="cfg_reinversion_fecha")
+            activo_sel = st.checkbox("Activo", value=True, key="cfg_reinversion_activo")
+            guardar = st.form_submit_button("💾 Guardar configuración")
+
+        if guardar:
+            df_config_actual = leer_config_reinversion()
+            mascara = df_config_actual["inversor"].str.upper() == inversor_sel.strip().upper()
+            fila_nueva = pd.DataFrame([{
+                "inversor": inversor_sel.strip(), "tipo_disparador": tipo_sel, "valor": float(valor_sel),
+                "fecha_ultima_reinversion": pd.Timestamp(fecha_desde_sel), "activo": activo_sel,
+                "fecha_ultimo_aviso": pd.NaT,
+            }])
+            if mascara.any():
+                fila_nueva.loc[0, "fecha_ultimo_aviso"] = df_config_actual.loc[mascara, "fecha_ultimo_aviso"].iloc[0]
+                df_config_actual = pd.concat([df_config_actual[~mascara], fila_nueva], ignore_index=True)
+            else:
+                df_config_actual = pd.concat([df_config_actual, fila_nueva], ignore_index=True)
+            exito, mensaje = guardar_config_reinversion(df_config_actual)
+            (st.success if exito else st.error)(mensaje)
+            if exito:
+                st.rerun()
 
 
 def preparar_extracto_privado_inversor(contenido_bytes: bytes) -> bytes:
@@ -6478,6 +6815,17 @@ def dashboard_financiero():
 
     st.markdown("## Dashboard financiero")
     st.caption("Panel ejecutivo de capital activo, cobros, pagos, beneficio y rentabilidades.")
+
+    if str(st.session_state.get("usuario", "")).strip().lower() == "yuri":
+        try:
+            _df_cfg_reinv = leer_config_reinversion()
+            if not _df_cfg_reinv.empty:
+                _pendientes_reinv = calcular_reinversiones_pendientes(df_inv, _df_cfg_reinv)
+                _disparadas_reinv = _pendientes_reinv[_pendientes_reinv["dispara"]] if not _pendientes_reinv.empty else _pendientes_reinv
+                if not _disparadas_reinv.empty:
+                    st.warning(f"🔁 {len(_disparadas_reinv)} inversor(es) tienen una reinversión pendiente hoy — revísalo en el menú 'Reinversiones'.")
+        except Exception:
+            pass
 
     hoy = pd.Timestamp.today().normalize()
     col_activo, col_periodo_1, col_periodo_2, col_chaparro, col_prorrateo, col_devengo = st.columns([1.2, 0.8, 0.8, 1.0, 1.0, 1.0])
@@ -15926,6 +16274,7 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
             menu_opciones.insert(6, "➕ Nueva inversión")
             menu_opciones.insert(7, "📊 Uso IA")
             menu_opciones.insert(8, "💰 Gastos")
+            menu_opciones.insert(9, "🔁 Reinversiones")
 
     menu = st.sidebar.selectbox("Menú principal", menu_opciones, key="menu_principal_selector")
 
@@ -15955,6 +16304,8 @@ if __name__ == "__main__":  # menu principal / routing: solo se ejecuta con `str
         seccion_uso_ia()
     elif menu == "💰 Gastos" and _es_yuri:
         seccion_gastos_plataforma()
+    elif menu == "🔁 Reinversiones" and _es_yuri:
+        seccion_reinversiones()
     elif menu == "🏦 Deuda Jordi Chaparro":
         seccion_deuda_jordi()
     elif menu == "✨ Asistente IA":
