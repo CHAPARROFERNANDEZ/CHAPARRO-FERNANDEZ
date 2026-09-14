@@ -546,6 +546,10 @@ Luego recarga el Excel desde el menú Gestión de Excel.
         return
 
     # ── Credenciales Gmail ────────────────────────────────────────────────────
+    # Orden de prioridad: 1) st.secrets (secrets.toml), 2) variables de entorno
+    # de Railway (SMTP_SENDER/SMTP_PASSWORD), 3) formulario manual en la app.
+    # Mismo patrón que _credenciales_smtp_reinversion(), para tener una única
+    # fuente de verdad entre el envío de extractos y la alerta de reinversiones.
     secrets_ok = False
     try:
         smtp_sender   = st.secrets["email"]["sender"]
@@ -554,7 +558,14 @@ Luego recarga el Excel desde el menú Gestión de Excel.
         st.success(f"✅ Gmail configurado: **{smtp_sender}**")
         secrets_ok = True
     except Exception:
-        pass
+        env_sender   = os.environ.get("SMTP_SENDER", "")
+        env_password = os.environ.get("SMTP_PASSWORD", "")
+        if env_sender and env_password:
+            smtp_sender   = env_sender
+            smtp_password = env_password
+            display_name  = os.environ.get("SMTP_DISPLAY_NAME", "Chaparro Fernández Wealth")
+            st.success(f"✅ Gmail configurado: **{smtp_sender}**")
+            secrets_ok = True
 
     if not secrets_ok:
         with st.expander("⚙️ Configurar cuenta Gmail", expanded=True):
