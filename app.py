@@ -14457,6 +14457,227 @@ def _sugerir_fecha_inicio_nota(numero_nota: int, df_cal: pd.DataFrame):
     return pd.Timestamp(fecha_sugerida), periodicidad_meses, fuente
 
 
+def transcribir_audio_con_whisper(audio_bytes: bytes, content_type: str = "audio/wav") -> dict:
+    """Transcribe un audio (grabado con st.audio_input) a texto usando la API de Whisper de
+    OpenAI. Requiere el secret OPENAI_API_KEY. Nunca lanza excepción hacia arriba: devuelve
+    {"texto": ...} o {"error": ...}, igual que el resto de funciones de IA de este archivo."""
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return {"error": "Falta el secret OPENAI_API_KEY (necesario para transcribir audio) — añádelo en Railway/secrets.toml."}
+    if not audio_bytes:
+        return {"error": "No se ha recibido ningún audio."}
+
+    extension = {"audio/wav": "wav", "audio/webm": "webm", "audio/mp4": "mp4", "audio/mpeg": "mp3", "audio/ogg": "ogg"}.get(content_type, "wav")
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (f"audio.{extension}", audio_bytes, content_type)},
+            data={"model": "whisper-1", "language": "es"},
+            timeout=90,
+        )
+        data = resp.json()
+    except Exception as e:
+        return {"error": f"Fallo de red al llamar a Whisper: {e}"}
+
+    if "text" not in data:
+        return {"error": data.get("error", {}).get("message", f"Respuesta inesperada de Whisper: {data}")}
+    return {"texto": data["text"].strip()}
+
+
+def extraer_operacion_desde_texto_con_ia(texto: str, df_inv: pd.DataFrame) -> dict:
+    """Envía la transcripción de una nota de voz a Claude y le pide que la interprete como una
+    operación del wizard de 'Nueva inversión' (NUEVA, CANCELADA o REINVERSION), devolviendo
+    ÚNICAMENTE JSON con un esquema fijo — mismo patrón que extraer_datos_gasto_con_ia: si un dato
+    no queda claro en el audio, usa null en vez de inventarlo, y lo apunta en 'notas_revisar' para
+    que se complete a mano en el formulario ya precargado, antes de confirmar nada."""
+    import json as _json
+
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.secrets.get("anthropic", {}).get("api_key", "")
+    if not api_key:
+        return {"error": "Falta el secret ANTHROPIC_API_KEY."}
+    if not texto or not texto.strip():
+        return {"error": "Transcripción vacía."}
+
+    try:
+        inversores_conocidos = sorted(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique().tolist())
+    except Exception:
+        inversores_conocidos = []
+
+    system = f"""Interpretas la transcripción de una nota de voz de Yuri, administrador de Chaparro
+Fernández Wealth, describiendo de forma informal una operación sobre el fondo: dar de alta una
+inversión nueva, cerrar una posición existente, o registrar una reinversión.
+
+Devuelve ÚNICAMENTE un JSON válido, sin texto antes ni después, sin backticks de markdown, con
+este esquema exacto:
+
+{{
+  "tipo_operacion": "NUEVA" | "CANCELADA" | "REINVERSION",
+  "tipo_inversion": "nota" | "paraguay" | "motoclick" | "futbol" | "bolivia" | "bitcoin" | "otro" o null,
+  "numero_nota": number o null (solo si tipo_inversion es "nota"),
+  "nombre_activo": string o null (solo si tipo_inversion NO es "nota"),
+  "fecha_inversion": "YYYY-MM-DD" o null,
+  "tasa_anual_activo_pct": number o null (el cupón de la nota, o la tasa que el activo rinde a la empresa),
+  "inversores": [
+    {{
+      "inversor": string (nombre EXACTO tal como aparece en la lista de inversores conocidos si hay coincidencia clara; si no, el nombre tal como se dijo),
+      "capital": number o null,
+      "tasa_inversor_pct": number o null (tasa anual que se le paga a ESTE inversor),
+      "pago_intereses": "reinvierte" | "paga" o null,
+      "capital_nuevo_real": "si" | "no" o null
+    }}
+  ],
+  "inversor": string o null (SOLO si tipo_operacion es "CANCELADA": de quién es la posición a cerrar),
+  "nombre_activo_o_nota": string o null (SOLO si tipo_operacion es "CANCELADA": qué activo o nota, ej. "NOTA_12" o "MotoClick"),
+  "fecha_final_inversion": "YYYY-MM-DD" o null (SOLO si tipo_operacion es "CANCELADA"; si no se menciona, usa la fecha de hoy),
+  "motivo": string o null (SOLO si tipo_operacion es "CANCELADA": call, vencimiento, retiro, traspaso...),
+  "notas_revisar": string o null — cualquier dato ambiguo, no mencionado o deducido que se debería revisar a mano antes de confirmar
+}}
+
+INVERSORES CONOCIDOS EN EL SISTEMA (usa el nombre EXACTO de esta lista si el audio se refiere claramente a uno de ellos):
+{', '.join(inversores_conocidos) if inversores_conocidos else '(sin datos)'}
+
+REGLAS IMPORTANTES:
+- Roberto Viscafe, Crowe Bolivia y JR Real Estate tienen tasa escalonada en el tiempo (5% → 7.5% → 10% desde el 1 julio 2026) — si el audio no da un porcentaje explícito para ellos, deja tasa_inversor_pct en null y dilo en notas_revisar en vez de adivinar.
+- Nunca inventes un capital, una fecha o un porcentaje que no se haya dicho o no se pueda deducir con seguridad — usa null y explícalo en notas_revisar.
+- "nombre_activo"/"nombre_activo_o_nota" solo lleva el nombre del activo (ej. "Paraguay", "MotoClick"), nunca el número de nota si tipo_inversion es "nota" — eso va en "numero_nota".
+- Si el audio menciona varios inversores en la misma operación, añade una entrada por cada uno en "inversores".
+- No añadas ningún campo fuera del esquema. No expliques nada fuera del JSON."""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 1500,
+                "system": system,
+                "messages": [{"role": "user", "content": f"Transcripción de la nota de voz:\n\n{texto}"}],
+            },
+            timeout=60,
+        )
+        data = resp.json()
+    except Exception as e:
+        return {"error": f"Fallo de red al llamar a Claude: {e}"}
+
+    texto_resp = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    if not texto_resp:
+        return {"error": data.get("error", {}).get("message", "La IA no devolvió ninguna respuesta.")}
+
+    texto_limpio = texto_resp.strip()
+    if texto_limpio.startswith("```"):
+        texto_limpio = texto_limpio.strip("`")
+        if texto_limpio.lower().startswith("json"):
+            texto_limpio = texto_limpio[4:]
+    try:
+        return _json.loads(texto_limpio)
+    except Exception as e:
+        return {"error": f"No se pudo interpretar la respuesta de la IA como JSON: {e}", "respuesta_cruda": texto_resp}
+
+
+def _prefill_wizard_nueva_inversion_desde_datos(datos: dict, df_inv: pd.DataFrame):
+    """Vuelca el JSON extraído de la transcripción de voz en las claves de session_state que usan
+    los widgets del wizard de 'Nueva inversión' (rama NUEVA/REINVERSION), para que el formulario
+    aparezca precargado en el siguiente rerun. NO escribe nada en Excel — solo prellena inputs que
+    se revisan y confirman a mano exactamente igual que si se hubieran escrito uno a uno."""
+    tipo_inv = str(datos.get("tipo_inversion", "") or "").strip().lower()
+    opciones_tipo = ["nota", "paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "otro"]
+    if tipo_inv in opciones_tipo:
+        st.session_state["ni_tipo_inv_sel"] = tipo_inv
+    elif tipo_inv:
+        st.session_state["ni_tipo_inv_sel"] = "otro"
+        st.session_state["ni_tipo_inv_libre"] = datos.get("tipo_inversion", "")
+
+    if tipo_inv == "nota" and datos.get("numero_nota") is not None:
+        try:
+            st.session_state["ni_numero_nota"] = int(datos["numero_nota"])
+        except (TypeError, ValueError):
+            pass
+    elif tipo_inv and tipo_inv != "nota" and datos.get("nombre_activo"):
+        st.session_state["ni_nombre_activo_libre"] = datos["nombre_activo"]
+
+    if datos.get("fecha_inversion"):
+        try:
+            st.session_state["ni_fecha_inicio"] = pd.to_datetime(datos["fecha_inversion"]).date()
+        except Exception:
+            pass
+
+    if datos.get("tasa_anual_activo_pct") is not None:
+        clave_tasa = "ni_interes_nota" if tipo_inv == "nota" else "ni_interes_activo"
+        try:
+            st.session_state[clave_tasa] = float(datos["tasa_anual_activo_pct"])
+        except (TypeError, ValueError):
+            pass
+
+    inversores = datos.get("inversores") or []
+    if inversores:
+        st.session_state["ni_num_inversores"] = len(inversores)
+        try:
+            inversores_conocidos = sorted(df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique().tolist())
+        except Exception:
+            inversores_conocidos = []
+        for i, inv in enumerate(inversores):
+            nombre = str(inv.get("inversor", "") or "").strip().upper()
+            if nombre in inversores_conocidos:
+                st.session_state[f"ni_inversor_sel_{i}"] = nombre
+            elif nombre:
+                st.session_state[f"ni_inversor_sel_{i}"] = "Otro (escribir)"
+                st.session_state[f"ni_inversor_libre_{i}"] = nombre
+            if inv.get("capital") is not None:
+                try:
+                    st.session_state[f"ni_capital_{i}"] = float(inv["capital"])
+                except (TypeError, ValueError):
+                    pass
+            if inv.get("tasa_inversor_pct") is not None:
+                try:
+                    st.session_state[f"ni_interes_inversor_{i}"] = float(inv["tasa_inversor_pct"])
+                except (TypeError, ValueError):
+                    pass
+            if inv.get("pago_intereses") in ("reinvierte", "paga"):
+                st.session_state[f"ni_pago_intereses_{i}"] = inv["pago_intereses"]
+            if inv.get("capital_nuevo_real") in ("si", "no"):
+                st.session_state[f"ni_capital_real_{i}"] = inv["capital_nuevo_real"]
+
+
+def _prefill_wizard_cancelada_desde_datos(datos: dict, df_inv: pd.DataFrame):
+    """Best-effort para operaciones de cierre/modificación dichas por voz: intenta localizar la
+    posición activa que coincide con el inversor y el activo/nota mencionados, y precarga la
+    selección exacta del wizard de cierre (rama CANCELADA). Si no hay una coincidencia única,
+    deja la selección en blanco para elegirla a mano — nunca cierra ninguna posición por sí sola."""
+    if datos.get("fecha_final_inversion"):
+        try:
+            st.session_state["cancelada_fecha_final"] = pd.to_datetime(datos["fecha_final_inversion"]).date()
+        except Exception:
+            pass
+    if datos.get("motivo"):
+        st.session_state["cancelada_motivo_libre"] = datos["motivo"]
+        st.session_state["cancelada_motivo_sel"] = "Otro (escribir)"
+
+    activas = _posiciones_activas_para_cerrar(df_inv)
+    if activas.empty:
+        return
+    inv_buscado = str(datos.get("inversor", "") or "").strip().upper()
+    activo_buscado = str(datos.get("nombre_activo_o_nota", "") or "").strip().upper()
+    candidatas = activas.copy()
+    if inv_buscado:
+        candidatas = candidatas[candidatas["inversor"].astype(str).str.upper().str.contains(inv_buscado, na=False)]
+    if activo_buscado:
+        candidatas = candidatas[candidatas["nombre_activo"].astype(str).str.upper().str.contains(activo_buscado, na=False)]
+
+    if len(candidatas) == 1:
+        st.session_state["cancelada_modo"] = "Una posición en concreto"
+        fila = candidatas.iloc[0]
+        etiqueta = (
+            f"{fila.get('id_inversion','?')} | {fila.get('inversor','?')} | {fila.get('nombre_activo','?')} | "
+            f"${float(fila.get('capital_invertido',0) or 0):,.2f} | desde "
+            f"{pd.Timestamp(fila['fecha_inversion']).strftime('%d/%m/%Y') if pd.notna(fila.get('fecha_inversion')) else '?'}"
+        )
+        st.session_state["cancelada_posicion_sel"] = etiqueta
+    elif len(candidatas) > 1 and activo_buscado:
+        st.session_state["cancelada_modo"] = "TODAS las posiciones activas de un mismo activo/nota (útil para un call)"
+        st.session_state["cancelada_activo_sel"] = candidatas.iloc[0]["nombre_activo"]
+
+
 def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_control: pd.DataFrame):
     """Alta/cierre/reinversión de posiciones directamente desde la app, escribiendo en Google Drive
     con el mismo patrón que el wizard de 'Notas estructuradas': primero se guarda como BORRADOR
@@ -14510,6 +14731,39 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
     clave = clave.strip() or st.session_state["inversion_wizard_clave_actual"]
     st.session_state["inversion_wizard_clave_actual"] = clave
     datos_previos = st.session_state["inversion_wizard_datos"] if st.session_state.get("inversion_wizard_clave_actual") == clave else {}
+
+    st.markdown("---")
+
+    with st.expander("🎤 Rellenar por voz (opcional)", expanded=False):
+        st.caption(
+            "Graba un audio explicando la operación tal como se la contarías a un compañero — quién "
+            "invierte, cuánto, en qué activo o nota, desde cuándo y a qué tasa (o, para cerrar una "
+            "posición, de quién y por qué motivo). Se transcribe, se interpreta y se precarga el "
+            "formulario de abajo — tú lo revisas y confirmas igual que siempre; nada se escribe en "
+            "el Excel automáticamente."
+        )
+        audio_valor = st.audio_input("Graba la operación", key="ni_audio_input")
+        if audio_valor is not None and st.button("🪄 Transcribir y rellenar formulario", key="ni_voz_procesar"):
+            with st.spinner("Transcribiendo..."):
+                resultado_transcripcion = transcribir_audio_con_whisper(audio_valor.getvalue(), audio_valor.type or "audio/wav")
+            if resultado_transcripcion.get("error"):
+                st.error(f"No se pudo transcribir: {resultado_transcripcion['error']}")
+            else:
+                st.info(f"Transcripción: _{resultado_transcripcion['texto']}_")
+                with st.spinner("Interpretando la operación..."):
+                    datos_voz = extraer_operacion_desde_texto_con_ia(resultado_transcripcion["texto"], df_inv)
+                if datos_voz.get("error"):
+                    st.error(f"No se pudo interpretar: {datos_voz['error']}")
+                else:
+                    if datos_voz.get("notas_revisar"):
+                        st.warning(f"⚠️ Revisa esto antes de confirmar: {datos_voz['notas_revisar']}")
+                    tipo_op_voz = datos_voz.get("tipo_operacion", "NUEVA")
+                    st.session_state["inversion_wizard_datos"] = {"tipo_operacion": tipo_op_voz}
+                    if tipo_op_voz == "CANCELADA":
+                        _prefill_wizard_cancelada_desde_datos(datos_voz, df_inv)
+                    else:
+                        _prefill_wizard_nueva_inversion_desde_datos(datos_voz, df_inv)
+                    st.rerun()
 
     st.markdown("---")
 
