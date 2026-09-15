@@ -14176,11 +14176,33 @@ def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
 HOJA_REPARTO_DIVIDENDOS = "REPARTO_DIVIDENDOS"
 
 
+def _normalizar_pagador_dividendo(valor) -> str:
+    """Normaliza la columna 'pagado_por' de REPARTO_DIVIDENDOS.
+
+    Cualquier variante reconocible de "Chaparro Fernandez" (con o sin acentos,
+    guion, "CF", "fondo"...) se normaliza a "Chaparro Fernandez". Cualquier otra
+    cosa —incluido vacío, para no romper filas antiguas que no tenían esta
+    columna— se trata como "Jordi", que es el comportamiento que ya tenía la app.
+    """
+    txt = str(valor or "").strip().lower()
+    txt = (txt.replace("á", "a").replace("é", "e").replace("í", "i")
+              .replace("ó", "o").replace("ú", "u"))
+    if txt in ("chaparro fernandez", "chaparro-fernandez", "chaparrofernandez",
+               "cf", "fondo", "chaparro fernandez wealth"):
+        return "Chaparro Fernandez"
+    return "Jordi"
+
+
 def cargar_reparto_dividendos() -> pd.DataFrame:
     """Lee la hoja REPARTO_DIVIDENDOS del Excel.
-    Columnas esperadas: fecha, importe, descripcion.
-    Cada fila es un reparto de dividendos que AUMENTA la deuda con Jordi,
-    igual que los intereses de JEP.
+    Columnas esperadas: fecha, importe, descripcion, pagado_por.
+
+    pagado_por indica quién paga ese reparto de dividendos:
+      - "Jordi": el reparto AUMENTA la deuda con Jordi, igual que los intereses
+        de JEP (comportamiento histórico, y el que se aplica por defecto si la
+        columna no existe o la celda está vacía, para no alterar filas antiguas).
+      - "Chaparro Fernandez": no afecta a la deuda con Jordi en ningún sitio,
+        es solo un apunte informativo para llevar el control.
     """
     try:
         df = pd.read_excel(ARCHIVO, sheet_name=HOJA_REPARTO_DIVIDENDOS)
@@ -14189,9 +14211,12 @@ def cargar_reparto_dividendos() -> pd.DataFrame:
         df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
         if "descripcion" not in df.columns:
             df["descripcion"] = ""
+        if "pagado_por" not in df.columns:
+            df["pagado_por"] = "Jordi"
+        df["pagado_por"] = df["pagado_por"].apply(_normalizar_pagador_dividendo)
         return df.dropna(subset=["fecha"])
     except Exception:
-        return pd.DataFrame(columns=["fecha", "importe", "descripcion"])
+        return pd.DataFrame(columns=["fecha", "importe", "descripcion", "pagado_por"])
 
 
 def cargar_transferencias_jordi() -> pd.DataFrame:
@@ -14217,14 +14242,17 @@ def cargar_transferencias_jordi() -> pd.DataFrame:
 
 def _reparto_dividendos_mes(df_rep, anio, mes):
     """
-    Total de reparto de dividendos del mes (aumenta la deuda con Jordi).
+    Total de reparto de dividendos del mes que AUMENTA la deuda con Jordi.
+    Solo cuentan las filas con pagado_por == "Jordi"; las pagadas por
+    Chaparro Fernandez son solo un apunte informativo (no tocan la deuda).
     Devuelve (total, {descripcion: importe})
     """
     if df_rep.empty:
         return 0.0, {}
     mes_rows = df_rep[
         (df_rep["fecha"].dt.year == anio) &
-        (df_rep["fecha"].dt.month == mes)
+        (df_rep["fecha"].dt.month == mes) &
+        (df_rep["pagado_por"] == "Jordi")
     ]
     if mes_rows.empty:
         return 0.0, {}
@@ -14300,7 +14328,8 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
     Evolución mes a mes de la deuda con Jordi Chaparro.
     RESTA: beneficio fijos (Paraguay/Motoclick/Futbol/Bolivia) + beneficio notas cuenta JORDI
     SUMA:  intereses devengados a JEP (todos sus activos, pro-rata días)
-           + reparto de dividendos (hoja REPARTO_DIVIDENDOS)
+           + reparto de dividendos pagados por Jordi (hoja REPARTO_DIVIDENDOS,
+             columna pagado_por; los pagados por Chaparro Fernandez no suman)
            + transferencias de Jordi hacia el fondo (hoja TRANSFERENCIAS_JORDI)
     """
     hoy = pd.Timestamp.today().normalize()
@@ -16437,7 +16466,7 @@ def preguntar_asistente_ia_fondo(pregunta: str, df_inv, df_cal, df_control,
 
 7. CHAPARRO FERNANDEZ es la sociedad gestora, no un inversor externo: no cobra interés (0%), todo lo que "cobra" en su nombre es beneficio íntegro del fondo.
 
-8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos), el reparto de dividendos y las transferencias que Jordi le hace al fondo (hoja TRANSFERENCIAS_JORDI, capital que él aporta) AUMENTAN esa deuda — las tres juegan a favor de Jordi con la misma lógica: son dinero o valor que la empresa le debe devolver.
+8. DEUDA CON JORDI CHAPARRO: las notas 1 a 8 se invirtieron con capital personal de Jordi, no del fondo. Cuando esas notas cobran, ese dinero reduce la deuda que el fondo tiene con Jordi (por haber usado su capital inicial). Los intereses devengados a JEP (todos sus activos) y las transferencias que Jordi le hace al fondo (hoja TRANSFERENCIAS_JORDI, capital que él aporta) AUMENTAN esa deuda — juegan a favor de Jordi con la misma lógica: son dinero o valor que la empresa le debe devolver. El reparto de dividendos (hoja REPARTO_DIVIDENDOS) también AUMENTA la deuda, pero solo cuando la columna pagado_por dice "Jordi"; si dice "Chaparro Fernandez" es un dividendo que ya pagó la propia sociedad y no afecta a la deuda con Jordi en ningún cálculo — es solo un apunte informativo de control.
 
 9. MOTOCLICK — CASO ESPECIAL: a diferencia de Paraguay/Bolivia/Fútbol, el ingreso que MotoClick genera para el fondo NO es simplemente capital_invertido × 25% / 12. El capital que los inversores tienen "en el papel" asignado a MotoClick no siempre coincide con el capital que realmente está desplegado ahí día a día (puede haber devoluciones temporales de capital y reinyecciones posteriores). Por eso el ingreso real se calcula con el capital promedio diario efectivamente activo ese mes. El pago al inversor, en cambio, SIEMPRE se mantiene fijo sobre su capital nominal, sin este ajuste — solo el ingreso de la compañía varía.
 
