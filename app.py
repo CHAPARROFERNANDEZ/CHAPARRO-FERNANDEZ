@@ -1021,6 +1021,16 @@ INVERSORES_ADICIONALES_VISIBLES = {
 ADMIN_VISTAS_INVERSOR_ADICIONALES = {
     "YURI": ["PAM"],
     "JORDI": ["JORDI CHAPARRO"],
+    # DEMO ADMIN: desde su panel puede cambiar al portal de inversor real de tres casos
+    # elegidos por ser los más complejos del fondo (datos reales, no ficticios):
+    #  - ROBERTO VISCAFE: tramo de interés escalonado (5%→7,5%→10%) y ve además, desde su
+    #    propio portal, las posiciones de CROWE BOLIVIA y JR REAL ESTATE (también con tramos).
+    #  - JORDI CHAPARRO: además de su posición en el fondo, tiene 8 notas en una cuenta de
+    #    brokerage personal aparte que hay que distinguir de las del fondo; desde su portal
+    #    ve también PAM, JEP, JR REAL ESTATE, 2012 JACC GROUP y JORDI ESPECIAL.
+    #  - PEDRO MAGAÑA: acceso multi-perfil (ve además 2012 JACC GROUP y PAM) y es uno de los
+    #    inversores piloto con verificación en dos pasos activa (ver INVERSORES_CON_2FA).
+    "DEMO ADMIN": ["ROBERTO VISCAFE", "JORDI CHAPARRO", "PEDRO MAGAÑA"],
 }
 
 # Inversores piloto con verificación en dos pasos por email disponible en su portal.
