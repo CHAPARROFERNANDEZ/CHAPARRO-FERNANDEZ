@@ -1026,6 +1026,12 @@ ADMIN_VISTAS_INVERSOR_ADICIONALES = {
 # Inversores piloto con verificación en dos pasos por email disponible en su portal.
 INVERSORES_CON_2FA = {"EVA CHAPARRO", "JORDI CHAPARRO", "PEDRO MAGAÑA"}
 
+# Cuentas de equipo interno (admin) con acceso directo: entran con usuario y contraseña y
+# ya está, sin la pantalla de "cambia tu contraseña temporal" que se le fuerza por defecto a
+# cualquier admin que todavía no tenga fila propia en la hoja USUARIOS de Drive (ver
+# _debe_cambiar_password_login y _completar_login). Pensada para la cuenta DEMO ADMIN.
+USUARIOS_ADMIN_ACCESO_DIRECTO = {"DEMO ADMIN"}
+
 HOJA_USUARIOS = "USUARIOS"
 HOJA_LOG_IA = "LOG_IA_USO"
 HOJA_GASTOS_PLATAFORMA = "GASTOS_PLATAFORMA"
@@ -1237,6 +1243,8 @@ def _debe_cambiar_password_login(usuario: str, tipo: str) -> bool:
     cuenta de equipo interno (admin) que todavía no tiene fila propia en USUARIOS — es decir,
     que sigue entrando con la contraseña temporal definida en el código. Los inversores no se
     ven afectados por esta regla adicional: solo se obliga el cambio si su fila lo marca."""
+    if tipo == "admin" and usuario.strip().upper() in USUARIOS_ADMIN_ACCESO_DIRECTO:
+        return False
     fila = _fila_usuario(_leer_hoja_usuarios(), usuario, tipo)
     if fila is None:
         return tipo == "admin"
@@ -1504,9 +1512,12 @@ def _completar_login(usuario_match: str, tipo: str):
     st.session_state.login_timestamp = time.time()
     st.session_state.ultima_actividad = time.time()
     if tipo == "admin":
-        _df_u_check = _leer_hoja_usuarios()
-        _ya_migrado = _fila_usuario(_df_u_check, usuario_match, "admin") is not None
-        st.session_state.mostrar_aviso_pw_temporal = not _ya_migrado
+        if usuario_match.strip().upper() in USUARIOS_ADMIN_ACCESO_DIRECTO:
+            st.session_state.mostrar_aviso_pw_temporal = False
+        else:
+            _df_u_check = _leer_hoja_usuarios()
+            _ya_migrado = _fila_usuario(_df_u_check, usuario_match, "admin") is not None
+            st.session_state.mostrar_aviso_pw_temporal = not _ya_migrado
     else:
         st.session_state.mostrar_aviso_pw_temporal = False
     st.session_state.forzar_cambio_password = _debe_cambiar_password_login(usuario_match, tipo)
@@ -1884,6 +1895,10 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         "Yuri": "$2b$12$zMHrZeMDoZHdO6uCtIIFEOhsbnM5PvqjkaSyQ/58s.QqwKwfihdcu",
         "Jordi": "$2b$12$YetePZJ1Zh0mvAJ8hMai9eIUJaGhh30bo4/R18zUfp2KjxyYrnQR.",
         "Alan": "$2b$12$I3PbU6.DklNw4bLulPfdVePmVDxZGARbTxTJ/pCxlU5G..TdHOOum",
+        # Cuenta DEMO del portal de administrador: acceso genérico y directo (sin 2FA ni cambio
+        # de contraseña obligatorio, ver USUARIOS_ADMIN_ACCESO_DIRECTO) para pruebas o
+        # presentaciones. Ve el panel de admin real, con los datos reales del fondo.
+        "DEMO ADMIN": "$2b$12$UHaui8DrFqw.dxlfOleLnON27xd/zirdq5aA/cZ5A3NGX..HtVtoq",
     }
     # Portal de inversores: acceso limitado, solo ven su propia posición.
     # El "usuario" debe coincidir exactamente (en mayúsculas) con el valor de la columna 'inversor' en INVERSIONES.
@@ -1907,7 +1922,9 @@ if __name__ == "__main__":  # login y sidebar: solo se ejecuta con `streamlit ru
         "JAPAN JORDI": "$2b$12$sZ1ry3OZmJFoDC5.isu.AOqMWgEKJs7Wu9eU7JSSsChXH0Qn9BmMu",
         # Usuario DEMO: portal con datos 100% ficticios para presentar a inversores potenciales.
         # No corresponde a ningún inversor real ni toca el Excel del fondo (ver _construir_datos_demo_inversor).
-        "DEMO": "$2b$12$2xF3csT1htw4f1N20nZgb.F8/LN7MtfWAp5eynYlYdAZyMlYn9LLa",
+        # Contraseña reseteada a un valor conocido a petición de Yuri (no requiere 2FA ni cambio
+        # de contraseña obligatorio porque no tiene fila propia en la hoja USUARIOS de Drive).
+        "DEMO": "$2b$12$QJx754JfY4EfCZtz/nIYIOA6BczcPg7/FYY062pjVSLVb80YuywTi",
     }
 
     if "autenticado" not in st.session_state:
