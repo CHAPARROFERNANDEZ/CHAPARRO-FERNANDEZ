@@ -58,6 +58,11 @@ HOJA_CALENDARIO = "CALENDARIO_NOTAS"
 HOJA_CONTROL = "CONTROL_NOTAS"
 HOJA_MOTOCLICK = "MOVIMIENTOS_MOTOCLICK"
 HOJA_MOVIMIENTOS_BANCO = "MOVIMIENTOS_BANCO"
+HOJA_TRAMOS_TASA = "TRAMOS_TASA"
+
+# Activos fijos cuyo ingreso NO entra en la cuenta de Jordi y que, por tanto, no deben reducir su
+# deuda en la pantalla "Deuda con Jordi". Se puede cambiar desde la propia pantalla.
+DEUDA_ACTIVOS_EXCLUIDOS_POR_DEFECTO = ("bitcoin",)
 
 TASA_ANUAL_FUTBOL = 0.15
 TASA_ANUAL_MOTOCLICK = 0.25
@@ -2505,11 +2510,53 @@ def _leer_auditoria_notas_cached() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def _leer_movimientos_banco_crudo_cached() -> pd.DataFrame:
+    """Hoja MOVIMIENTOS_BANCO tal cual está guardada, con sus posibles filas duplicadas."""
+    return leer_hoja_excel(HOJA_MOVIMIENTOS_BANCO)
+
+
+def _normalizar_ocurrencia_movimientos_banco(df: pd.DataFrame) -> pd.DataFrame:
+    """Añade/rellena la columna 'ocurrencia': el orden (0, 1, 2...) que ocupa cada movimiento
+    entre los que comparten el mismo id_movimiento dentro de su lote de importación. Dos
+    movimientos idénticos y legítimos del mismo día (mismo importe, activo y concepto) tienen
+    ocurrencias distintas; el mismo movimiento importado dos veces tiene la misma."""
+    df = df.copy()
+    lote = df["fecha_importacion"].fillna("").astype(str) if "fecha_importacion" in df.columns else pd.Series("", index=df.index)
+    calculada = df.groupby([df["id_movimiento"].astype(str), lote]).cumcount()
+    guardada = pd.to_numeric(df["ocurrencia"], errors="coerce") if "ocurrencia" in df.columns else pd.Series(np.nan, index=df.index)
+    df["ocurrencia"] = guardada.fillna(calculada).astype(int)
+    return df
+
+
+def deduplicar_lotes_movimientos_banco(df: pd.DataFrame) -> pd.DataFrame:
+    """Quita los movimientos que se guardaron más de una vez (mismo id_movimiento y misma
+    ocurrencia en lotes de importación distintos), conservando el del lote más antiguo. Es lo
+    que pasó cuando una misma importación se guardó tres veces seguidas: el panel de
+    contabilidad sumaba cada movimiento tres veces."""
+    if df is None or df.empty or "id_movimiento" not in df.columns:
+        return df
+    df = _normalizar_ocurrencia_movimientos_banco(df)
+    lote = df["fecha_importacion"].fillna("").astype(str) if "fecha_importacion" in df.columns else pd.Series("", index=df.index)
+    clave = df["id_movimiento"].astype(str) + "#" + df["ocurrencia"].astype(str)
+    primer_lote = lote.groupby(clave).transform("min")
+    return df[lote == primer_lote].copy()
+
+
+def _claves_movimientos_banco(df: pd.DataFrame) -> set:
+    """Conjunto de (id_movimiento, ocurrencia) ya guardados."""
+    if df is None or df.empty or "id_movimiento" not in df.columns:
+        return set()
+    d = _normalizar_ocurrencia_movimientos_banco(df)
+    return set(zip(d["id_movimiento"].astype(str), d["ocurrencia"].astype(int)))
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def _leer_movimientos_banco_cached() -> pd.DataFrame:
     """Versión cacheada de leer_hoja_excel('MOVIMIENTOS_BANCO') — histórico de movimientos ya
     importados desde extractos del broker (custodio de las notas estructuradas). Vacío si
-    todavía no se ha importado ningún extracto (la hoja ni siquiera existe en el Excel)."""
-    return leer_hoja_excel(HOJA_MOVIMIENTOS_BANCO)
+    todavía no se ha importado ningún extracto (la hoja ni siquiera existe en el Excel).
+    Devuelve los movimientos SIN duplicados de importación (ver deduplicar_lotes_movimientos_banco)."""
+    return deduplicar_lotes_movimientos_banco(leer_hoja_excel(HOJA_MOVIMIENTOS_BANCO))
 
 
 ETIQUETAS_CATEGORIA_BANCO = {
@@ -2520,6 +2567,7 @@ ETIQUETAS_CATEGORIA_BANCO = {
     "APORTACION_CAPITAL": "Aportación de capital",
     "TRASPASO_INTERNO": "Traspaso interno",
     "COMISION_GASTO": "Comisión / gasto",
+    "RETIRADA_FONDOS": "Retirada de fondos",
     "SIN_CLASIFICAR": "Sin clasificar",
 }
 
@@ -2544,11 +2592,20 @@ def clasificar_movimiento_extracto_banco(fila) -> str:
         return "INTERES_COBRADO"
     if tipo == "Trade Activity":
         return "ALTA_INVERSION" if accion == "Buy" else "CANCELACION_INVERSION"
-    if tipo == "Withdrawal":
-        # La mayoría de las salidas vistas hasta ahora son la comisión de Aragon Capital, pero
-        # cualquier "Withdrawal" cae aquí — revisar en la tabla de importación antes de guardar
-        # si el concepto no es una comisión reconocible.
+    if tipo == "Fee":
         return "COMISION_GASTO"
+    if tipo == "Withdrawal":
+        # Solo es comisión si el concepto lo dice (p. ej. "ADVISORY FEE"). Una salida ACH
+        # cualquiera es una retirada de fondos (devolución de un préstamo, pago a un inversor...)
+        # y NO debe inflar el KPI de "Comisiones y gastos". Antes todo "Withdrawal" caía aquí como
+        # comisión, y una devolución de 50.000 $ se contó como gasto.
+        if "FEE" in desc_trans or "COMISI" in desc_trans:
+            return "COMISION_GASTO"
+        return "RETIRADA_FONDOS"
+    if tipo == "Reorganization":
+        # Vencimientos y llamadas (autocall) de notas: devolución de principal. Antes caían en
+        # SIN_CLASIFICAR y el dinero no aparecía en el KPI de cancelaciones.
+        return "CANCELACION_INVERSION"
     if tipo == "Deposit":
         return "APORTACION_CAPITAL"
     if tipo == "Journal":
@@ -2641,18 +2698,49 @@ def mostrar_metricas(titulo, valores):
 # =========================
 # CÁLCULOS ACTIVOS
 # =========================
+# Nombres alternativos de un mismo activo: se unifican para que no se cuente dos veces ni se cree un
+# activo "nuevo" por escribirlo de otra forma (p. ej. el subtipo "ASPIRA" y el nombre "Aspira Capital").
+ALIAS_ACTIVOS = {"fútbol": "futbol", "aspira capital": "aspira", "nexus capital": "nexus"}
+
+
+def _normalizar_activo(valor) -> str:
+    if valor is None or (isinstance(valor, float) and np.isnan(valor)):
+        return ""
+    s = str(valor).strip().lower()
+    if s in ("nan", "none", "nat"):
+        return ""
+    return ALIAS_ACTIVOS.get(s, s)
+
+
+def clave_activo_fila(subtipo, nombre) -> str:
+    """Activo al que pertenece UNA fila. Cada fila cuenta en un solo activo: si el subtipo o el
+    nombre es uno de los activos conocidos (Paraguay, MotoClick, Aspira...) manda ese; si no, el
+    subtipo, y si no hay subtipo, el nombre. Antes una fila con subtipo ASPIRA y nombre "Aspira
+    Capital" aparecía en dos activos a la vez y su ingreso se sumaba dos veces."""
+    conocidos = {clave for clave, _ in ACTIVOS_FIJOS_CONOCIDOS}
+    st_, nm = _normalizar_activo(subtipo), _normalizar_activo(nombre)
+    if st_ in conocidos:
+        return st_
+    if nm in conocidos:
+        return nm
+    return st_ or nm
+
+
 def filtrar_activo(df_base: pd.DataFrame, activo: str) -> pd.DataFrame:
-    activo_l = activo.lower()
+    activo_l = _normalizar_activo(activo)
     subtipo = df_base.get("subtipo_inversion", pd.Series(index=df_base.index, dtype=str)).astype(str).str.lower()
     nombre = df_base.get("nombre_activo", pd.Series(index=df_base.index, dtype=str)).astype(str).str.lower()
-    if activo_l == "futbol":
-        return df_base[subtipo.isin(["futbol", "fútbol"]) | nombre.isin(["futbol", "fútbol"])].copy()
     if activo_l == "prestamo":
         return df_base[
             subtipo.str.contains("prestamo", na=False) | subtipo.str.contains("préstamo", na=False) |
             nombre.str.contains("prestamo", na=False) | nombre.str.contains("préstamo", na=False)
         ].copy()
-    return df_base[subtipo.eq(activo_l) | nombre.eq(activo_l)].copy()
+    claves = pd.Series(
+        [clave_activo_fila(s, n) for s, n in zip(df_base.get("subtipo_inversion", pd.Series(index=df_base.index, dtype=object)),
+                                                 df_base.get("nombre_activo", pd.Series(index=df_base.index, dtype=object)))],
+        index=df_base.index, dtype=object,
+    )
+    return df_base[claves.eq(activo_l)].copy()
 
 
 ACTIVOS_FIJOS_CONOCIDOS = [
@@ -2684,12 +2772,98 @@ def lista_activos_fijos(df_inv: pd.DataFrame) -> list:
         base = df_inv[~tipo_l.isin(["nota", "prestamo", "préstamo"])]
     else:
         base = df_inv
-    for col in ("subtipo_inversion", "nombre_activo"):
-        if base is not None and col in base.columns:
-            for val in base[col].dropna().astype(str).str.strip().str.lower().unique():
-                if val and val not in excluir:
-                    descubiertos.add(val)
+    if base is not None and ("subtipo_inversion" in base.columns or "nombre_activo" in base.columns):
+        subtipos = base["subtipo_inversion"] if "subtipo_inversion" in base.columns else pd.Series("", index=base.index)
+        nombres = base["nombre_activo"] if "nombre_activo" in base.columns else pd.Series("", index=base.index)
+        for s, n in zip(subtipos, nombres):
+            clave = clave_activo_fila(s, n)
+            if clave and clave not in excluir:
+                descubiertos.add(clave)
     return ACTIVOS_FIJOS_CONOCIDOS + [(clave, None) for clave in sorted(descubiertos)]
+
+
+# Etiquetas para mostrar y orden estable de los activos fijos. Cualquier activo nuevo que aparezca
+# en el Excel (Nexus, Aeropostal, el siguiente...) se muestra solo, con su nombre en formato título
+# si no está en este diccionario: ya no hay que tocar listas a mano en cada pantalla.
+def avisos_activos_fijos(df_inv) -> list:
+    """Avisos sobre activos fijos nuevos que no van a contar bien: sin tasa_empresa_anual (cuentan
+    como capital pero no generan ingresos), tasa escrita en % en vez de decimal, o nombre que
+    empieza por "nota" sin ser una nota (se clasificaría como nota)."""
+    avisos = []
+    if df_inv is None or df_inv.empty:
+        return avisos
+    base = df_inv.copy()
+    sub = base["subtipo_inversion"] if "subtipo_inversion" in base.columns else pd.Series("", index=base.index)
+    nom = base["nombre_activo"] if "nombre_activo" in base.columns else pd.Series("", index=base.index)
+    tipo = base["tipo_inversion"].astype(str).str.strip().str.lower() if "tipo_inversion" in base.columns else pd.Series("", index=base.index)
+    base["_clave"] = [clave_activo_fila(s, n) for s, n in zip(sub, nom)]
+    conocidos = {clave for clave, _ in ACTIVOS_FIJOS_CONOCIDOS}
+    ignorar = conocidos | {"notas", "nota", "otros", ""}
+    es_nuevo = (
+        ~tipo.isin(["nota", "prestamo", "préstamo"])
+        & ~base["_clave"].isin(ignorar)
+        & ~base["_clave"].str.contains("prestamo|préstamo", regex=True)
+    )
+    nuevos = base[es_nuevo]
+    if nuevos.empty:
+        return avisos
+    tasa = pd.to_numeric(nuevos["tasa_empresa_anual"], errors="coerce") if "tasa_empresa_anual" in nuevos.columns else pd.Series(np.nan, index=nuevos.index)
+    for clave, g in nuevos.groupby("_clave"):
+        t = tasa.loc[g.index]
+        sin_tasa = g[t.isna() | (t <= 0)]
+        if len(sin_tasa):
+            ids = ", ".join(sin_tasa["id_inversion"].astype(str).head(5))
+            avisos.append(f"{etiqueta_activo(clave)}: {len(sin_tasa)} inversión(es) sin tasa_empresa_anual ({ids}). Cuentan como capital pero no generan ingresos hasta que la rellenes (en decimal, p. ej. 0,25).")
+        en_porcentaje = g[t > 1]
+        if len(en_porcentaje):
+            ids = ", ".join(en_porcentaje["id_inversion"].astype(str).head(5))
+            avisos.append(f"{etiqueta_activo(clave)}: tasa_empresa_anual parece estar en % ({ids}). Debe ir en decimal, p. ej. 0,25 y no 25.")
+        if str(clave).startswith("nota"):
+            avisos.append(f"{etiqueta_activo(clave)}: el nombre empieza por \"nota\" sin ser una nota estructurada; la app lo clasificará como nota en el capital. Cámbiale el nombre.")
+    return avisos
+
+
+def mostrar_avisos_activos_fijos(df_inv):
+    try:
+        for aviso in avisos_activos_fijos(df_inv)[:8]:
+            st.warning(aviso)
+    except Exception:
+        pass
+
+
+ETIQUETAS_ACTIVOS = {
+    "paraguay": "Paraguay", "motoclick": "MotoClick", "futbol": "Fútbol",
+    "bolivia": "Bolivia", "bitcoin": "Bitcoin", "aspira": "Aspira Capital",
+    "aeropostal": "Aeropostal", "nexus": "Nexus",
+}
+ORDEN_ACTIVOS_FIJOS = ["futbol", "motoclick", "paraguay", "bolivia", "bitcoin", "aspira"]
+
+
+def etiqueta_activo(clave) -> str:
+    return ETIQUETAS_ACTIVOS.get(str(clave).strip().lower(), str(clave).strip().title())
+
+
+def claves_activos_fijos(df_inv) -> list:
+    """Claves de todos los activos fijos (los conocidos y los descubiertos en el Excel), con los
+    de siempre en su orden habitual y los nuevos detrás."""
+    # Los préstamos tienen su propia opción ("Préstamo"): no se repiten como activo fijo.
+    claves = [clave for clave, _ in lista_activos_fijos(df_inv) if "prestamo" not in clave and "préstamo" not in clave]
+    return [c for c in ORDEN_ACTIVOS_FIJOS if c in claves] + [c for c in claves if c not in ORDEN_ACTIVOS_FIJOS]
+
+
+def tasas_fijas_activos_pct(df_inv) -> dict:
+    """{clave: tasa anual de la empresa en %}. Los conocidos usan su constante; los descubiertos,
+    la mediana de tasa_empresa_anual de sus filas (para precargar el alta de una inversión nueva)."""
+    tasas = {clave: float(tasa) * 100 for clave, tasa in ACTIVOS_FIJOS_CONOCIDOS}
+    if df_inv is not None and "tasa_empresa_anual" in df_inv.columns:
+        for clave, tasa in lista_activos_fijos(df_inv):
+            if tasa is None:
+                valores = pd.to_numeric(filtrar_activo(df_inv, clave)["tasa_empresa_anual"], errors="coerce").dropna()
+                valores = valores[valores > 0]
+                if not valores.empty:
+                    m = float(valores.median())
+                    tasas[clave] = m * 100 if m <= 1 else m
+    return tasas
 
 
 def dias_activos_en_mes(fecha_inicio, fecha_fin, anio: int, mes: int) -> int:
@@ -4750,17 +4924,101 @@ def _filtrar_notas_activas_en_mes(df_inv: pd.DataFrame, inicio_mes, fin_mes) -> 
     ].copy()
 
 
+# Tramos de tasa por inversor. Hasta ahora estaban escritos a mano en tres sitios del código
+# (extractos, pago a inversores y asistente) y NO dependían del Excel. Ahora hay una sola fuente:
+# la hoja TRAMOS_TASA (columnas inversor, fecha_inicio, fecha_fin, tasa_anual; fecha vacía = sin
+# límite; tasa como 0,075 o 7,5). Si la hoja no existe o está vacía se usan estos mismos valores,
+# así que el comportamiento no cambia hasta que se cree la hoja.
+TRAMOS_TASA_POR_DEFECTO = {
+    "ROBERTO VISCAFE": [(None, "2026-01-31", 0.05), ("2026-02-01", "2026-06-30", 0.075), ("2026-07-01", None, 0.10)],
+    "CROWE BOLIVIA":   [(None, "2026-01-31", 0.05), ("2026-02-01", "2026-06-30", 0.075), ("2026-07-01", None, 0.10)],
+    "JR REAL ESTATE":  [(None, "2026-01-31", 0.05), ("2026-02-01", "2026-06-30", 0.075), ("2026-07-01", None, 0.10)],
+}
+_FECHA_MIN_TRAMOS = pd.Timestamp("1900-01-01")
+_FECHA_MAX_TRAMOS = pd.Timestamp("2100-12-31")
+
+
+def _fecha_tramo(valor, por_defecto):
+    if valor is None or (isinstance(valor, float) and np.isnan(valor)) or str(valor).strip() in ("", "NaT", "nan", "None"):
+        return por_defecto
+    if isinstance(valor, (pd.Timestamp, datetime)):
+        return pd.Timestamp(valor).normalize()
+    texto = str(valor).strip()
+    for formato in ("%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return pd.to_datetime(texto, format=formato).normalize()
+        except Exception:
+            pass
+    f = pd.to_datetime(texto, errors="coerce")
+    return por_defecto if pd.isna(f) else f.normalize()
+
+
+def tramos_tasa_por_defecto_normalizados() -> dict:
+    return {
+        inv: [(_fecha_tramo(i, _FECHA_MIN_TRAMOS), _fecha_tramo(f, _FECHA_MAX_TRAMOS), float(t)) for i, f, t in lista]
+        for inv, lista in TRAMOS_TASA_POR_DEFECTO.items()
+    }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _leer_tramos_tasa_cached() -> pd.DataFrame:
+    return leer_hoja_excel(HOJA_TRAMOS_TASA)
+
+
+def obtener_tramos_tasa() -> dict:
+    """{INVERSOR: [(inicio, fin, tasa_anual), ...]} ordenados por fecha. Fuente: hoja TRAMOS_TASA;
+    si no existe o no tiene filas válidas, los valores por defecto de TRAMOS_TASA_POR_DEFECTO."""
+    try:
+        df = _leer_tramos_tasa_cached()
+    except Exception:
+        df = pd.DataFrame()
+    tramos = {}
+    if df is not None and not df.empty and {"inversor", "tasa_anual"}.issubset(df.columns):
+        for _, r in df.iterrows():
+            inv = str(r.get("inversor", "")).strip().upper()
+            tasa = pd.to_numeric(r.get("tasa_anual"), errors="coerce")
+            if not inv or pd.isna(tasa):
+                continue
+            tasa = float(tasa)
+            if tasa > 1:
+                tasa = tasa / 100.0
+            tramos.setdefault(inv, []).append((
+                _fecha_tramo(r.get("fecha_inicio"), _FECHA_MIN_TRAMOS),
+                _fecha_tramo(r.get("fecha_fin"), _FECHA_MAX_TRAMOS),
+                tasa,
+            ))
+    if not tramos:
+        return tramos_tasa_por_defecto_normalizados()
+    return {inv: sorted(lista, key=lambda x: x[0]) for inv, lista in tramos.items()}
+
+
+def tramos_de_inversor(inversor) -> list:
+    """Tramos de tasa del inversor, o lista vacía si usa la tasa fija de su fila."""
+    return obtener_tramos_tasa().get(str(inversor).strip().upper(), [])
+
+
+def interes_con_tramos(capital, inicio_calc, fin_calc, dias_mes, tramos, redondear=False) -> float:
+    """Interés de un periodo [inicio_calc, fin_calc] (ambos incluidos) dentro de un mes de
+    dias_mes días, sumando cada tramo de tasa que se solape con el periodo."""
+    total = 0.0
+    inicio_calc = pd.Timestamp(inicio_calc)
+    fin_calc = pd.Timestamp(fin_calc)
+    for ini, fin, tasa in tramos:
+        a = max(inicio_calc, ini)
+        b = min(fin_calc, fin)
+        if a > b:
+            continue
+        dias = (b - a).days + 1
+        parte = (capital * tasa / 12) * dias / dias_mes
+        total += round(parte, 2) if redondear else parte
+    return total
+
+
 def _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes) -> float:
     """Pago devengado a UN inversor de UNA fila de nota en el mes (pro-rata de dias +
     tramo de tipos Biscafe/Crowe Bolivia/JR Real Estate). Fuente unica: la usan tanto
     pago_inversores_notas_mes (total agregado) como el detalle prorrateado de ingresos,
     para que el pago al inversor sea siempre identico se mire por donde se mire."""
-    INVERSORES_TRAMO = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
-    FIN_T1 = pd.Timestamp("2026-01-31")
-    INI_T2 = pd.Timestamp("2026-02-01")
-    FIN_T2 = pd.Timestamp("2026-06-30")
-    INI_T3 = pd.Timestamp("2026-07-01")
-
     if es_chaparro_fernandez_row(row):
         return 0.0
     capital = float(row.get("capital_invertido", 0) or 0)
@@ -4770,24 +5028,9 @@ def _pago_inversor_nota_devengo(row, inicio_mes, fin_mes, dias_mes) -> float:
         return 0.0
     dias = (fin_calc - inicio_calc).days + 1
     inv_upper = str(row.get("inversor", "")).strip().upper()
-    if inv_upper in INVERSORES_TRAMO:
-        pago = 0.0
-        # Tramo 1: hasta 31/01/2026 -> 5%
-        if inicio_calc <= FIN_T1:
-            d1 = (min(fin_calc, FIN_T1) - inicio_calc).days + 1
-            pago += (capital * 0.05 / 12) * d1 / dias_mes
-        # Tramo 2: 01/02/2026 - 30/06/2026 -> 7.5%
-        ini_t2 = max(inicio_calc, INI_T2)
-        fin_t2 = min(fin_calc, FIN_T2)
-        if ini_t2 <= fin_t2:
-            d2 = (fin_t2 - ini_t2).days + 1
-            pago += (capital * 0.075 / 12) * d2 / dias_mes
-        # Tramo 3: desde 01/07/2026 -> 10%
-        if fin_calc >= INI_T3:
-            ini_t3 = max(inicio_calc, INI_T3)
-            d3 = (fin_calc - ini_t3).days + 1
-            pago += (capital * 0.10 / 12) * d3 / dias_mes
-        return pago
+    tramos_inv = tramos_de_inversor(inv_upper)
+    if tramos_inv:
+        return interes_con_tramos(capital, inicio_calc, fin_calc, dias_mes, tramos_inv, redondear=False)
     tasa = float(row.get("interes_inversor_anual", 0) or 0)
     return (capital * tasa / 12) * dias / dias_mes
 
@@ -5095,11 +5338,7 @@ def detectar_activo(row):
         return "notas"
     if tipo == "prestamo" or "prestamo" in subtipo or "préstamo" in subtipo or "prestamo" in nombre or "préstamo" in nombre:
         return "prestamo"
-    if subtipo:
-        return "futbol" if subtipo == "fútbol" else subtipo
-    if nombre:
-        return "futbol" if nombre == "fútbol" else nombre
-    return "otros"
+    return clave_activo_fila(subtipo, nombre) or "otros"
 
 
 def inversiones_activas_global(df_inv: pd.DataFrame, fecha=None) -> pd.DataFrame:
@@ -6013,16 +6252,9 @@ def obtener_resumen_dashboard(df_inv, df_cal, df_control, anio: int | None = Non
         rentabilidad_por_activo = pd.DataFrame()
 
     # Si el dashboard se filtra por activo, recalculamos los KPIs sobre ese bloque concreto.
-    mapa_vista_activo = {
-        "Notas": "notas",
-        "Fútbol": "futbol",
-        "MotoClick": "motoclick",
-        "Paraguay": "paraguay",
-        "Bolivia": "bolivia",
-        "Bitcoin": "bitcoin",
-        "Aspira Capital": "aspira",
-        "Préstamo": "prestamo",
-    }
+    mapa_vista_activo = {"Notas": "notas", "Préstamo": "prestamo"}
+    for _clave_activo in claves_activos_fijos(df_inv):
+        mapa_vista_activo[etiqueta_activo(_clave_activo)] = _clave_activo
     activo_filtrado = mapa_vista_activo.get(str(vista_activo), None)
     if activo_filtrado:
         activas = activas[activas["activo"] == activo_filtrado].copy() if not activas.empty and "activo" in activas.columns else pd.DataFrame()
@@ -6575,7 +6807,7 @@ def seccion_historico_y_proyecciones():
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
     fecha_inicio = pd.Timestamp(c1.date_input("Desde", value=fecha_inicio_default.date(), key="hist_proj_desde")).normalize()
     fecha_fin = pd.Timestamp(c2.date_input("Hasta", value=fecha_fin_default.date(), key="hist_proj_hasta")).normalize()
-    activo_filtro = c3.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol", "bitcoin"], key="hist_proj_activo")
+    activo_filtro = c3.selectbox("Activo", ["Todos", "notas"] + claves_activos_fijos(df_inv), key="hist_proj_activo")
     incluir_chaparro = c4.checkbox(
         "Incluir Chaparro Fernández",
         value=False,
@@ -6773,10 +7005,40 @@ def boton_descarga_excel(df: pd.DataFrame, nombre_archivo: str, label: str = "�
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
+def obtener_venta_bitcoin_etf():
+    """Venta del ETF de Bitcoin según los movimientos del broker importados (MOVIMIENTOS_BANCO):
+    una entrada positiva de cancelación/venta del ETF posterior a la compra. Devuelve
+    {"fecha", "importe", "ganancia_realizada", "rentabilidad_%"} o None si todavía no se ha vendido."""
+    try:
+        mov = _leer_movimientos_banco_cached()
+    except Exception:
+        return None
+    if mov is None or mov.empty or "monto" not in mov.columns:
+        return None
+    m = mov.copy()
+    m["fecha"] = pd.to_datetime(m.get("fecha"), errors="coerce")
+    m["monto"] = pd.to_numeric(m["monto"], errors="coerce").fillna(0)
+    texto = (m.get("emisor", pd.Series("", index=m.index)).fillna("").astype(str) + " " +
+             m.get("descripcion", pd.Series("", index=m.index)).fillna("").astype(str)).str.upper()
+    ventas = m[(m["monto"] > 0) & texto.str.contains("BITCOIN", regex=False) & (m["fecha"] >= BITCOIN_ETF_FECHA_COMPRA)]
+    if ventas.empty:
+        return None
+    v = ventas.sort_values("fecha").iloc[-1]
+    importe = float(v["monto"])
+    ganancia = importe - BITCOIN_ETF_COSTE_REAL
+    return {
+        "fecha": v["fecha"],
+        "importe": importe,
+        "ganancia_realizada": ganancia,
+        "rentabilidad_%": ganancia / BITCOIN_ETF_COSTE_REAL * 100,
+    }
+
+
 def obtener_estado_bitcoin_etf():
     """
     Precio actual y variación del ETF de Bitcoin (IBIT) respecto al precio de compra,
     más histórico de precios de los últimos 6 meses para el gráfico desplegable.
+    Si el ETF ya se vendió (aparece en los movimientos del broker), devuelve la venta y no consulta precios.
     """
     resultado = {
         "precio_actual": None,
@@ -6784,7 +7046,12 @@ def obtener_estado_bitcoin_etf():
         "valor_actual_posicion": None,
         "ganancia_perdida": None,
         "historico": pd.DataFrame(),
+        "venta": None,
     }
+    venta = obtener_venta_bitcoin_etf()
+    if venta is not None:
+        resultado["venta"] = venta
+        return resultado
     if yf is None:
         return resultado
     try:
@@ -6928,6 +7195,29 @@ def _tab_concentracion_cartera(df_inv: pd.DataFrame, df_control: pd.DataFrame):
 def tarjeta_bitcoin_etf():
     """Tarjeta desplegable del Dashboard con precio actualizado y gráfico del ETF de Bitcoin (IBIT)."""
     estado = obtener_estado_bitcoin_etf()
+
+    venta = estado.get("venta")
+    if venta is not None:
+        color_venta = "positivo" if venta["ganancia_realizada"] >= 0 else "negativo"
+        with st.expander(
+            f"₿ {BITCOIN_ETF_NOMBRE} ({BITCOIN_ETF_TICKER}) — posición cerrada el {venta['fecha'].strftime('%d/%m/%Y')} "
+            f"({venta['rentabilidad_%']:+.2f}%)", expanded=False,
+        ):
+            v1, v2, v3, v4 = st.columns(4)
+            with v1:
+                tarjeta_kpi("Coste de compra", fmt(BITCOIN_ETF_COSTE_REAL), f"{BITCOIN_ETF_UNIDADES:,} unidades · {BITCOIN_ETF_FECHA_COMPRA.strftime('%d/%m/%Y')}", "normal")
+            with v2:
+                tarjeta_kpi("Importe de la venta", fmt(venta["importe"]), venta["fecha"].strftime("%d/%m/%Y"), "normal")
+            with v3:
+                tarjeta_kpi("Ganancia realizada", fmt(venta["ganancia_realizada"]), "Venta menos coste de compra", color_venta)
+            with v4:
+                tarjeta_kpi("Rentabilidad", f"{venta['rentabilidad_%']:+.2f}%", "Sobre el coste de compra", color_venta)
+            st.caption(
+                "Posición vendida: la ganancia es la real según los movimientos del broker. Los ingresos del fondo por "
+                f"Bitcoin en las pantallas de deuda y dashboard siguen devengándose al {TASA_ANUAL_BITCOIN * 100:.0f} % anual hasta la fecha final de la inversión."
+            )
+        return
+
     precio_actual = estado.get("precio_actual")
     variacion = estado.get("variacion_%")
     valor_actual = estado.get("valor_actual_posicion")
@@ -6961,6 +7251,7 @@ def tarjeta_bitcoin_etf():
 
 def dashboard_financiero():
     df_inv, df_cal, df_control = cargar_excel_completo()
+    mostrar_avisos_activos_fijos(df_inv)
 
 
     st.markdown("## Dashboard financiero")
@@ -6981,7 +7272,7 @@ def dashboard_financiero():
     col_activo, col_periodo_1, col_periodo_2, col_chaparro, col_prorrateo, col_devengo = st.columns([1.2, 0.8, 0.8, 1.0, 1.0, 1.0])
     vista_dashboard = col_activo.selectbox(
         "Dashboard",
-        ["General", "Notas", "Fútbol", "MotoClick", "Paraguay", "Bolivia", "Bitcoin", "Aspira Capital", "Préstamo"],
+        ["General", "Notas"] + [etiqueta_activo(c) for c in claves_activos_fijos(df_inv)] + ["Préstamo"],
         key="dashboard_vista_activo",
     )
     incluir_chaparro = col_chaparro.checkbox(
@@ -7229,7 +7520,7 @@ def centro_control_inversiones():
     st.caption("Consulta profesional por filtros.")
     hoy = pd.Timestamp.today().normalize()
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    activo = c1.selectbox("Activo", ["Todos", "notas", "paraguay", "bolivia", "motoclick", "futbol", "bitcoin", "otros"])
+    activo = c1.selectbox("Activo", ["Todos", "notas"] + claves_activos_fijos(df_inv) + ["prestamo", "otros"])
     inversores = ["Todos"] + sorted([x for x in df_inv.get("inversor", pd.Series(dtype=str)).dropna().astype(str).unique() if x.strip()])
     inversor = c2.selectbox("Inversor", inversores)
     anio_cc = int(c3.number_input("Año", min_value=2020, max_value=2100, value=hoy.year, key="cc_anio"))
@@ -12898,31 +13189,11 @@ def generar_extractos(df_inv: pd.DataFrame, modo: str, inversor_elegido: str | N
                 # Hasta el 31/01/2026 cobraban al 5%; 01/02/2026-30/06/2026 al 7.5%;
                 # desde el 01/07/2026 al 10%. Se aplica siempre, independientemente
                 # de cuándo empezó la inversión ni de lo que diga interes_inversor_anual.
-                INVERSORES_TRAMO = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
                 inversor_upper = str(row.get("inversor", "")).strip().upper()
+                tramos_inv = tramos_de_inversor(inversor_upper)
 
-                if inversor_upper in INVERSORES_TRAMO:
-                    fin_tramo1    = datetime(2026, 1, 31)
-                    inicio_tramo2 = datetime(2026, 2, 1)
-                    fin_tramo2    = datetime(2026, 6, 30)
-                    inicio_tramo3 = datetime(2026, 7, 1)
-                    interes_mes = 0.0
-                    # Tramo 1: días del mes que caen en o antes del 31/01/2026 → 5%
-                    if inicio_calc <= fin_tramo1:
-                        fin_t1  = min(fin_calc, fin_tramo1)
-                        dias_t1 = (fin_t1 - inicio_calc).days + 1
-                        interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes, 2)
-                    # Tramo 2: días entre 01/02/2026 y 30/06/2026 → 7.5%
-                    ini_t2 = max(inicio_calc, inicio_tramo2)
-                    fin_t2 = min(fin_calc, fin_tramo2)
-                    if ini_t2 <= fin_t2:
-                        dias_t2 = (fin_t2 - ini_t2).days + 1
-                        interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes, 2)
-                    # Tramo 3: días desde el 01/07/2026 → 10%
-                    if fin_calc >= inicio_tramo3:
-                        ini_t3  = max(inicio_calc, inicio_tramo3)
-                        dias_t3 = (fin_calc - ini_t3).days + 1
-                        interes_mes += round((capital * 0.10 / 12) * dias_t3 / dias_mes, 2)
+                if tramos_inv:
+                    interes_mes = interes_con_tramos(capital, inicio_calc, fin_calc, dias_mes, tramos_inv, redondear=True)
                 else:
                     interes_mes = round((capital * interes_base / 12) * dias / dias_mes, 2)
                 mes_fecha = datetime(actual.year, actual.month, 1)
@@ -13014,7 +13285,12 @@ def _tab_importar_extracto_banco(df_control: pd.DataFrame):
         "se duplican."
     )
 
-    archivo = st.file_uploader("Extracto del broker (.xlsx)", type=["xlsx"], key="importar_extracto_banco_file")
+    _ui_limpiar_duplicados_movimientos_banco()
+
+    # La clave del uploader cambia después de cada guardado para vaciarlo: así el mismo archivo no
+    # se queda cargado y no se puede volver a guardar pulsando el botón otra vez.
+    n_uploader = st.session_state.get("_banco_uploader_n", 0)
+    archivo = st.file_uploader("Extracto del broker (.xlsx)", type=["xlsx"], key=f"importar_extracto_banco_file_{n_uploader}")
     if archivo is None:
         return
 
@@ -13025,13 +13301,16 @@ def _tab_importar_extracto_banco(df_control: pd.DataFrame):
         return
 
     df_nuevo = matchear_movimientos_con_notas(df_nuevo, df_control)
+    # Orden de cada movimiento entre los idénticos del mismo archivo (0, 1, 2...): permite
+    # distinguir dos movimientos idénticos legítimos de un movimiento importado dos veces.
+    df_nuevo["ocurrencia"] = df_nuevo.groupby("id_movimiento").cumcount()
 
-    ya_importados = _leer_movimientos_banco_cached()
-    ids_ya_importados = (
-        set(ya_importados["id_movimiento"].astype(str))
-        if not ya_importados.empty and "id_movimiento" in ya_importados.columns else set()
-    )
-    df_nuevo["ya_importado"] = df_nuevo["id_movimiento"].isin(ids_ya_importados)
+    claves_ya_importadas = _claves_movimientos_banco(_leer_movimientos_banco_cached())
+    claves_ya_importadas |= st.session_state.get("_banco_claves_guardadas", set())
+    df_nuevo["ya_importado"] = [
+        (i, int(o)) in claves_ya_importadas
+        for i, o in zip(df_nuevo["id_movimiento"].astype(str), df_nuevo["ocurrencia"])
+    ]
 
     n_nuevos = int((~df_nuevo["ya_importado"]).sum())
     n_repetidos = int(df_nuevo["ya_importado"].sum())
@@ -13079,6 +13358,25 @@ def _tab_importar_extracto_banco(df_control: pd.DataFrame):
             st.error("No se pudo leer el Excel actual para guardar.")
             return
 
+        # Segunda comprobación con la lectura FRESCA del Excel (la de arriba puede venir de caché
+        # o de una copia de Drive que todavía no refleja un guardado anterior).
+        existente_fresco = hojas.get(HOJA_MOVIMIENTOS_BANCO)
+        claves_frescas = set()
+        if existente_fresco is not None and not existente_fresco.empty:
+            ef = existente_fresco.copy()
+            ef.columns = [str(c).strip().lower() for c in ef.columns]
+            claves_frescas = _claves_movimientos_banco(deduplicar_lotes_movimientos_banco(ef))
+        claves_frescas |= st.session_state.get("_banco_claves_guardadas", set())
+        df_nuevo["ya_importado"] = [
+            (i, int(o)) in claves_frescas
+            for i, o in zip(df_nuevo["id_movimiento"].astype(str), df_nuevo["ocurrencia"])
+        ]
+        n_nuevos = int((~df_nuevo["ya_importado"]).sum())
+        if n_nuevos == 0:
+            st.info("Estos movimientos ya estaban guardados: no se ha añadido nada.")
+            st.session_state["_banco_uploader_n"] = n_uploader + 1
+            return
+
         df_guardar = df_nuevo[~df_nuevo["ya_importado"]].copy()
         df_guardar["fecha_importacion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         df_guardar = df_guardar.rename(columns={
@@ -13088,7 +13386,7 @@ def _tab_importar_extracto_banco(df_control: pd.DataFrame):
         df_guardar["fecha"] = df_guardar["fecha"].dt.strftime("%Y-%m-%d")
         columnas_guardar = [
             "id_movimiento", "fecha", "categoria", "monto", "cusip", "nota_asociada",
-            "emisor", "descripcion", "fecha_importacion",
+            "emisor", "descripcion", "fecha_importacion", "ocurrencia",
         ]
         df_guardar = df_guardar[columnas_guardar]
 
@@ -13101,8 +13399,41 @@ def _tab_importar_extracto_banco(df_control: pd.DataFrame):
 
         guardar_excel_completo_desde_hojas(hojas)
         st.cache_data.clear()
+        guardadas = st.session_state.get("_banco_claves_guardadas", set())
+        guardadas |= set(zip(df_guardar["id_movimiento"].astype(str), df_guardar["ocurrencia"].astype(int)))
+        st.session_state["_banco_claves_guardadas"] = guardadas
+        st.session_state["_banco_uploader_n"] = n_uploader + 1
         st.success(f"{n_nuevos} movimiento(s) guardado(s) en contabilidad.")
         st.rerun()
+
+
+def _ui_limpiar_duplicados_movimientos_banco():
+    """Muestra cuántos movimientos están guardados más de una vez en MOVIMIENTOS_BANCO y deja
+    eliminarlos (conserva el del lote más antiguo)."""
+    crudo = _leer_movimientos_banco_crudo_cached()
+    if crudo is None or crudo.empty or "id_movimiento" not in crudo.columns:
+        return
+    n_dup = len(crudo) - len(deduplicar_lotes_movimientos_banco(crudo))
+    if n_dup <= 0:
+        return
+    with st.expander(f"⚠️ {n_dup} movimiento(s) guardados más de una vez", expanded=False):
+        st.caption(
+            "El panel de contabilidad ya los ignora al sumar. Si quieres, puedes borrarlos de la hoja "
+            "MOVIMIENTOS_BANCO: se conserva la primera copia de cada movimiento."
+        )
+        confirmar = st.checkbox("Entiendo que se reescribirá la hoja MOVIMIENTOS_BANCO", key="confirmar_limpiar_duplicados_banco")
+        if st.button(f"🧹 Eliminar {n_dup} duplicado(s)", disabled=not confirmar, key="btn_limpiar_duplicados_banco"):
+            hojas = leer_todas_las_hojas_excel()
+            existente = hojas.get(HOJA_MOVIMIENTOS_BANCO) if hojas else None
+            if existente is None or existente.empty:
+                st.error("No se pudo leer la hoja MOVIMIENTOS_BANCO.")
+                return
+            existente.columns = [str(c).strip().lower() for c in existente.columns]
+            hojas[HOJA_MOVIMIENTOS_BANCO] = deduplicar_lotes_movimientos_banco(existente)
+            guardar_excel_completo_desde_hojas(hojas)
+            st.cache_data.clear()
+            st.success(f"{n_dup} duplicado(s) eliminado(s).")
+            st.rerun()
 
 
 def _tab_dashboard_contabilidad():
@@ -13210,6 +13541,54 @@ def seccion_contabilidad_banco():
         _tab_importar_extracto_banco(df_control)
 
 
+def _ui_tramos_tasa():
+    """Muestra los tramos de tasa que usan los extractos y permite crear la hoja TRAMOS_TASA."""
+    hay_hoja = False
+    try:
+        d = _leer_tramos_tasa_cached()
+        hay_hoja = d is not None and not d.empty and {"inversor", "tasa_anual"}.issubset(d.columns)
+    except Exception:
+        pass
+    tramos = obtener_tramos_tasa()
+    with st.expander("📐 Tramos de tasa por inversor" + ("" if hay_hoja else " (valores por defecto)"), expanded=False):
+        filas = []
+        for inv, lista in sorted(tramos.items()):
+            for ini, fin, tasa in lista:
+                filas.append({
+                    "Inversor": inv,
+                    "Desde": "" if ini <= _FECHA_MIN_TRAMOS else ini.strftime("%d/%m/%Y"),
+                    "Hasta": "" if fin >= _FECHA_MAX_TRAMOS else fin.strftime("%d/%m/%Y"),
+                    "Tasa anual": f"{tasa * 100:.2f} %",
+                })
+        st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+        if hay_hoja:
+            st.caption("Fuente: hoja TRAMOS_TASA del Excel. Edítala ahí para cambiar un tramo; los extractos y el pago a inversores la leen.")
+        else:
+            st.caption(
+                "Todavía no existe la hoja TRAMOS_TASA: se usan los tramos de siempre. Créala para poder "
+                "editarlos desde el Excel sin tocar el código."
+            )
+            if st.button("Crear hoja TRAMOS_TASA con estos valores", key="btn_crear_hoja_tramos"):
+                hojas = leer_todas_las_hojas_excel()
+                if not hojas:
+                    st.error("No se pudo leer el Excel actual para guardar.")
+                else:
+                    salida = [
+                        {
+                            "inversor": inv,
+                            "fecha_inicio": "" if ini <= _FECHA_MIN_TRAMOS else ini.strftime("%d/%m/%Y"),
+                            "fecha_fin": "" if fin >= _FECHA_MAX_TRAMOS else fin.strftime("%d/%m/%Y"),
+                            "tasa_anual": tasa,
+                        }
+                        for inv, lista in sorted(tramos.items()) for ini, fin, tasa in lista
+                    ]
+                    hojas[HOJA_TRAMOS_TASA] = pd.DataFrame(salida)
+                    guardar_excel_completo_desde_hojas(hojas)
+                    st.cache_data.clear()
+                    st.success("Hoja TRAMOS_TASA creada.")
+                    st.rerun()
+
+
 def seccion_extractos():
     df_inv, _, _ = cargar_excel_completo()
     st.header("📤 Extractos")
@@ -13221,6 +13600,8 @@ def seccion_extractos():
     c1, c2 = st.columns(2)
     anio = int(c1.number_input("Año", 2020, 2100, pd.Timestamp.today().year, key="ext_anio"))
     mes  = int(c2.number_input("Mes", 1, 12, pd.Timestamp.today().month, key="ext_mes"))
+
+    _ui_tramos_tasa()
 
     st.divider()
 
@@ -14350,7 +14731,8 @@ def _intereses_jep_mes(df_inv, anio, mes):
     return total, por_grupo
 
 
-def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fecha_inicio: pd.Timestamp) -> pd.DataFrame:
+def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fecha_inicio: pd.Timestamp,
+                         activos_excluidos=None) -> pd.DataFrame:
     """
     Evolución mes a mes de la deuda con Jordi Chaparro.
     RESTA: beneficio fijos (Paraguay/Motoclick/Futbol/Bolivia) + beneficio notas cuenta JORDI
@@ -14373,9 +14755,16 @@ def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fec
         "paraguay": "Paraguay", "motoclick": "MotoClick", "futbol": "Fútbol",
         "bolivia": "Bolivia", "bitcoin": "Bitcoin", "aspira": "Aspira Capital",
     }
+    # Activos cuyo ingreso no cobra Jordi (p. ej. Bitcoin, que se vende en la cuenta del broker): no
+    # reducen su deuda. Por defecto DEUDA_ACTIVOS_EXCLUIDOS_POR_DEFECTO; se elige en la pantalla.
+    excluidos = {
+        str(a).strip().lower()
+        for a in (DEUDA_ACTIVOS_EXCLUIDOS_POR_DEFECTO if activos_excluidos is None else activos_excluidos)
+    }
     ACTIVOS_FIJOS = [
         (ETIQUETAS_CONOCIDAS.get(clave, clave.title()), clave, tasa)
         for clave, tasa in lista_activos_fijos(df_inv)
+        if clave not in excluidos
     ]
 
     while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
@@ -14580,7 +14969,7 @@ este esquema exacto:
 
 {{
   "tipo_operacion": "NUEVA" | "CANCELADA" | "REINVERSION",
-  "tipo_inversion": "nota" | "paraguay" | "motoclick" | "futbol" | "bolivia" | "bitcoin" | "otro" o null,
+  "tipo_inversion": "nota" | "paraguay" | "motoclick" | "futbol" | "bolivia" | "bitcoin" | "aspira" | "aeropostal" | "nexus" | "otro" o null,
   "numero_nota": number o null (solo si tipo_inversion es "nota"),
   "nombre_activo": string o null (solo si tipo_inversion NO es "nota"),
   "fecha_inversion": "YYYY-MM-DD" o null,
@@ -14648,7 +15037,7 @@ def _prefill_wizard_nueva_inversion_desde_datos(datos: dict, df_inv: pd.DataFram
     aparezca precargado en el siguiente rerun. NO escribe nada en Excel — solo prellena inputs que
     se revisan y confirman a mano exactamente igual que si se hubieran escrito uno a uno."""
     tipo_inv = str(datos.get("tipo_inversion", "") or "").strip().lower()
-    opciones_tipo = ["nota", "paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "otro"]
+    opciones_tipo = ["nota"] + claves_activos_fijos(df_inv) + ["otro"]
     if tipo_inv in opciones_tipo:
         st.session_state["ni_tipo_inv_sel"] = tipo_inv
     elif tipo_inv:
@@ -14987,9 +15376,9 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
     col2, col3 = st.columns(2)
     with col2:
         tipo_inversion_sel = st.selectbox(
-            "Tipo de inversión", ["nota", "paraguay", "motoclick", "futbol", "bolivia", "bitcoin", "otro"],
+            "Tipo de inversión", ["nota"] + claves_activos_fijos(df_inv) + ["otro"],
             key="ni_tipo_inv_sel",
-            help="Aquí eliges si es una nota estructurada o un activo fijo (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin) — o cualquier otro tipo nuevo con 'otro'.",
+            help="Aquí eliges si es una nota estructurada o uno de los activos fijos que ya existen en el Excel (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin, Aspira Capital, Aeropostal, Nexus...) — o un tipo nuevo con 'otro'.",
         )
         tipo_inversion_final = st.text_input("Escribe el tipo de inversión", key="ni_tipo_inv_libre") if tipo_inversion_sel == "otro" else tipo_inversion_sel
     es_nota = tipo_inversion_final.strip().lower() == "nota"
@@ -15050,9 +15439,11 @@ def seccion_nueva_inversion(df_inv: pd.DataFrame, df_cal: pd.DataFrame, df_contr
             interes_nota_anual_pct = st.number_input("Cupón anual de la NOTA (%)", min_value=0.0, max_value=200.0, step=0.5, format="%.2f", key="ni_interes_nota",
                                                         help="El cupón real de la nota — este es el dato que faltaba en el asistente de IA. Debe coincidir con CONTROL_NOTAS/el PDF de la nota.")
         else:
-            tasas_fijas = {"paraguay": 15.0, "bolivia": 15.0, "motoclick": 25.0, "futbol": 15.0, "bitcoin": 20.0}
+            tasas_fijas = tasas_fijas_activos_pct(df_inv)
             default_tasa = tasas_fijas.get(tipo_inversion_final.strip().lower(), 0.0)
             interes_nota_anual_pct = st.number_input("Tasa anual que rinde el activo para la empresa (%)", min_value=0.0, max_value=200.0, step=0.5, format="%.2f", value=default_tasa, key="ni_interes_activo")
+            if interes_nota_anual_pct <= 0 and tipo_inversion_final.strip():
+                st.warning("Con la tasa en 0 el activo contará como capital pero no generará ingresos para la compañía. Pon la tasa que le cobra la empresa (p. ej. 25).")
 
     with st.expander("Campos adicionales del activo (metodo_calculo, activo_generador_interes, cuenta_cobro)", expanded=False):
         metodo_calculo_ops = _valores_conocidos_columna(df_inv, "metodo_calculo")
@@ -15295,6 +15686,7 @@ def seccion_deuda_jordi():
     st.header("🏦 Deuda con Jordi Chaparro")
 
     df_inv, df_cal, df_control = cargar_excel_completo()
+    mostrar_avisos_activos_fijos(df_inv)
 
     # Leer hoja DEUDA_JORDI
     try:
@@ -15311,8 +15703,17 @@ def seccion_deuda_jordi():
     st.caption("La deuda **baja** con: beneficio empresa de Paraguay + Motoclick + Fútbol + Bolivia + cobros de notas en cuenta JORDI.  "
                "La deuda **sube** con: intereses mensuales de JEP (todos sus activos) + reparto de dividendos.")
 
+    opciones_activos = [clave for clave, _ in lista_activos_fijos(df_inv)]
+    activos_excluidos = st.multiselect(
+        "Activos cuyo ingreso NO cobra Jordi (no reducen su deuda)",
+        opciones_activos,
+        default=[a for a in DEUDA_ACTIVOS_EXCLUIDOS_POR_DEFECTO if a in opciones_activos],
+        key="deuda_activos_excluidos",
+        help="Por ejemplo Bitcoin: el ETF se vende en la cuenta del broker, no en la de Jordi.",
+    )
+
     with st.spinner("Calculando evolución de la deuda..."):
-        df_evol = calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial, fecha_inicio)
+        df_evol = calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial, fecha_inicio, activos_excluidos=activos_excluidos)
 
     if df_evol.empty:
         st.warning("No hay datos para calcular la deuda.")
@@ -15587,7 +15988,7 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         df_notas_cap = df_inv[df_inv["tipo_inversion"].astype(str).str.lower().str.strip() == "nota"]
         cap_notas = capital_activo_en_fecha(df_notas_cap, hoy)
         lineas.append(f"  NOTAS: ${cap_notas:,.2f}")
-        for activo in ["futbol","paraguay","bolivia","motoclick","bitcoin"]:
+        for activo in claves_activos_fijos(df_inv):
             cap = capital_activo_en_fecha(df_inv, hoy, activo)
             lineas.append(f"  {activo.upper()}: ${cap:,.2f}")
 
@@ -15627,12 +16028,6 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         df_ext["capital_invertido"] = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
         df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-        INVERSORES_TRAMO = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
-        fin_tramo1 = datetime(2026, 1, 31)
-        inicio_tramo2 = datetime(2026, 2, 1)
-        fin_tramo2 = datetime(2026, 6, 30)
-        inicio_tramo3 = datetime(2026, 7, 1)
-
         def _calcular_intereses_mes(anio_m, mes_m):
             dias_mes_ext = ultimo_dia_mes(anio_m, mes_m)
             fecha_corte_ext = pd.Timestamp(datetime(anio_m, mes_m, dias_mes_ext))
@@ -15664,21 +16059,9 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
                 tasa = float(row["interes_inversor_anual"])
                 inv_upper = str(row.get("inversor","")).strip().upper()
 
-                if inv_upper in INVERSORES_TRAMO:
-                    interes_mes = 0.0
-                    if inicio_calc <= fin_tramo1:
-                        fin_t1 = min(fin_calc, fin_tramo1)
-                        dias_t1 = (fin_t1 - inicio_calc).days + 1
-                        interes_mes += round((capital * 0.05 / 12) * dias_t1 / dias_mes_ext, 2)
-                    ini_t2 = max(inicio_calc, inicio_tramo2)
-                    fin_t2 = min(fin_calc, fin_tramo2)
-                    if ini_t2 <= fin_t2:
-                        dias_t2 = (fin_t2 - ini_t2).days + 1
-                        interes_mes += round((capital * 0.075 / 12) * dias_t2 / dias_mes_ext, 2)
-                    if fin_calc >= inicio_tramo3:
-                        ini_t3 = max(inicio_calc, inicio_tramo3)
-                        dias_t3 = (fin_calc - ini_t3).days + 1
-                        interes_mes += round((capital * 0.10 / 12) * dias_t3 / dias_mes_ext, 2)
+                tramos_inv = tramos_de_inversor(inv_upper)
+                if tramos_inv:
+                    interes_mes = interes_con_tramos(capital, inicio_calc, fin_calc, dias_mes_ext, tramos_inv, redondear=True)
                 else:
                     interes_mes = round((capital * tasa / 12) * dias / dias_mes_ext, 2)
 
@@ -16220,12 +16603,6 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
         df_ext["capital_invertido"]      = pd.to_numeric(df_ext.get("capital_invertido"), errors="coerce").fillna(0)
         df_ext["interes_inversor_anual"] = pd.to_numeric(df_ext.get("interes_inversor_anual"), errors="coerce").fillna(0)
 
-        TRAMO_INV_E = {"ROBERTO VISCAFE", "CROWE BOLIVIA", "JR REAL ESTATE"}
-        FIN_T1_E    = datetime(2026, 1, 31)
-        INI_T2_E    = datetime(2026, 2, 1)
-        FIN_T2_E    = datetime(2026, 6, 30)
-        INI_T3_E    = datetime(2026, 7, 1)
-
         # Detectar inversor en la pregunta
         inversores_todos = df_ext["inversor"].dropna().unique().tolist()
         inv_detectado = None
@@ -16280,18 +16657,9 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
                 capital = float(row["capital_invertido"])
                 tasa    = float(row["interes_inversor_anual"])
                 inv_up  = str(row.get("inversor","")).strip().upper()
-                if inv_up in TRAMO_INV_E:
-                    interes = 0.0
-                    if ic <= FIN_T1_E:
-                        ft1 = min(fc, FIN_T1_E)
-                        interes += round((capital*0.05/12)*((ft1-ic).days+1)/dm_e, 2)
-                    it2 = max(ic, INI_T2_E)
-                    ft2 = min(fc, FIN_T2_E)
-                    if it2 <= ft2:
-                        interes += round((capital*0.075/12)*((ft2-it2).days+1)/dm_e, 2)
-                    if fc >= INI_T3_E:
-                        it3 = max(ic, INI_T3_E)
-                        interes += round((capital*0.10/12)*((fc-it3).days+1)/dm_e, 2)
+                tramos_inv_e = tramos_de_inversor(inv_up)
+                if tramos_inv_e:
+                    interes = interes_con_tramos(capital, ic, fc, dm_e, tramos_inv_e, redondear=True)
                 else:
                     interes = round((capital*tasa/12)*dias/dm_e, 2)
                 filas_e.append({
@@ -16475,7 +16843,7 @@ def preguntar_asistente_ia_fondo(pregunta: str, df_inv, df_cal, df_control,
 1. CAPTACIÓN: el fondo recibe capital de inversores. Cada inversor tiene una tasa de interés FIJA anual pactada (7.5%, 10%, 15%...) que se le paga siempre, TODOS LOS MESES, sobre su capital, pro-rata por días. Esa tasa es personal del inversor y NO depende de en qué activo esté invertido su dinero.
 
 2. DESPLIEGUE: ese capital se invierte en:
-- ACTIVOS FIJOS (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin): pagan al fondo un % fijo y conocido de antemano.
+- ACTIVOS FIJOS (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin, Aspira Capital, Aeropostal, Nexus y cualquier otro que aparezca en los totales): pagan al fondo un % fijo y conocido de antemano.
 - NOTAS ESTRUCTURADAS: cada nota tiene su propio cupón anual (ej. 37.5%), pero el cobro es CONDICIONAL: solo se cobra si en la fecha de OBSERVACIÓN el precio de TODAS las acciones subyacentes está por encima de la barrera de cupón (normalmente 40-60% del precio inicial). Si algún activo está por debajo, ese periodo NO se cobra nada de esa nota, pero el fondo SIGUE pagando al inversor su fijo igual — esa pérdida la asume el fondo, nunca el inversor.
 
 3. EL BENEFICIO (spread) es la diferencia entre lo que cobra el fondo del activo y lo que paga al inversor:
@@ -16560,7 +16928,7 @@ Se eligió variación fija en vez de margen a la barrera de contingencia (que se
 31. ANTES DE DECIR "NO TENGO ESE DATO", RELEE EL CONTEXTO. En particular, el acumulado histórico de cada activo fijo (ingresado por la compañía, pagado a inversores y beneficio, total y por año) SIEMPRE viene en el bloque "TOTALES HISTÓRICOS POR ACTIVO FIJO — ACUMULADO DESDE EL INICIO", situado al principio del contexto. Preguntas como "¿cuánto ha cobrado la compañía de Paraguay desde el inicio?" se responden leyendo ese bloque, no estimando ni pidiendo permiso para calcular una aproximación.
 
 == TUS FUENTES DE DATOS EN EL CONTEXTO ==
-- TOTALES HISTÓRICOS POR ACTIVO FIJO: acumulado desde el inicio (ingresado, pagado a inversores y beneficio), total y desglosado por año, para Paraguay, MotoClick, Fútbol, Bolivia y Bitcoin. Es tu única fuente para cualquier pregunta de "desde el inicio" o "en total" sobre un activo fijo.
+- TOTALES HISTÓRICOS POR ACTIVO FIJO: acumulado desde el inicio (ingresado, pagado a inversores y beneficio), total y desglosado por año, para cada activo fijo del Excel (Paraguay, MotoClick, Fútbol, Bolivia, Bitcoin, Aspira Capital, Aeropostal, Nexus...). Es tu única fuente para cualquier pregunta de "desde el inicio" o "en total" sobre un activo fijo.
 - CALENDARIO NOTAS: fechas y montos de cobro ya calculados con la periodicidad correcta.
 - ESTADO DE RIESGO DE NOTAS: precio actual vs barrera, por nota y ticker.
 - INTERESES A PAGAR A INVERSORES / EXTRACTO: pagos ya calculados con la lógica de extractos (solo NUEVA/CANCELADA, reinversiones excluidas del pago pero no del capital activo).
