@@ -4217,8 +4217,8 @@ def _notas_cerradas_por_call(df_inv, fecha_corte):
     """Notas que se dan por cerradas por call (motivo 'call' o 'call final') a una fecha de corte.
 
     Una nota se considera cerrada solo si tiene al menos una fila marcada call/call final Y TODAS
-    sus filas no canceladas tienen fecha_final_inversion <= fecha_corte. Así, un traspaso o un call
-    parcial (quedan otras filas de la nota con capital activo) NO cierra la nota entera.
+    sus filas no canceladas tienen fecha_final_inversion <= fecha_corte. Así, un call parcial
+    (quedan otras filas de la nota con capital activo) NO cierra la nota entera.
     """
     cerradas = set()
     if df_inv is None or "nombre_activo" not in df_inv.columns or "motivo" not in df_inv.columns:
