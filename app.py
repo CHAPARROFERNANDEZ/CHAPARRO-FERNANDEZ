@@ -62,7 +62,7 @@ HOJA_TRAMOS_TASA = "TRAMOS_TASA"
 
 # Activos fijos cuyo ingreso NO entra en la cuenta de Jordi y que, por tanto, no deben reducir su
 # deuda en la pantalla "Deuda con Jordi". Se puede cambiar desde la propia pantalla.
-DEUDA_ACTIVOS_EXCLUIDOS_POR_DEFECTO = ("bitcoin",)
+DEUDA_ACTIVOS_EXCLUIDOS_POR_DEFECTO = ("bitcoin", "nexus")
 
 TASA_ANUAL_FUTBOL = 0.15
 TASA_ANUAL_MOTOCLICK = 0.25
