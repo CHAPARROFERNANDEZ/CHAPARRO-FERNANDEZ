@@ -4213,6 +4213,29 @@ def extraer_numero_nota(nombre_activo):
     return int(match.group(1)) if match else pd.NA
 
 
+def _notas_cerradas_por_call(df_inv, fecha_corte):
+    """Notas que se dan por cerradas por call (motivo 'call' o 'call final') a una fecha de corte.
+
+    Una nota se considera cerrada solo si tiene al menos una fila marcada call/call final Y TODAS
+    sus filas no canceladas tienen fecha_final_inversion <= fecha_corte. Así, un traspaso o un call
+    parcial (quedan otras filas de la nota con capital activo) NO cierra la nota entera.
+    """
+    cerradas = set()
+    if df_inv is None or "nombre_activo" not in df_inv.columns or "motivo" not in df_inv.columns:
+        return cerradas
+    d = df_inv.copy()
+    d["_motivo_n"] = d["motivo"].astype(str).str.lower().str.strip()
+    d["_ff_n"] = pd.to_datetime(d["fecha_final_inversion"], errors="coerce")
+    d["_nota_n"] = d["nombre_activo"].apply(extraer_numero_nota)
+    if "tipo_operacion" in d.columns:
+        d = d[d["tipo_operacion"].astype(str).str.strip().str.lower() != "cancelada"]
+    for nota_num, grupo in d[d["_nota_n"].notna()].groupby("_nota_n"):
+        tiene_call = grupo["_motivo_n"].isin(["call", "call final"]).any()
+        if tiene_call and (grupo["_ff_n"].notna() & (grupo["_ff_n"] <= fecha_corte)).all():
+            cerradas.add(int(nota_num))
+    return cerradas
+
+
 def filtrar_notas(df_base: pd.DataFrame) -> pd.DataFrame:
     trabajo = df_base.copy()
     if "tipo_inversion" in trabajo.columns:
@@ -11307,17 +11330,8 @@ def obtener_control_notas_activas(df_inv: pd.DataFrame, df_control: pd.DataFrame
     if df_control is None or df_control.empty or "nota" not in df_control.columns:
         return df_control
     hoy = pd.Timestamp.today().normalize()
-    notas_con_call = set()
-    if df_inv is not None and "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
-        motivo_normalizado = df_inv["motivo"].astype(str).str.lower().str.strip()
-        # "call" = llamada anticipada por el emisor. "call final" = vencimiento natural sin
-        # call previo, tratado igual que un call (capital reinvertido, nota cerrada).
-        notas_df = df_inv[motivo_normalizado.isin(["call", "call final"])].copy()
-        notas_df["fecha_final_inversion"] = pd.to_datetime(notas_df["fecha_final_inversion"], errors="coerce")
-        notas_df["nota_num"] = notas_df["nombre_activo"].apply(extraer_numero_nota)
-        for nota_num, grupo in notas_df.groupby("nota_num"):
-            if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= hoy)).all():
-                notas_con_call.add(int(nota_num))
+    # Una nota solo se cierra si TODAS sus filas no canceladas ya terminaron (ver _notas_cerradas_por_call).
+    notas_con_call = _notas_cerradas_por_call(df_inv, hoy)
     return df_control[~df_control["nota"].isin(notas_con_call)].copy() if notas_con_call else df_control
 
 
@@ -14536,15 +14550,7 @@ def _cobro_notas_jordi_mes(df_inv, df_cal, anio, mes):
     notas_con_pago_este_mes = set(pagos_mes["_nota"].dropna().astype(int).unique())
 
     # Notas ya llamadas (call o call final) a fecha de cierre de este mes: dejan de contar.
-    notas_llamadas = set()
-    if "nombre_activo" in df_inv.columns and "motivo" in df_inv.columns:
-        motivo_normalizado = df_inv["motivo"].astype(str).str.lower().str.strip()
-        llamadas_df = df_inv[motivo_normalizado.isin(["call", "call final"])].copy()
-        llamadas_df["fecha_final_inversion"] = pd.to_datetime(llamadas_df["fecha_final_inversion"], errors="coerce")
-        llamadas_df["nota_num"] = llamadas_df["nombre_activo"].apply(extraer_numero_nota)
-        for nota_num, grupo in llamadas_df.groupby("nota_num"):
-            if pd.notna(nota_num) and (grupo["fecha_final_inversion"].notna() & (grupo["fecha_final_inversion"] <= fecha_corte_mes)).all():
-                notas_llamadas.add(int(nota_num))
+    notas_llamadas = _notas_cerradas_por_call(df_inv, fecha_corte_mes)
 
     notas_jordi = df_inv[
         (df_inv["cuenta_cobro"].astype(str).str.strip().str.upper() == "JORDI") &
