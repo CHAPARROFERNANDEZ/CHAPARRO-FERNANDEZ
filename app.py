@@ -3080,7 +3080,8 @@ def capital_activo_en_fecha(df_base: pd.DataFrame, fecha_consulta, activo: Optio
 def calcular_intereses_acumulados_inversor(df_inv: pd.DataFrame, inversor: str, fecha_fin=None) -> dict:
     """
     Total de intereses generados por un inversor desde su primera posición hasta fecha_fin (hoy por defecto),
-    usando la misma lógica de extractos (solo NUEVA/CANCELADA, ignorando fecha_final_inversion en filas NUEVA).
+    usando la misma lógica de extractos (solo NUEVA/CANCELADA, ignorando fecha_final_inversion en filas NUEVA,
+    y con los tramos de tasa de Biscafe / Crowe Bolivia / JR Real Estate, igual que generar_extractos).
     Devuelve total acumulado, capital activo hoy y tasa media ponderada.
     """
     fecha_fin = pd.Timestamp(fecha_fin).normalize() if fecha_fin is not None else pd.Timestamp.today().normalize()
@@ -3102,6 +3103,7 @@ def calcular_intereses_acumulados_inversor(df_inv: pd.DataFrame, inversor: str, 
         return {"total_intereses": 0.0, "capital_activo": 0.0, "tasa_media": 0.0, "fecha_inicio": None}
 
     total_intereses = 0.0
+    tramos_inv = tramos_de_inversor(inversor.strip().upper())
     f_iter = pd.Timestamp(fecha_inicio_global.year, fecha_inicio_global.month, 1)
     while f_iter <= fecha_fin:
         dias_m = ultimo_dia_mes(f_iter.year, f_iter.month)
@@ -3122,7 +3124,10 @@ def calcular_intereses_acumulados_inversor(df_inv: pd.DataFrame, inversor: str, 
             if inicio_calc > fin_calc:
                 continue
             dias = (fin_calc - inicio_calc).days + 1
-            total_intereses += row["capital_invertido"] * row["interes_inversor_anual"] / 12 * dias / dias_m
+            if tramos_inv:
+                total_intereses += interes_con_tramos(row["capital_invertido"], inicio_calc, fin_calc, dias_m, tramos_inv, redondear=True)
+            else:
+                total_intereses += row["capital_invertido"] * row["interes_inversor_anual"] / 12 * dias / dias_m
         f_iter += pd.DateOffset(months=1)
 
     capital_activo = capital_activo_en_fecha(df_inv[df_inv["inversor"].astype(str).str.strip().str.upper() == inversor.strip().upper()], fecha_fin)
@@ -3629,7 +3634,7 @@ def preparar_extracto_privado_inversor(contenido_bytes: bytes) -> bytes:
 
 def construir_historial_mensual_inversor(df_inv: pd.DataFrame, inversor: str, fecha_fin=None) -> list:
     """Desglose mes a mes (capital activo ese mes e interés generado ese mes) para UN inversor,
-    usando la misma lógica de extractos (solo NUEVA/CANCELADA). No revela en qué activo está
+    usando la misma lógica de extractos (solo NUEVA/CANCELADA, con los tramos de tasa). No revela en qué activo está
     invertido el capital — solo capital e interés, que es toda la información a la que un
     inversor tiene derecho a acceder sobre sí mismo.
     """
@@ -3652,6 +3657,7 @@ def construir_historial_mensual_inversor(df_inv: pd.DataFrame, inversor: str, fe
         return []
 
     historial = []
+    tramos_inv = tramos_de_inversor(inversor.strip().upper())
     f_iter = pd.Timestamp(fecha_inicio_global.year, fecha_inicio_global.month, 1)
     while f_iter <= fecha_fin:
         dias_m = ultimo_dia_mes(f_iter.year, f_iter.month)
@@ -3674,7 +3680,10 @@ def construir_historial_mensual_inversor(df_inv: pd.DataFrame, inversor: str, fe
             if inicio_calc > fin_calc:
                 continue
             dias = (fin_calc - inicio_calc).days + 1
-            interes_mes += row["capital_invertido"] * row["interes_inversor_anual"] / 12 * dias / dias_m
+            if tramos_inv:
+                interes_mes += interes_con_tramos(row["capital_invertido"], inicio_calc, fin_calc, dias_m, tramos_inv, redondear=True)
+            else:
+                interes_mes += row["capital_invertido"] * row["interes_inversor_anual"] / 12 * dias / dias_m
             if inicio_mes <= fi_dt <= fin_mes or fi_dt <= inicio_mes:
                 if row["tipo_operacion"] != "cancelada" or pd.isna(ff) or ff.to_pydatetime() >= inicio_mes:
                     capital_mes += row["capital_invertido"]
@@ -4108,6 +4117,16 @@ def seccion_portal_inversor(nombre_inversor: str):
 
 
 
+def _detalle_activo_mes_ajustado(df_base: pd.DataFrame, activo: str, tasa_anual: "float | None", anio: int, mes: int) -> pd.DataFrame:
+    """detalle_activo_mes + el mismo ajuste por movimientos de MotoClick que aplica el Dashboard
+    (ajustar_ingreso_motoclick). Para el resto de activos es idéntico a detalle_activo_mes.
+    Así los totales "desde el inicio" coinciden con el Dashboard y con el cierre."""
+    detalle = detalle_activo_mes(df_base, activo, tasa_anual, anio, mes)
+    if not detalle.empty and str(activo).strip().lower() == "motoclick":
+        detalle = ajustar_ingreso_motoclick(detalle.assign(activo="motoclick"), df_base, anio, mes)
+    return detalle
+
+
 def total_pagado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: float) -> float:
     df_activo = filtrar_activo(df_base, activo)
     if df_activo.empty:
@@ -4119,7 +4138,7 @@ def total_pagado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_an
     total = 0.0
     anio, mes = fecha_min.year, fecha_min.month
     while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
-        detalle = detalle_activo_mes(df_base, activo, tasa_anual, anio, mes)
+        detalle = _detalle_activo_mes_ajustado(df_base, activo, tasa_anual, anio, mes)
         if not detalle.empty:
             total += detalle["pago_inversor_mes"].sum()
         mes += 1
@@ -4140,7 +4159,7 @@ def total_ingresado_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa
     total = 0.0
     anio, mes = fecha_min.year, fecha_min.month
     while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
-        detalle = detalle_activo_mes(df_base, activo, tasa_anual, anio, mes)
+        detalle = _detalle_activo_mes_ajustado(df_base, activo, tasa_anual, anio, mes)
         if not detalle.empty:
             total += detalle["ingreso_bruto"].sum()
         mes += 1
@@ -4156,7 +4175,7 @@ def totales_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: 
     desglose por año.
 
     Usa exactamente la misma fuente y la misma lógica que total_ingresado_activo_desde_inicio()
-    y total_pagado_activo_desde_inicio() (detalle_activo_mes), pero en UNA sola pasada en vez de
+    y total_pagado_activo_desde_inicio() (detalle_activo_mes con el ajuste de MotoClick), pero en UNA sola pasada en vez de
     dos, y devolviendo además el detalle por año. Sirve para alimentar el contexto del asistente
     IA sin duplicar el coste de cálculo."""
     vacio = {"ingresado": 0.0, "pagado": 0.0, "beneficio": 0.0, "por_anio": {}, "desde": None}
@@ -4172,7 +4191,7 @@ def totales_activo_desde_inicio(df_base: pd.DataFrame, activo: str, tasa_anual: 
     por_anio = {}
     anio, mes = int(fecha_min.year), int(fecha_min.month)
     while (anio < hoy.year) or (anio == hoy.year and mes <= hoy.month):
-        detalle = detalle_activo_mes(df_base, activo, tasa_anual, anio, mes)
+        detalle = _detalle_activo_mes_ajustado(df_base, activo, tasa_anual, anio, mes)
         if not detalle.empty:
             ing_mes = float(detalle["ingreso_bruto"].sum())
             pag_mes = float(detalle["pago_inversor_mes"].sum())
@@ -16211,7 +16230,11 @@ def construir_contexto_ia_fondo(pregunta: str, df_inv, df_cal, df_control, fecha
                     if inicio_calc_r > fin_calc_r:
                         continue
                     dias_r = (fin_calc_r - inicio_calc_r).days + 1
-                    v = round(float(r["capital_invertido"]) * float(r["interes_inversor_anual"]) / 12 * dias_r / dias_m, 2)
+                    tramos_r = tramos_de_inversor(str(r["inversor"]).strip().upper())
+                    if tramos_r:
+                        v = round(interes_con_tramos(float(r["capital_invertido"]), inicio_calc_r, fin_calc_r, dias_m, tramos_r, redondear=True), 2)
+                    else:
+                        v = round(float(r["capital_invertido"]) * float(r["interes_inversor_anual"]) / 12 * dias_r / dias_m, 2)
                     total_devengado_no_pagado += v
                     por_inv_devengado[r["inversor"]] = por_inv_devengado.get(r["inversor"], 0) + v
                 f_iter += pd.DateOffset(months=1)
