@@ -14699,10 +14699,10 @@ def _transferencias_jordi_mes(df_transf, anio, mes):
     return total, por_item
 
 
-def _intereses_jep_mes(df_inv, anio, mes):
+def _intereses_jep_mes_dias_reales(df_inv, anio, mes):
     """
     Intereses devengados a JEP en el mes, agrupados por tipo de activo.
-    Lógica pro-rata días igual que el extracto.
+    Cuenta los días en que el dinero de JEP estuvo realmente invertido (lógica original; sirve para el desglose por tipo de activo).
     Devuelve (total, {grupo: importe})
     """
     dias_mes = ultimo_dia_mes(anio, mes)
@@ -14735,6 +14735,56 @@ def _intereses_jep_mes(df_inv, anio, mes):
             grupo = str(r.get("subtipo_inversion", r.get("nombre_activo", ""))).title()
         por_grupo[grupo] = por_grupo.get(grupo, 0) + interes
     return total, por_grupo
+
+
+def _intereses_jep_mes_extracto(df_inv, anio, mes):
+    """Total de intereses de JEP en el mes calculado EXACTAMENTE como su extracto (lo que se le paga).
+
+    Solo filas NUEVA y CANCELADA. Una NUEVA devenga hasta fin de mes ignorando su fecha_final (JEP cobra su tasa
+    aunque el dinero se reinvierta); una CANCELADA devenga hasta su fecha_final. Las REINVERSION no suman."""
+    dias_mes = ultimo_dia_mes(anio, mes)
+    inicio_mes = pd.Timestamp(anio, mes, 1)
+    fin_mes = pd.Timestamp(anio, mes, dias_mes)
+    jep = df_inv[df_inv["inversor"].astype(str).str.upper().str.strip() == "JEP"].copy()
+    jep["_fi"] = parsear_fecha_robusta(jep["fecha_inversion"])
+    jep["_ff"] = parsear_fecha_robusta(jep["fecha_final_inversion"])
+    tipo_op = jep["tipo_operacion"].astype(str).str.upper().str.strip()
+    jep = jep[tipo_op.isin(["NUEVA", "CANCELADA"])]
+    total = 0.0
+    for _, r in jep.iterrows():
+        fi, ff = r["_fi"], r["_ff"]
+        es_canc = str(r.get("tipo_operacion", "")).upper().strip() == "CANCELADA"
+        if pd.isna(fi) or fi > fin_mes:
+            continue
+        if es_canc and (pd.isna(ff) or ff < inicio_mes):
+            continue
+        ir = max(fi, inicio_mes)
+        fr = min(ff, fin_mes) if es_canc else fin_mes
+        if ir > fr:
+            continue
+        dias = (fr - ir).days + 1
+        cap = float(r.get("capital_invertido", 0))
+        tasa = pd.to_numeric(r.get("interes_inversor_anual", 0), errors="coerce")
+        tasa = 0.0 if pd.isna(tasa) else float(tasa)
+        total += round(cap * tasa / 12 * (dias / dias_mes), 2)
+    return total
+
+
+def _intereses_jep_mes(df_inv, anio, mes):
+    """
+    Intereses devengados a JEP en el mes, agrupados por tipo de activo.
+    El TOTAL es el del extracto de JEP (lo que se le paga). El desglose por grupo muestra dónde está su dinero;
+    si el extracto paga más que los días invertidos (por ejemplo entre un call y la reinversión), la diferencia
+    sale como una línea aparte para que el desglose siga sumando el total.
+    Devuelve (total, {grupo: importe})
+    """
+    total_dias, por_grupo = _intereses_jep_mes_dias_reales(df_inv, anio, mes)
+    total_ext = _intereses_jep_mes_extracto(df_inv, anio, mes)
+    dif = round(total_ext - total_dias, 2)
+    if abs(dif) >= 0.05:
+        por_grupo = dict(por_grupo)
+        por_grupo["Días sin invertir (entre un call y la reinversión): el extracto de JEP los paga"] = dif
+    return total_ext, por_grupo
 
 
 def calcular_deuda_jordi(df_inv, df_cal, df_control, capital_inicial: float, fecha_inicio: pd.Timestamp,
